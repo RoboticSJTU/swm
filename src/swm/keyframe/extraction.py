@@ -42,14 +42,14 @@ def extract_keyframes_from_frames(frames_root, keyframes_root, smooth_k=5, merge
             return
 
         n = len(imgs)
-        # # 人拍。由于镜头晃，所以窗口小一些。
-        # window_step = 10 + 10 * max(0, (n - 1) // 500)
+        # 人拍。由于镜头晃，所以窗口小一些。
+        window_step = 10 + 10 * max(0, (n - 1) // 500)
 
         # droid
         # window_step = 10 + 10 * max(0, (n - 1) // 200)
 
-        # agibot
-        window_step = 20 + 20 * max(0, (n - 1) // 500)
+        # # agibot
+        # window_step = 20 + 20 * max(0, (n - 1) // 500)
 
 
         window_step = min(90, window_step)
