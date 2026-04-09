@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+from robodm.utils.pddl.plan_reorder import plan_reorder
 
 fast_downward_path = Path(__file__).parent.parent.parent.parent.parent / "downward" / "fast-downward.py"
 def solve_pddl(domain_file, problem_file):
@@ -28,9 +29,12 @@ def solve_pddl(domain_file, problem_file):
             timeout=3000,
             cwd=domain_file.parent,
         )
+        plan_reorder(domain_file, problem_file, plan_file, plan_file)
+        
         return True
 
     except Exception as e:
         with open(error_file, "w", encoding="utf-8") as f:
             f.write(e.stdout)
         return False
+    

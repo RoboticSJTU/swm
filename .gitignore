@@ -18,10 +18,14 @@ eval_results/
 
 # fastdownward
 downward/
+test_pddl/
+
+# model
+siglip2-giant-opt-patch16-384/
+Qwen3-Reranker-0.6B/
 
 # else
-Qwen3-Reranker-0.6B/
-test_pddl/
 1.py
 gpt.py
 merged_domain.pddl
+.sii/
