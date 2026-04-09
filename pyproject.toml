@@ -1,0 +1,32 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swm"
+version = "0.1.0"
+description = "Learning a Symbolic World Model from Real-World Demonstrations for Generalizable Robot Task Planning."
+authors = [
+        { name = "Xiaoyunxiao", email = "xiaoyunxiao@sii.edu.cn"}
+
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+
+requires-python = ">=3.9"
+
+dependencies = [
+    "python-dotenv",
+    "openai",
+    "pyyaml",
+    "Pillow",
+    "numpy",
+    "json-repair",
+    "matplotlib"
+]
+
+[tool.setuptools.packages.find]
+where = ["src/"]

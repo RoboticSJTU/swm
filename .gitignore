@@ -1,0 +1,27 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.vscode/
+src/swm.egg-info/
+
+# data
+dataset/
+domain/
+mergy.py
+tasks/
+
+# results
+eval_results/
+
+# fastdownward
+downward/
+
+# else
+Qwen3-Reranker-0.6B/
+test_pddl/
+1.py
+gpt.py
+merged_domain.pddl

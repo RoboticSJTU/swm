@@ -1,0 +1,9 @@
+You are an expert in writing a PDDL domain and problem for a **single-armed**  robot to fully and correctly achieve the instruction. Using
+- an image of the initial scene.
+- Instruction: {instruction}
+
+MUST Output valid JSON without any markdown code block (e.g.,```json). 
+{{
+    "domain": "String format PDDL domain, not dict.",
+    "problem": "String format PDDL problem, not dict."
+}}

@@ -1,0 +1,37 @@
+You are an expert in evaluationg whether the candidate plan fully and correctly achieves the instruction at the level of logical end-state goals. Using:
+- an image of initial state
+- **Instruction: {instruction}** 
+- Reference plan: 
+{kf_plan}
+- Candidate plan: 
+{nl_plan}
+
+Evaluate PASS/FAIL. Return PASS iff Stage 1 passes AND Stage 2 passes.
+
+Stage 1: Goal Completeness Validation. 
+(1) Extract the minimal set of required goals from both the Instruction and the Reference plan, focusing only on final world-state conditions. 
+NOTE: Order-agnostic: Ignore narrative/temporal markers in the instruction/reference (e.g., “then/after/finally/last”). Only enforce ordering when it is required by executability preconditions (e.g., pick→place, open→put_in, turn_on→wash).
+(2) Express each goal as an atomic, checkable statement.
+(3) FAIL Stage 1 if any required goal is not satisfied by the end, or is satisfied but later undone/contradicted.
+
+Stage 2: Action Correctness Validation.
+Starting from the initial image state, simulate each step in sequence. FAIL Stage 2 if any step violates the rules below.
+2.1. Consistency Validation.
+- Hand state consistency: If a hand is holding o, then it cannot manipulate a different object with the same hand.(e.g., pick up a cup with the RIGHT hand, then open the microwave with the same hand - is invalid).
+- World state consistency: If the image clearly shows a contradictory fact (e.g., lid is on kettle but plan says “pick lid from counter”), FAIL. If something is not visible/uncertain, mark it as unknown and do NOT invent facts.
+- Commonsense consistency: Each action is commonsense consistent with the reference plan. Example: if the reference does "open kettle lid → fill," then filling via the spout without opening the lid is invalid.
+- Reference-plan hand transfers are optional: do not require explicit hand-switching if a single-hand execution is physically/spatially feasible and achieves the same end state.
+
+2.2. Physical Executability Validation.
+Verify whether each action is physically executable. Such as: 
+- Do not place an object without first picking it up.
+- Do not wash an object without turning on the faucet.
+- Do not start an appliance (e.g., microwave, dishwasher) without placing the object inside.
+- Do not put an object into a closed container.
+
+Output valid JSON without any markdown code block (e.g.,```json):
+{{
+  "reasoning": "a two-part analysis with the following structure:\\n1. Goal Completeness Validation. 2. Action Correctness Validation.",
+  "pass": true or false,
+  "feedback": "If pass=false: Briefly explain why. If pass=true: empty string."
+}}

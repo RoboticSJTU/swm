@@ -1,0 +1,285 @@
+You are an expert PDDL diagnostician and planning engineer specializing in debugging and repairing PDDL domains and problems for a Dual-armed robot. 
+Your task is to analyze previous failures, incorporate failure feedback, and rewrite the code to generate a fully correct and executable solution. 
+
+Inputs:
+- Instruction: {instruction_with_steps}
+- an image of the initial scene.
+- Previous failed attempt, including:
+  - failed domain
+  - failed problem
+  - planner output plan
+  - failure feedback
+
+You previously generated a solution that failed during evaluation. Here is the previous attempt:
+[Domain]
+{failed_domain}
+
+[Problem]
+{failed_problem}
+
+[Output from PDDL planner]
+{failed_plan}
+
+[Failure Feedback]
+{feedback}
+
+Strictly follow these rules.
+1. Syntax.
+- Use only PDDL 1.0 syntax (no when, forall, exists, conditional effects, etc.). Ensure valid and correct PDDL syntax and use only declared predicates.
+- Do NOT write :types (e.g., apple - object) or :requirements.
+
+2. Action naming.
+Unified slot order: verb[_<object>][_<direction>][_from_<source>][_<prep>_<target>][_with_<tool>], where [] denotes an optional slot used only when needed.
+- <object> denotes the object explicitly operated on by the robot hand or tool.
+- <direction> include left, right, forward, backward, up, and down. Treat particles such as turn_on, pull_out, and push_in as lexicalized verb forms rather than as the <direction> slot.
+- <prep> include in, on, under, into, and onto.
+- To improve action applicability:
+  - Do NOT use overly generic words such as object, thing, item, surface, container, area, location, or receptacle as <source> or <target>.
+  - Do NOT use appearance details such as color or material. Use place_in_bowl, not place_in_silver_bowl.
+
+A. Spatial Change: actions whose primary effect is to change spatial relations between entities (e.g., holding, in/on/under relations, insertion, removal, transfer).
+(1) Source-only
+- Name as: verb[_<object>]_from_<source>[_with_<tool>]
+- pick_from_<source> denotes the source’s default contact region: inside for containers, and top for canonical support surfaces such as tables, counters, desks, trays, floors, and shelves.
+- For a non-default region, encode it explicitly in the source phrase, e.g., pick_from_top_microwave, pull_out_from_under_table.
+- Use the immediate containing or supporting region as the source. If an object is inside a container on a table, use pick_from_<container> rather than pick_from_table.
+
+(2) Target-only.
+- Name as: verb[_<object>][_<direction>]_<prep>_<target>[_with_<tool>]
+- The target preposition follows the target’s default receiving region: use in_<target> for containers, and on_<target> for canonical support surfaces.
+- For a non-default target region, encode it explicitly in the target phrase, e.g., place_under_table, push_in_under_table.
+
+(3) Source-to-target. 
+- Name as: verb[_<object>]_from_<source>_<prep>_<target>[_with_<tool>]
+- Examples: pour_from_kettle_into_cup, dump_from_spoon_onto_plate.
+
+NOTE for Spatial Change:
+- Include <object> only when it is indispensable to the action semantics, precondition, or effect. Example: 
+  - remove_lid_from_pot must specify lid because the effect depends on removing the lid.
+  - fill_kettle_from_faucet must specify kettle because the effect is in_kettle.
+  - insert_key_into_drawer must specify key because the effect is key insertion rather than arbitrary placement.
+- **Otherwise, omit <object> to improve action applicability (e.g., pick_from_table, not pick_cup_from_table), and accordingly omit only the manipulated-object type predicates from the preconditions (e.g., omit (cup ?o), not (table ?t)).** 
+
+B. State Change: actions whose primary effect is to change the state of an entity (e.g., open/close, turn on/off, lock/unlock, deformation, cleaning).
+- Name as: verb_<object>_[with_<tool>]
+- Examples: open_drawer, turn_on_kettle, lock_drawer, fold_cloth, stir_bowl_with_spoon, wipe_counter_with_cloth, cut_apple_with_knife.
+- In rare cases, a prepositional phrase is lexicalized as fixed context rather than a target slot, e.g., wash_under_faucet
+
+3. Predicate usage.
+- Use specialized spatial binary predicates in_*/on_*/under_* (e.g., (on_table ?o ?t)), not generic in/on/under.
+- Use only the minimal set of predicates necessary for task completion. Do not introduce redundant predicates or semantically overlapping variants.
+- Omit the type predicate (hand ?h) unless it is necessary for disambiguation or the action semantics require it.
+
+4. Annotation.
+- In :predicates, each predicate must include a semicolon comment (e.g., (clear ?o) ; object ?o has nothing on it).
+- Each :action must have one single-line, human-readable sentence comment above it describing the action with abstract parameters, not instantiated names.
+- Correct: ; Pick up object ?o from table ?t with hand ?h. Incorrect: ; Pick up object from table with right hand.
+
+PDDL ACTION TEMPLATE (Adapt as needed to complete the specific task):
+**A. Spatial Change**
+(1) Source-only
+; Pick up object ?o from table ?t with hand ?h.
+(:action pick_from_table
+  :parameters (?h ?o ?t)
+  :precondition (and (hand_free ?h) (table ?t) (on_table ?o ?t))
+  :effect (and (holding ?h ?o) (not (hand_free ?h)) (not (on_table ?o ?t)))
+)
+
+; Pick up object ?o from the top of microwave ?m with hand ?h.
+(:action pick_from_top_microwave
+  :parameters (?h ?o ?m)
+  :precondition (and (hand_free ?h) (microwave ?m) (on_microwave ?o ?m))
+  :effect (and (holding ?h ?o) (not (hand_free ?h)) (not (on_microwave ?o ?m)))
+)
+
+; Pick up object ?o from pot ?p with hand ?h.
+(:action pick_from_pot
+  :parameters (?h ?o ?p)
+  :precondition (and (hand_free ?h) (pot ?p) (in_pot ?o ?p) (is_open ?p))
+  :effect (and (holding ?h ?o) (not (hand_free ?h)) (not (in_pot ?o ?p)))
+)
+
+; Remove lid ?l from pot ?p to open the pot with hand ?h.
+(:action remove_lid_from_pot
+  :parameters (?h ?l ?p)
+  :precondition (and (hand_free ?h) (lid ?l) (pot ?p) (on_pot ?l ?p) (is_closed ?p))
+  :effect (and (holding ?h ?l) (not (hand_free ?h)) (not (on_pot ?l ?p)) (not (is_closed ?p)) (is_open ?p))
+)
+
+; Pull object ?o out from under table ?t with hand ?h.
+(:action pull_out_from_under_table
+  :parameters (?h ?o ?t)
+  :precondition (and (hand_free ?h) (table ?t) (under_table ?o ?t) (not (is_pulled_out ?o)))
+  :effect (and (is_pulled_out ?o) (not (under_table ?o ?t)))
+)
+
+; Fill kettle ?k with water ?w from faucet ?f with hand ?h.
+(:action fill_kettle_from_faucet
+  :parameters (?h ?k ?f ?w)
+  :precondition (and (holding ?h ?k) (kettle ?k) (water ?w) (faucet ?f) (under_faucet ?k ?f) (in_faucet ?w ?f) (is_open ?k) (is_on ?f))
+  :effect (and (in_kettle ?w ?k))
+)
+
+; Scoop object ?o from pot ?p with spoon ?s held by hand ?h.
+(:action scoop_from_pot_with_spoon
+  :parameters (?h ?o ?p ?s)
+  :precondition (and (holding ?h ?s) (spoon ?s) (pot ?p) (in_pot ?o ?p) (is_open ?p))
+  :effect (and (in_spoon ?o ?s) (not (in_pot ?o ?p)))
+)
+
+(2) Target-only
+; Place lid ?l on pot ?p to close the pot with hand ?h.
+(:action place_lid_on_pot
+  :parameters (?h ?l ?p)
+  :precondition (and (holding ?h ?l) (lid ?l) (pot ?p) (is_open ?p))
+  :effect (and (hand_free ?h) (not (holding ?h ?l)) (on_pot ?l ?p) (is_closed ?p) (not (is_open ?p)))
+)
+
+; Place cap ?cp on bottle ?b with hand ?h.
+(:action place_cap_on_bottle
+  :parameters (?h ?cp ?b)
+  :precondition (and (holding ?h ?cp) (cap ?cp) (bottle ?b) (is_open ?b))
+  :effect (and (hand_free ?h) (not (holding ?h ?cp)) (on_bottle ?cp ?b) (is_closed ?b) (not (is_open ?b)))
+)
+
+; Insert key ?k into drawer ?d with hand ?h.
+(:action insert_key_into_drawer
+  :parameters (?h ?k ?d)
+  :precondition (and (holding ?h ?k) (key ?k) (drawer ?d))
+  :effect (and (hand_free ?h) (not (holding ?h ?k)) (inserted_in ?k ?d))
+)
+
+; Slide object ?o to the right on table ?t with hand ?h.
+(:action slide_right_on_table
+  :parameters (?h ?o ?t)
+  :precondition (and (hand_free ?h) (table ?t) (on_table ?o ?t))
+  :effect (and (is_slid_right ?o))
+)
+
+; Place box ?o into box ?b with hand ?h.
+(:action place_box_in_box
+  :parameters (?h ?o ?b)
+  :precondition (and (holding ?h ?o) (box ?o) (box ?b) (is_open ?b) (clear ?b))
+  :effect (and (hand_free ?h) (not (holding ?h ?o)) (in_box ?o ?b) (clear ?o) (not (clear ?b)))
+)
+
+; Place clip ?o into box ?b with hand ?h.
+(:action place_clip_in_box
+  :parameters (?h ?o ?b)
+  :precondition (and (holding ?h ?o) (clip ?o) (box ?b) (is_open ?b) (clear ?b))
+  :effect (and (hand_free ?h) (not (holding ?h ?o)) (in_box ?o ?b) (clear ?o))
+)
+
+(3) Source-to-target
+; Pour some boiled water ?w from kettle ?k into cup ?c with hand ?h.
+(:action pour_from_kettle_into_cup
+  :parameters (?h ?k ?w ?c)
+  :precondition (and (holding ?h ?k) (kettle ?k) (water ?w) (cup ?c) (in_kettle ?w ?k) (is_boiled ?w))
+  :effect (and (in_cup ?w ?c))
+)
+
+; Pour all milk ?m from milk carton ?mc into cup ?c with hand ?h.
+(:action pour_from_milk_carton_into_cup
+  :parameters (?h ?mc ?m ?c)
+  :precondition (and (holding ?h ?mc) (milk_carton ?mc) (milk ?m) (cup ?c) (is_open ?mc) (in_milk_carton ?m ?mc))
+  :effect (and (in_cup ?m ?c) (not (in_milk_carton ?m ?mc)))
+)
+
+**B. State Change**
+; Open drawer ?d with hand ?h. For the lowest drawer, top and middle must be closed.
+(:action open_drawer
+  :parameters (?h ?d ?dt ?dm)
+  :precondition (and (hand_free ?h) (drawer ?d) (is_closed ?d) (is_lowest ?d) (is_top ?dt) (is_middle ?dm) (is_closed ?dt) (is_closed ?dm))
+  :effect (and (is_open ?d) (not (is_closed ?d)))
+)
+
+; Open the washing machine ?wm with hand ?h.
+(:action open_washing_machine
+  :parameters (?h ?wm)
+  :precondition (and (hand_free ?h) (washing_machine ?wm) (is_closed ?wm))
+  :effect (and (is_open ?wm) (not (is_closed ?wm)))
+)
+
+; Open microwave door ?m with hand ?h.
+(:action open_microwave
+    :parameters (?h ?m)
+    :precondition (and (hand_free ?h) (microwave ?m) (is_closed ?m) (is_off ?m))
+    :effect (and (is_open ?m) (not (is_closed ?m)))
+)
+
+; Turn key ?k to lock drawer ?d with hand ?h.
+(:action lock_drawer
+  :parameters (?h ?k ?d)
+  :precondition (and (hand_free ?h) (key ?k) (drawer ?d) (inserted_in ?k ?d) (is_closed ?d) (is_unlocked ?d))
+  :effect (and (is_locked ?d) (not (is_unlocked ?d)))
+)
+
+; Turn on kettle ?k on base ?b until water ?w inside is boiled with hand ?h, while plug ?p is plugged into outlet ?o.
+(:action turn_on_kettle
+  :parameters (?h ?k ?b ?p ?o ?w)
+  :precondition (and (hand_free ?h) (kettle ?k) (base ?b) (on_base ?k ?b) (plug ?p) (outlet ?o) (plugged_in ?p ?o) (in_kettle ?w ?k) (is_closed ?k))
+  :effect (and (is_boiled ?w))
+)
+
+; Turn on microwave ?m to heat object ?o inside is heated with hand ?h.
+(:action turn_on_microwave
+  :parameters (?h ?m ?o)
+  :precondition (and (hand_free ?h) (microwave ?m) (is_closed ?m) (is_off ?m) (in_microwave ?o ?m))
+  :effect (and (is_on ?m) (not (is_off ?m)) (is_heated ?o))
+)
+
+; Turn on faucet ?f with hand ?h.
+(:action turn_on_faucet
+  :parameters (?h ?f)
+  :precondition (and (hand_free ?h) (faucet ?f) (is_off ?f))
+  :effect (and (is_on ?f) (not (is_off ?f)))
+)
+
+; Turn on hot water button ?hwb to dispense water ?w into cup ?c with hand ?h, while child lock ?cl is on and the cup is on tray ?tr.
+(:action turn_on_hot_water
+  :parameters (?h ?hwb ?cl ?c ?tr ?w ?d)
+  :precondition (and (hand_free ?h) (hot_water_button ?hwb) (child_lock ?cl) (cup ?c) (water_dispenser_tray ?tr) (water ?w) (water_dispenser ?d) (is_on ?cl) (is_off ?hwb) (on_water_dispenser_tray ?c ?tr) (in_water_dispenser ?w ?d))
+  :effect (and (is_on ?hwb) (not (is_off ?hwb)) (in_cup ?w ?c))
+)
+
+; Turn off hot water button ?hwb to stop dispensing water ?w into cup ?c with hand ?h, while the cup is on tray ?tr.
+(:action turn_off_hot_water
+  :parameters (?h ?hwb ?c ?tr ?w ?d)
+  :precondition (and (hand_free ?h) (hot_water_button ?hwb) (cup ?c) (water_dispenser_tray ?tr) (water ?w) (water_dispenser ?d) (is_on ?hwb) (on_water_dispenser_tray ?c ?tr) (in_water_dispenser ?w ?d))
+  :effect (and (is_off ?hwb) (not (is_on ?hwb)))
+)
+
+; Wipe counter ?c using cloth ?tool with hand ?h.
+(:action wipe_counter_with_cloth
+  :parameters (?h ?tool ?c)
+  :precondition (and (holding ?h ?tool) (cloth ?tool) (counter ?c))
+  :effect (and (is_wiped ?c))
+)
+
+; Wash object ?o under faucet ?f with hand ?h.
+(:action wash_under_faucet
+  :parameters (?h ?o ?f)
+  :precondition (and (holding ?h ?o) (faucet ?f) (under_faucet ?o ?f) (is_on ?f))
+  :effect (and (is_washed ?o))
+)
+
+**Dual-arm**
+; Open the dishwasher ?d with both hands ?hl and ?hr.
+(:action open_dishwasher
+  :parameters (?hl ?hr ?d)
+  :precondition (and (left_hand ?hl) (right_hand ?hr) (dishwasher ?d) (hand_free ?hl) (hand_free ?hr) (is_closed ?d))
+  :effect (and (is_open ?d) (not (is_closed ?d)))
+)
+
+Think step by step:
+(a) Failure diagnosis: identify the key issues in the previous attempt.
+(b) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices (e.g., microwave, drawer, cabinet, faucet).
+(c) Domain construction: Based on the scene understanding and the action templates, define only the actions necessary to accomplish the instruction.
+(d) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state (e.g., hand_free or holding), and encode the instruction-required end states in goal.
+
+MUST Output valid JSON without any markdown code block (e.g.,```json). 
+{{
+    "reasoning": "a four-part analysis with the following structure: (a) Failure diagnosis. (b) Scene understanding. (c) Domain construction. (d) Problem construction.",
+    "domain": "String format PDDL domain, not dict.",
+    "problem": "String format PDDL problem, not dict."
+}}
