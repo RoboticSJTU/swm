@@ -8,64 +8,61 @@ from PIL import Image
 from swm.utils.apis import call_gpt_json
 
 
-SOURCE_TASK_DOMAIN = "agibot"
-AUG_TASK_DOMAIN = "agibot_aug_v1_2"
+SOURCE_TASK_DOMAIN = "human"
+AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug_v1"
 
-GEN_MODEL_NAME = "Qwen3.5-397B-A17B"
-
+GEN_MODEL_NAME = "gemini-3-flash-preview"
 MAX_WORKERS = 50
-MAX_REWRITE_ATTEMPTS = 3
+
+# "concise": 每个源 pair 只生成 concise
+# "variants": 每个源 pair 生成 concise / appearance_location / verb_synonym
+OUTPUT_MODE = "variants"
 
 
-def clean_text(x) -> str:
-    return re.sub(r"\s+", " ", str(x).strip().strip('"').strip("'"))
+def clean_text(text) -> str:
+    return re.sub(r"\s+", " ", str(text).strip().strip('"').strip("'"))
 
 
-def natural_key(x: str):
-    parts = re.split(r"(\d+)", str(x))
+def natural_key(text: str):
+    parts = re.split(r"(\d+)", str(text))
     return [int(p) if p.isdigit() else p.lower() for p in parts]
 
 
-def load_json(path: Path, default):
+def read_json(path: Path):
     if not path.exists():
-        return default
+        return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_source_items(path: Path):
+def load_source_items(source_path: Path):
     """
-    仅支持两种 source instruction JSON 格式：
+    支持两种输入格式：
 
-    格式1：多组嵌套
+    1. 多 task/group 嵌套:
     {
       "task_327": {
-        "episode_648642": "xxx",
-        "episode_685201": "xxx"
-      },
-      "task_351": {
-        "episode_776577": "xxx"
+        "episode_648642": "xxx"
       }
     }
 
-    格式2：单个 task_domain 包住所有 episode
+    2. 单 domain 平铺:
     {
       "human": {
-        "episode_1": "xxx",
-        "episode_2": "xxx"
+        "episode_1": "xxx"
       }
     }
 
-    返回：
-    - items: [{"group_id": ..., "episode_id": ..., "instruction": ...}, ...]
-    - flat_mode: True 表示路径按 domain/episode 组织；False 表示按 domain/group/episode 组织
+    返回:
+    - items: [{"group_id", "episode_id", "instruction"}]
+    - flat_mode:
+        True  -> 路径按 domain/episode
+        False -> 路径按 domain/group/episode
     """
-    data = load_json(path, {})
-
+    data = read_json(source_path)
     if not isinstance(data, dict) or not data:
-        raise ValueError(f"Invalid source json: {path}")
+        raise ValueError(f"Invalid source json: {source_path}")
 
-    # 格式2：顶层只有一个 key，且这个 key 就是 SOURCE_TASK_DOMAIN，
-    # 下面直接是 episode -> instruction
+    # 情况2：只有一个顶层 key，且它就是 SOURCE_TASK_DOMAIN，并且内部 value 都是字符串
     if (
         len(data) == 1
         and SOURCE_TASK_DOMAIN in data
@@ -83,19 +80,18 @@ def load_source_items(path: Path):
                 })
         return items, True
 
-    # 格式1：多组嵌套，顶层每个 key 下面都是 episode -> instruction
+    # 情况1：一般化嵌套格式
     items = []
     for group_id, episode_map in sorted(data.items(), key=lambda x: natural_key(x[0])):
         if not isinstance(episode_map, dict):
-            raise ValueError(
-                f"Unsupported source json format: top-level value of '{group_id}' must be a dict"
-            )
+            raise ValueError(f"Unsupported source json format: top-level value of '{group_id}' must be a dict")
 
         for episode_id, instruction in sorted(episode_map.items(), key=lambda x: natural_key(x[0])):
             if isinstance(instruction, dict):
                 raise ValueError(
                     f"Unsupported source json format: value of '{group_id}/{episode_id}' must be a string"
                 )
+
             instruction = clean_text(instruction)
             if instruction:
                 items.append({
@@ -108,12 +104,7 @@ def load_source_items(path: Path):
 
 
 def load_saved_nested_json(path: Path):
-    """
-    读取已经生成过的 instructions / steps / meta。
-    不限制 key 名字，只要求是两层 dict。
-    """
-    data = load_json(path, {})
-
+    data = read_json(path)
     if not isinstance(data, dict):
         return {}
 
@@ -124,121 +115,142 @@ def load_saved_nested_json(path: Path):
     return out
 
 
-def sort_nested(data: dict):
-    return {
-        group_id: dict(sorted(episode_map.items(), key=lambda x: natural_key(x[0])))
-        for group_id, episode_map in sorted(data.items(), key=lambda x: natural_key(x[0]))
-    }
+def collect_existing_pairs(meta_data: dict):
+    """
+    已存在样本的去重粒度严格按 source pair:
+    (source_group_id, source_episode_id, start_gid)
+    """
+    existing_pairs = set()
+
+    for episode_map in meta_data.values():
+        for meta in episode_map.values():
+            if not isinstance(meta, dict):
+                continue
+
+            if "source_group_id" in meta and "source_episode_id" in meta and "start_gid" in meta:
+                existing_pairs.add((
+                    str(meta["source_group_id"]),
+                    str(meta["source_episode_id"]),
+                    int(meta["start_gid"]),
+                ))
+            elif "source_task_id" in meta and "source_episode_id" in meta and "start_gid" in meta:
+                existing_pairs.add((
+                    str(meta["source_task_id"]),
+                    str(meta["source_episode_id"]),
+                    int(meta["start_gid"]),
+                ))
+
+    return existing_pairs
 
 
-def next_episode_index(episode_map: dict) -> int:
-    max_idx = 0
-    for episode_id in episode_map:
-        m = re.search(r"(\d+)$", str(episode_id))
-        if m:
-            max_idx = max(max_idx, int(m.group(1)))
-    return max_idx + 1
+def collect_jobs(root_dir: Path, source_items: list, flat_mode: bool, existing_pairs: set):
+    """
+    按“真实 seg 原理”构造 job：
 
-
-def load_group_actions(group_path: Path):
-    group_to_actions = {}
-    for line in group_path.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^\[G(\d+)\]\s*(.+?)\s*$", line.strip())
-        if m:
-            gid = int(m.group(1))
-            group_to_actions.setdefault(gid, []).append(clean_text(m.group(2)))
-    return group_to_actions
-
-
-def list_seg_dirs(keyframe_dir: Path):
-    seg_dirs = []
-    for p in keyframe_dir.iterdir():
-        if p.is_dir():
-            m = re.fullmatch(r"seg_(\d+)", p.name)
-            if m:
-                seg_dirs.append((int(m.group(1)), p))
-    seg_dirs.sort(key=lambda x: x[0])
-    return seg_dirs
-
-
-def first_image_in_dir(seg_dir: Path):
-    imgs = sorted(
-        [
-            p for p in seg_dir.iterdir()
-            if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
-        ],
-        key=lambda p: natural_key(p.name)
-    )
-    return imgs[0] if imgs else None
-
-
-def build_jobs(root_dir: Path, item: dict, flat_mode: bool, existing_pairs: set):
-    group_id = item["group_id"]
-    episode_id = item["episode_id"]
-    instruction = item["instruction"]
-
-    if flat_mode:
-        keyframe_dir = root_dir / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / episode_id
-        group_path = (
-            root_dir
-            / "eval_results"
-            / "gemini-3-flash-preview"
-            / SOURCE_TASK_DOMAIN
-            / episode_id
-            / "kf_plan_group.txt"
-        )
-    else:
-        keyframe_dir = root_dir / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / group_id / episode_id
-        group_path = (
-            root_dir
-            / "eval_results"
-            / "gemini-3-flash-preview"
-            / SOURCE_TASK_DOMAIN
-            / group_id
-            / episode_id
-            / "kf_plan_group.txt"
-        )
-
-    if not keyframe_dir.is_dir() or not group_path.is_file():
-        return []
-
-    group_to_actions = load_group_actions(group_path)
-    if not group_to_actions:
-        return []
-
+    1. 读取 kf_plan_group.txt 中真实存在的 G0/G1/G2...
+    2. 枚举 keyframe 下真实存在的 seg_00/seg_01/...
+    3. 只有 seg_xx 且 xx 恰好存在于 Gxx 时，才参与增强
+    4. 一个 source pair = (group_id, episode_id, start_gid)
+    """
     jobs = []
-    group_ids = sorted(group_to_actions)
 
-    for start_gid, seg_dir in list_seg_dirs(keyframe_dir):
-        pair = (group_id, episode_id, start_gid)
-        if start_gid not in group_to_actions or pair in existing_pairs:
+    for item in source_items:
+        group_id = item["group_id"]
+        episode_id = item["episode_id"]
+        instruction = item["instruction"]
+
+        if flat_mode:
+            keyframe_dir = root_dir / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / episode_id
+            group_path = (
+                root_dir
+                / "eval_results"
+                / GEN_MODEL_NAME
+                / SOURCE_TASK_DOMAIN
+                / episode_id
+                / "kf_plan_group.txt"
+            )
+        else:
+            keyframe_dir = root_dir / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / group_id / episode_id
+            group_path = (
+                root_dir
+                / "eval_results"
+                / GEN_MODEL_NAME
+                / SOURCE_TASK_DOMAIN
+                / group_id
+                / episode_id
+                / "kf_plan_group.txt"
+            )
+
+        if not keyframe_dir.is_dir() or not group_path.is_file():
             continue
 
-        image_path = first_image_in_dir(seg_dir)
-        if image_path is None:
+        # 读取真实 group
+        group_to_actions = {}
+        for line in group_path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^\[G(\d+)\]\s*(.+?)\s*$", line.strip())
+            if m:
+                gid = int(m.group(1))
+                action = clean_text(m.group(2))
+                group_to_actions.setdefault(gid, []).append(action)
+
+        if not group_to_actions:
             continue
 
-        completed = []
-        remaining = []
-        for gid in group_ids:
-            if gid < start_gid:
-                completed.extend(group_to_actions[gid])
-            else:
-                remaining.extend(group_to_actions[gid])
+        group_ids = sorted(group_to_actions)
 
-        if not remaining:
-            continue
+        # 枚举真实 seg_00 / seg_01 ...
+        seg_infos = []
+        for p in keyframe_dir.iterdir():
+            if p.is_dir():
+                m = re.fullmatch(r"seg_(\d+)", p.name)
+                if m:
+                    seg_infos.append((int(m.group(1)), p))
+        seg_infos.sort(key=lambda x: x[0])
 
-        jobs.append({
-            "group_id": group_id,
-            "episode_id": episode_id,
-            "instruction": instruction,
-            "start_gid": start_gid,
-            "image_path": image_path,
-            "completed": completed,
-            "remaining": remaining,
-        })
+        for start_gid, seg_dir in seg_infos:
+            pair = (group_id, episode_id, start_gid)
 
+            # 关键原则：只有 seg_xx 对应真实 group id 时才参与
+            if start_gid not in group_to_actions:
+                continue
+
+            if pair in existing_pairs:
+                continue
+
+            images = sorted(
+                [p for p in seg_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}],
+                key=lambda p: natural_key(p.name)
+            )
+            if not images:
+                continue
+            image_path = images[0]
+
+            completed = []
+            remaining = []
+            for gid in group_ids:
+                if gid < start_gid:
+                    completed.extend(group_to_actions[gid])
+                else:
+                    remaining.extend(group_to_actions[gid])
+
+            if not remaining:
+                continue
+
+            jobs.append({
+                "group_id": group_id,
+                "episode_id": episode_id,
+                "instruction": instruction,
+                "start_gid": start_gid,
+                "image_path": image_path,
+                "completed": completed,
+                "remaining": remaining,
+            })
+
+    jobs.sort(key=lambda x: (
+        natural_key(x["group_id"]),
+        natural_key(x["episode_id"]),
+        x["start_gid"],
+    ))
     return jobs
 
 
@@ -299,66 +311,25 @@ Return JSON only:
 }}"""
 
 
-def extract_concise(gen: dict) -> str:
-    if isinstance(gen, dict) and isinstance(gen.get("variants"), dict):
-        if gen["variants"].get("concise"):
-            return clean_text(gen["variants"]["concise"])
-    if isinstance(gen, dict) and gen.get("concise"):
-        return clean_text(gen["concise"])
-    return ""
-
-
-def rewrite_one_group(job: dict):
-    concise = ""
-    attempt_history = []
-
-    for attempt in range(1, MAX_REWRITE_ATTEMPTS + 1):
-        try:
-            gen = call_gpt_json(
-                GEN_MODEL_NAME,
-                build_generation_prompt(job["instruction"], job["completed"], job["remaining"]),
-                [job["image_path"]],
-            )
-            concise = extract_concise(gen)
-        except Exception as e:
-            concise = ""
-            attempt_history.append({
-                "attempt": attempt,
-                "concise_text": "",
-                "error": f"generation_error: {clean_text(e)}",
-            })
-            continue
-
-        if concise:
-            return {
-                "status": "passed",
-                "source_group_id": job["group_id"],
-                "source_episode_id": job["episode_id"],
-                "source_instruction": job["instruction"],
-                "start_gid": job["start_gid"],
-                "image_src": str(job["image_path"]),
-                "steps": job["remaining"],
-                "concise": concise,
-                "attempts_used": attempt,
-            }
-
-        attempt_history.append({
-            "attempt": attempt,
-            "concise_text": "",
-            "error": "generation returned empty concise instruction",
-        })
+def rewrite_one_job(job: dict):
+    result = call_gpt_json(
+        GEN_MODEL_NAME,
+        build_generation_prompt(job["instruction"], job["completed"], job["remaining"]),
+        [job["image_path"]],
+    )
 
     return {
-        "status": "failed",
         "source_group_id": job["group_id"],
         "source_episode_id": job["episode_id"],
         "source_instruction": job["instruction"],
         "start_gid": job["start_gid"],
         "image_src": str(job["image_path"]),
         "steps": job["remaining"],
-        "concise": concise,
-        "attempts_used": MAX_REWRITE_ATTEMPTS,
-        "attempt_history": attempt_history,
+        "variants": {
+            "concise": clean_text(result["variants"]["concise"]),
+            "appearance_location": clean_text(result["variants"]["appearance_location"]),
+            "verb_synonym": clean_text(result["variants"]["verb_synonym"]),
+        },
     }
 
 
@@ -370,15 +341,27 @@ def copy_image_as_png(src: Path, dst: Path):
         Image.open(src).save(dst)
 
 
+def sort_nested_dict(data: dict):
+    return {
+        group_id: dict(sorted(episode_map.items(), key=lambda x: natural_key(x[0])))
+        for group_id, episode_map in sorted(data.items(), key=lambda x: natural_key(x[0]))
+    }
+
+
 def main():
+    if OUTPUT_MODE == "concise":
+        output_variants = ["concise"]
+    elif OUTPUT_MODE == "variants":
+        output_variants = ["concise", "appearance_location", "verb_synonym"]
+    else:
+        raise ValueError(f"Unsupported OUTPUT_MODE: {OUTPUT_MODE}")
+
     root_dir = Path(__file__).resolve().parent.parent
 
     src_instruction_path = root_dir / "tasks" / "instructions" / f"instructions_{SOURCE_TASK_DOMAIN}.json"
-
     out_instruction_path = root_dir / "tasks" / "instructions" / f"instructions_{AUG_TASK_DOMAIN}.json"
     out_steps_path = root_dir / "tasks" / "steps" / f"steps_{AUG_TASK_DOMAIN}.json"
     out_meta_path = root_dir / "tasks" / "meta" / f"meta_{AUG_TASK_DOMAIN}.json"
-    out_failed_path = root_dir / "tasks" / "meta" / f"meta_{AUG_TASK_DOMAIN}_failed.json"
     out_image_root = root_dir / "tasks" / "images" / AUG_TASK_DOMAIN
 
     out_instruction_path.parent.mkdir(parents=True, exist_ok=True)
@@ -386,89 +369,55 @@ def main():
     out_meta_path.parent.mkdir(parents=True, exist_ok=True)
     out_image_root.mkdir(parents=True, exist_ok=True)
 
-    if not src_instruction_path.is_file():
-        raise FileNotFoundError(src_instruction_path)
-
+    # 1. 读取源数据
     source_items, flat_mode = load_source_items(src_instruction_path)
 
+    # 2. 读取已有输出
     instructions_data = load_saved_nested_json(out_instruction_path)
     steps_data = load_saved_nested_json(out_steps_path)
     meta_data = load_saved_nested_json(out_meta_path)
 
-    # 读取已经生成过的 pair，避免重复生成
-    existing_pairs = set()
-    for _, episode_map in meta_data.items():
-        for _, meta in episode_map.items():
-            if not isinstance(meta, dict):
-                continue
+    existing_pairs = collect_existing_pairs(meta_data)
 
-            if all(k in meta for k in ["source_group_id", "source_episode_id", "start_gid"]):
-                existing_pairs.add((
-                    meta["source_group_id"],
-                    meta["source_episode_id"],
-                    int(meta["start_gid"]),
-                ))
-            elif all(k in meta for k in ["source_task_id", "source_episode_id", "start_gid"]):
-                # 兼容旧版 meta
-                existing_pairs.add((
-                    meta["source_task_id"],
-                    meta["source_episode_id"],
-                    int(meta["start_gid"]),
-                ))
-
-    jobs = []
-    for item in source_items:
-        jobs.extend(build_jobs(root_dir, item, flat_mode, existing_pairs))
-
-    jobs.sort(key=lambda x: (
-        natural_key(x["group_id"]),
-        natural_key(x["episode_id"]),
-        x["start_gid"],
-    ))
+    # 3. 构造所有待生成 job
+    jobs = collect_jobs(root_dir, source_items, flat_mode, existing_pairs)
     print(f"jobs: {len(jobs)}")
 
-    all_samples = []
+    # 4. 并发生成
+    samples = []
     if jobs:
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(jobs))) as ex:
-            futures = [ex.submit(rewrite_one_group, job) for job in jobs]
+        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(jobs))) as executor:
+            futures = [executor.submit(rewrite_one_job, job) for job in jobs]
             total = len(futures)
 
-            for idx, future in enumerate(as_completed(futures), 1):
+            for i, future in enumerate(as_completed(futures), 1):
                 sample = future.result()
-                all_samples.append(sample)
+                samples.append(sample)
                 print(
-                    f'[{idx}/{total}] {sample["status"].upper()} '
-                    f'{sample["source_group_id"]}/{sample["source_episode_id"]}/G{sample["start_gid"]} '
-                    f'attempts={sample["attempts_used"]}'
+                    f'[{i}/{total}] '
+                    f'{sample["source_group_id"]}/{sample["source_episode_id"]}/G{sample["start_gid"]}'
                 )
 
-    all_samples.sort(key=lambda x: (
+    samples.sort(key=lambda x: (
         natural_key(x["source_group_id"]),
         natural_key(x["source_episode_id"]),
         x["start_gid"],
     ))
 
-    next_episode_idx = {
-        group_id: next_episode_index(episode_map)
-        for group_id, episode_map in instructions_data.items()
-    }
+    # 5. 为每个 group 计算下一个 episode 索引
+    next_episode_idx = {}
+    for group_id, episode_map in instructions_data.items():
+        max_idx = 0
+        for episode_id in episode_map:
+            m = re.search(r"(\d+)$", str(episode_id))
+            if m:
+                max_idx = max(max_idx, int(m.group(1)))
+        next_episode_idx[group_id] = max_idx + 1
 
+    # 6. 写入新样本
     created = 0
-    failed_samples = []
 
-    for sample in all_samples:
-        if sample["status"] != "passed":
-            failed_samples.append({
-                "source_group_id": sample["source_group_id"],
-                "source_episode_id": sample["source_episode_id"],
-                "start_gid": sample["start_gid"],
-                "source_image_path": sample["image_src"],
-                "concise_text": sample["concise"],
-                "attempts_used": sample["attempts_used"],
-                "attempt_history": sample["attempt_history"],
-            })
-            continue
-
+    for sample in samples:
         pair = (
             sample["source_group_id"],
             sample["source_episode_id"],
@@ -488,31 +437,35 @@ def main():
         if group_id not in next_episode_idx:
             next_episode_idx[group_id] = 1
 
-        new_episode_id = f"episode_{next_episode_idx[group_id]}"
-        next_episode_idx[group_id] += 1
+        for variant_name in output_variants:
+            new_episode_id = f"episode_{next_episode_idx[group_id]}"
+            next_episode_idx[group_id] += 1
 
-        dst_image = out_image_root / group_id / f"{new_episode_id}.png"
-        copy_image_as_png(Path(sample["image_src"]), dst_image)
+            dst_image = out_image_root / group_id / f"{new_episode_id}.png"
+            copy_image_as_png(Path(sample["image_src"]), dst_image)
 
-        instructions_data[group_id][new_episode_id] = sample["concise"]
-        steps_data[group_id][new_episode_id] = sample["steps"]
-        meta_data[group_id][new_episode_id] = {
-            "source_group_id": sample["source_group_id"],
-            "source_episode_id": sample["source_episode_id"],
-            "source_instruction": sample["source_instruction"],
-            "start_gid": sample["start_gid"],
-            "source_image_path": sample["image_src"],
-            "image_path": str(dst_image.relative_to(root_dir)),
-            "concise_text": sample["concise"],
-            "attempts_used": sample["attempts_used"],
-        }
+            instructions_data[group_id][new_episode_id] = sample["variants"][variant_name]
+            steps_data[group_id][new_episode_id] = sample["steps"]
+            meta_data[group_id][new_episode_id] = {
+                "source_group_id": sample["source_group_id"],
+                "source_episode_id": sample["source_episode_id"],
+                "source_instruction": sample["source_instruction"],
+                "start_gid": sample["start_gid"],
+                "variant_name": variant_name,
+                "source_image_path": sample["image_src"],
+                "image_path": str(dst_image.relative_to(root_dir)),
+                "output_mode": OUTPUT_MODE,
+            }
 
+            created += 1
+
+        # 一个 source pair 一旦生成完所有 variant，就整体记为已完成
         existing_pairs.add(pair)
-        created += 1
 
-    instructions_data = sort_nested(instructions_data)
-    steps_data = sort_nested(steps_data)
-    meta_data = sort_nested(meta_data)
+    # 7. 排序并保存
+    instructions_data = sort_nested_dict(instructions_data)
+    steps_data = sort_nested_dict(steps_data)
+    meta_data = sort_nested_dict(meta_data)
 
     out_instruction_path.write_text(
         json.dumps(instructions_data, ensure_ascii=False, indent=2),
@@ -526,14 +479,9 @@ def main():
         json.dumps(meta_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    out_failed_path.write_text(
-        json.dumps(failed_samples, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
     total = sum(len(v) for v in instructions_data.values())
     print(f"created: {created}")
-    print(f"failed: {len(failed_samples)}")
     print(f"total: {total}")
 
 

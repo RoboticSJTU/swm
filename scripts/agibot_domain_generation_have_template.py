@@ -212,11 +212,11 @@ def run_single_task(task: dict, root_dir: Path):
     
     task_img, steps = get_task_image_and_steps(task, save_dir)
 
-    # 固定传入agibot里面的示例！！！！！
+    # 固定传入human里面的示例！！！！！
     action_template = find_task_action_template(
         root_dir=root_dir,
         model_name=PDDL_MODEL,
-        task_domain="agibot",
+        task_domain="human",
         task_id=task_id,
     )
 
@@ -354,6 +354,6 @@ if __name__ == "__main__":
     MAX_PLAN_ATTEMPTS = 3
     MAX_WORKERS = 50
 
-    task_domain = "agibot_aug_v1"
+    task_domain = "human_aug_v1"
     tasks = load_tasks(root_dir, task_domain)
     run_all_tasks(root_dir, tasks)

@@ -37,7 +37,7 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
     kwargs = dict(
         model=model,
         messages=[{"role": "user", "content": content}],
-        temperature=0,
+        temperature=0.3,
     )
 
     if model.startswith("Qwen3.5"):

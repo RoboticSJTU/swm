@@ -1,4 +1,4 @@
-You are an expert PDDL diagnostician and planning engineer specializing in debugging and repairing PDDL domains and problems for a Dual-armed robot. 
+You are an expert PDDL diagnostician and planning engineer specializing in debugging and repairing PDDL domains and problems for a **Single-armed** robot. 
 Your task is to analyze previous failures, incorporate failure feedback, and rewrite the code to generate a fully correct and executable solution. 
 
 Inputs:
@@ -142,13 +142,6 @@ PDDL ACTION TEMPLATE (Adapt as needed to complete the specific task):
   :effect (and (hand_free ?h) (not (holding ?h ?cp)) (on_bottle ?cp ?b) (is_closed ?b) (not (is_open ?b)))
 )
 
-; Insert key ?k into drawer ?d with hand ?h.
-(:action insert_key_into_drawer
-  :parameters (?h ?k ?d)
-  :precondition (and (holding ?h ?k) (key ?k) (drawer ?d))
-  :effect (and (hand_free ?h) (not (holding ?h ?k)) (inserted_in ?k ?d))
-)
-
 ; Slide object ?o to the right on table ?t with hand ?h.
 (:action slide_right_on_table
   :parameters (?h ?o ?t)
@@ -186,13 +179,6 @@ PDDL ACTION TEMPLATE (Adapt as needed to complete the specific task):
 )
 
 **B. State Change**
-; Open drawer ?d with hand ?h. For the lowest drawer, top and middle must be closed.
-(:action open_drawer
-  :parameters (?h ?d ?dt ?dm)
-  :precondition (and (hand_free ?h) (drawer ?d) (is_closed ?d) (is_lowest ?d) (is_top ?dt) (is_middle ?dm) (is_closed ?dt) (is_closed ?dm))
-  :effect (and (is_open ?d) (not (is_closed ?d)))
-)
-
 ; Open the washing machine ?wm with hand ?h.
 (:action open_washing_machine
   :parameters (?h ?wm)
@@ -205,13 +191,6 @@ PDDL ACTION TEMPLATE (Adapt as needed to complete the specific task):
     :parameters (?h ?m)
     :precondition (and (hand_free ?h) (microwave ?m) (is_closed ?m) (is_off ?m))
     :effect (and (is_open ?m) (not (is_closed ?m)))
-)
-
-; Turn key ?k to lock drawer ?d with hand ?h.
-(:action lock_drawer
-  :parameters (?h ?k ?d)
-  :precondition (and (hand_free ?h) (key ?k) (drawer ?d) (inserted_in ?k ?d) (is_closed ?d) (is_unlocked ?d))
-  :effect (and (is_locked ?d) (not (is_unlocked ?d)))
 )
 
 ; Turn on kettle ?k on base ?b until water ?w inside is boiled with hand ?h, while plug ?p is plugged into outlet ?o.
@@ -261,14 +240,6 @@ PDDL ACTION TEMPLATE (Adapt as needed to complete the specific task):
   :parameters (?h ?o ?f)
   :precondition (and (holding ?h ?o) (faucet ?f) (under_faucet ?o ?f) (is_on ?f))
   :effect (and (is_washed ?o))
-)
-
-**Dual-arm**
-; Open the dishwasher ?d with both hands ?hl and ?hr.
-(:action open_dishwasher
-  :parameters (?hl ?hr ?d)
-  :precondition (and (left_hand ?hl) (right_hand ?hr) (dishwasher ?d) (hand_free ?hl) (hand_free ?hr) (is_closed ?d))
-  :effect (and (is_open ?d) (not (is_closed ?d)))
 )
 
 Think step by step:
