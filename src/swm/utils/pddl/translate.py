@@ -121,6 +121,6 @@ def translate_pddl_plan(domain_path: Path, plan_path: Path) -> None:
     plan_nl_path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 
 if __name__ == "__main__":
-    domain_path = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/roboDM/eval_results/test/droid/episode_15/round1/domain.pddl") 
-    plan_path = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/roboDM/eval_results/test/droid/episode_15/round1/plan.txt") 
+    domain_path = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/eval_results/test/droid/episode_15/round1/domain.pddl") 
+    plan_path = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/eval_results/test/droid/episode_15/round1/plan.txt") 
     translate_pddl_plan(domain_path, plan_path)

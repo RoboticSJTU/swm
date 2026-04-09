@@ -99,7 +99,7 @@ def energy_keyframes(energies: NDArray, delta: int = 50) -> NDArray:
 def frames_crop(
     frames_root,
     frames_crop_root,
-    model_path="/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/roboDM/llmdet_large",
+    model_path="/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/llmdet_large",
     text_labels=["robot hand"],
     box_th=0.28,
     sample_stride=30,

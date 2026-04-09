@@ -1,0 +1,45 @@
+You are an expert system for validating action correctness and inferring the action that occurred between two frames based on observable visual differences. Using:
+- Two time-ordered frames (earlier → later).
+- Instruction: {instruction}
+- Action history from earlier frame pairs: {history}
+- Previous attempt for THIS pair: {error_action}
+- Feedback on previous attempt: {regen_feedback}
+
+Previous attempt for this pair is not action history. Use the feedback to regenerate the attempt.
+
+Task 1. Validate action history correctness.
+Simulate each step in sequence. 
+(1) State Consistency Check.
+- Single-Hand State: If the hand is holding o, then it cannot manipulate a different object.(e.g., pick up cup, then open microwave - is invalid). The operation must strictly follow the logic of a single-arm robot.
+- World state: The current first frame must match the effect of the last action in history (e.g., "open microwave" -> microwave is open).
+(2) Physical Executability Check.
+Check whether each action is physically executable. Examples of violations of physical constraints include:
+- Place an object without first picking it up.
+- Wash an object without turning on the tap.
+- Start an appliance (e.g., microwave, dishwasher) without placing the object inside.
+- Place an object into a closed container. 
+(3) Feedback-Based History Error Check.
+- Use all current information to judge feedback on "Previous attempt". 
+- If feedback explicitly claims a history-caused state/precondition error (e.g., holding the wrong object, using the wrong hand, missing a required prior action) 
+AND this claim is consistent with the frames and simulated history state, set history_check=false.
+
+NOTE: If any violation is found in (1)-(3),
+- set history_check=false, give a feedback(e.g., Step5: Place paper cup in microwave is incorrect because the microwave door is closed);
+- SKIP Task 2: set action_reasoning = "" and action = "none"
+
+Task 2. Infer the current transition (only if history_check=true).
+Infer the atomic action between the two frames by analyzing visual changes, with particular focus on the motion and state of the robot hand. Note: 
+- **Frame-first: output actions strictly supported by visible changes; do not hallucinate unseen steps. If the change is ambiguous/no discrete change/only continuous motion, output "none".** 
+- Output actions must be consistent with the history actions in hand state and world state, and physically executable.
+- Do not repeat the previous attempt for this pair.
+- Output one or more atomic robot actions (Pick up, Grasp, Place, Open, Close, Turn on/off, Pull, Push, Slide, Pour, Wipe, Fill, Stir, Fold/Unfold, Scoop, ...). One atomic action per line. For example, Pick up paper cup from counter.
+- Pick up vs Grasp: Use Pick up only when the object is lifted/moved off its support; use Grasp only when the object is held without lifting.
+
+Output valid JSON without any markdown code block (e.g.,'''json):
+{{
+  "history_reasoning": "a three-part analysis with the following structure:(1) State consistency Check. (2) Action Correctness Check. (3) Feedback-Based History Error Check.",
+  "history_check": true or false,
+  "history_feedback": "if false: erroneous action, why ; else: \"\"",
+  "action_reasoning": "Reasoning based on differences between two frames, instructions, and action history.",
+  "action": "none OR one or more atomic action lines separated by \\n"
+}}

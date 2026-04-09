@@ -1,6 +1,6 @@
 from pathlib import Path
 import subprocess
-from robodm.utils.pddl.plan_reorder import plan_reorder
+from swm.utils.pddl.plan_reorder import plan_reorder
 
 fast_downward_path = Path(__file__).parent.parent.parent.parent.parent / "downward" / "fast-downward.py"
 def solve_pddl(domain_file, problem_file):

@@ -205,7 +205,7 @@ def build_pddl_action_template(
     kf_plan_path: Path,
     unified_domain_path: Path,
     topk: int = 1,
-    rerank_model_dir: str = "/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/roboDM/Qwen3-Reranker-0.6B",
+    rerank_model_dir: str = "/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/Qwen3-Reranker-0.6B",
     batch_size: int = 16,
     device: Optional[str] = None,   # None: 自动选 cuda/cpu
     query_instruct: str = "Select the single robot action operator whose semantic meaning best matches the given natural language step.",

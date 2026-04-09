@@ -359,7 +359,7 @@ if __name__ == "__main__":
     root_dir = Path(__file__).parent.parent
     PDDL_MODEL = "gemini-3-flash-preview"
     Learn_steps_MODEL = "gemini-3-flash-preview"
-    JUDGE_MODEL = "Qwen3.5-397B-A17B"
+    JUDGE_MODEL = "gemini-3-flash-preview"
     MAX_STEP_BACKTRACKS = 10
     MAX_PLAN_ATTEMPTS = 3
     MAX_WORKERS = 50
