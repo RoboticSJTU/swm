@@ -6,12 +6,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from swm.utils.apis import call_gpt_json
 
 
-PRED_ROOT = Path("/home/xyx/下载/swm/eval_results/gemini-3-flash-preview/human_energy_经典参数_有指令")
+PRED_ROOT = Path("/home/xyx/下载/swm/eval_results/gemini-3-flash-preview/human_energy_无指令")
 
-MODEL = "gpt-5.1"
+MODEL = "gemini-3-flash-preview"
 GT_ROOT = Path("/home/xyx/下载/swm/eval_results/gemini-3-flash-preview/human_GT")
 SAVE_PATH = PRED_ROOT.with_name(PRED_ROOT.name + "_eval.json")
-MAX_WORKERS = 50
+MAX_WORKERS = 40
 
 PROMPT = """
 You are evaluating whether two action sequences describe the same task logic.
@@ -73,7 +73,7 @@ Prediction (PRED):
 """.strip()
 
 
-def task_key(name):
+def episode_key(name):
     m = re.search(r"(\d+)$", name)
     return int(m.group(1)) if m else name
 
@@ -99,13 +99,13 @@ def clean_indices(xs, n):
     return out
 
 
-def eval_task(task):
-    gt_path = GT_ROOT / task / "kf_plan.txt"
-    pred_path = PRED_ROOT / task / "kf_plan.txt"
+def eval_episode(episode):
+    gt_path = GT_ROOT / episode / "kf_plan.txt"
+    pred_path = PRED_ROOT / episode / "kf_plan.txt"
 
     if not gt_path.exists():
         return {
-            "task": task,
+            "episode": episode,
             "success": False,
             "f1": 0.0,
             "status": "missing_gt_file",
@@ -116,7 +116,7 @@ def eval_task(task):
 
     if not pred_path.exists():
         return {
-            "task": task,
+            "episode": episode,
             "success": False,
             "f1": 0.0,
             "status": "missing_pred_file",
@@ -130,7 +130,7 @@ def eval_task(task):
 
     if not gt_steps:
         return {
-            "task": task,
+            "episode": episode,
             "success": not pred_steps,
             "f1": 1.0 if not pred_steps else 0.0,
             "status": "ok",
@@ -146,7 +146,7 @@ def eval_task(task):
         resp = call_gpt_json(MODEL, PROMPT.format(gt_text=gt_text, pred_text=pred_text), None)
     except Exception as e:
         return {
-            "task": task,
+            "episode": episode,
             "success": False,
             "f1": 0.0,
             "status": "vlm_failed",
@@ -157,7 +157,7 @@ def eval_task(task):
 
     if not isinstance(resp, dict) or not all(k in resp for k in ("equivalent", "order_consistent", "gt_covered", "pred_supported", "wrong_extra_pred", "summary")):
         return {
-            "task": task,
+            "episode": episode,
             "success": False,
             "f1": 0.0,
             "status": "vlm_failed",
@@ -184,7 +184,7 @@ def eval_task(task):
     f1 = 0.0 if recall + precision == 0 else 2 * recall * precision / (recall + precision)
 
     return {
-        "task": task,
+        "episode": episode,
         "success": equivalent and order_consistent and len(gt_covered) == len(gt_steps) and not wrong_extra_pred,
         "f1": round(f1, 6),
         "status": "ok",
@@ -195,23 +195,23 @@ def eval_task(task):
 
 
 def main():
-    tasks = sorted([p.name for p in GT_ROOT.iterdir() if p.is_dir()], key=task_key)
+    episodes = sorted([p.name for p in GT_ROOT.iterdir() if p.is_dir()], key=episode_key)
 
-    print(f"tasks: {len(tasks)}")
+    print(f"episodes: {len(episodes)}")
     print(f"model: {MODEL}")
     print(f"workers: {MAX_WORKERS}")
     print()
 
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(eval_task, task): task for task in tasks}
+        futures = {ex.submit(eval_episode, episode): episode for episode in episodes}
         for i, fut in enumerate(as_completed(futures), 1):
-            task = futures[fut]
+            episode = futures[fut]
             try:
                 r = fut.result()
             except Exception as e:
                 r = {
-                    "task": task,
+                    "episode": episode,
                     "success": False,
                     "f1": 0.0,
                     "status": "exception",
@@ -220,21 +220,21 @@ def main():
                     "summary": str(e),
                 }
             results.append(r)
-            print(f"[{i}/{len(tasks)}] {task} | success={r['success']} | f1={r['f1']:.3f} | status={r['status']}")
+            print(f"[{i}/{len(episodes)}] {episode} | success={r['success']} | f1={r['f1']:.3f} | status={r['status']}")
 
-    results.sort(key=lambda x: (x["success"], task_key(x["task"])))
+    results.sort(key=lambda x: (x["success"], episode_key(x["episode"])))
 
     success_count = sum(r["success"] for r in results)
-    failed_tasks = [r["task"] for r in results if not r["success"]]
+    failed_episodes = [r["episode"] for r in results if not r["success"]]
 
     output = {
         "summary": {
-            "total_tasks": len(results),
-            "success_tasks": success_count,
-            "failed_tasks": len(results) - success_count,
+            "total_episodes": len(results),
+            "success_episodes": success_count,
+            "failed_episodes": len(results) - success_count,
             "success_rate": round(success_count / len(results), 6) if results else 0.0,
             "avg_f1": round(sum(r["f1"] for r in results) / len(results), 6) if results else 0.0,
-            "failed_task_list": failed_tasks,
+            "failed_episode_list": failed_episodes,
         },
         "results": results,
     }

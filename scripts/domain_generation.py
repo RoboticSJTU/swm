@@ -223,8 +223,6 @@ def run_single_task(task: dict, root_dir: Path):
 
         # 求解成功
         planning_success = True
-        final_domain = round_result["domain"]
-        final_problem = round_result["problem"]
         retry_state.solver_feedback = ""
         pddl_plan = round_result["plan"]
         nl_plan = round_result["nl_plan"]
@@ -250,13 +248,6 @@ def run_single_task(task: dict, root_dir: Path):
 
     result = {"task_domain": task_domain, "task_id": task_id, "completed": True, "planning_success": planning_success,"judge_pass": judge_pass,"sharegpt_sample": None}
 
-    # 只有当“至少规划成功过”且“judge 最终通过”时，
-    # 才构造 sharegpt 训练样本
-    # if planning_success and judge_pass:
-    #     prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input.txt"
-    #     base_prompt = get_prompt_from_template(prompt_path, instruction=instruction)
-    #     result["sharegpt_sample"] = build_sharegpt_json(base_prompt,task_img,final_domain,final_problem,)
-
     return result
 
 
@@ -274,7 +265,7 @@ if __name__ == "__main__":
     PDDL_MODEL = "gemini-3-flash-preview"
     JUDGE_MODEL = PDDL_MODEL
     MAX_STEP_BACKTRACKS = 10
-    MAX_PLAN_ATTEMPTS = 3
+    MAX_PLAN_ATTEMPTS = 1
     MAX_WORKERS = 50
 
     task_domain = "human"

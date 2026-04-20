@@ -197,7 +197,7 @@ def extract_keyframes_embedding(
                 continue
 
             n = len(imgs)
-            window_step = min(90, 10 + 10 * ((n - 1) // 500))
+            window_step = 10 + 10 * ((n - 1) // 500)
             out = keyframes_root / ep.name
             out.mkdir(parents=True, exist_ok=True)
 
@@ -313,23 +313,23 @@ def extract_keyframes_uniform_sampling(
 
 
 if __name__ == "__main__":
-    # uniform
-    fps = 0.25
-    group_size = 3
-    src_root = Path("/home/xyx/下载/swm/dataset/frames/human")
-    dst_root = Path(f"/home/xyx/下载/swm/dataset/keyframes/human_uniform_sampling_fps_{fps}_group_{group_size}")
-    extract_keyframes_uniform_sampling(src_root, dst_root, fps, group_size)
+    # # uniform
+    # fps = 0.25
+    # group_size = 3
+    # src_root = Path("/home/xyx/下载/swm/dataset/frames/human")
+    # dst_root = Path(f"/home/xyx/下载/swm/dataset/keyframes/human_uniform_sampling_fps_{fps}_group_{group_size}")
+    # extract_keyframes_uniform_sampling(src_root, dst_root, fps, group_size)
     
-    # # embedding
-    # root_dir = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/dataset/")
-    # extract_keyframes_embedding(
-    #     frames_root=root_dir / "frames/human",
-    #     keyframes_root=root_dir / "keyframes/human_embedding_siglip2",
-    #     smooth_k=5,
-    #     merge_pct=0.5,
-    #     batch_size=5000,
-    #     num_workers=32,
-    #     post_workers=32,
-    #     plot_curve=True,
-    #     use_hardlink=True,
-    # )
+    # embedding
+    root_dir = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/dataset/")
+    extract_keyframes_embedding(
+        frames_root=root_dir / "frames/human",
+        keyframes_root=root_dir / "keyframes/human_embedding_siglip2_10window",
+        smooth_k=5,
+        merge_pct=0.5,
+        batch_size=2000,
+        num_workers=32,
+        post_workers=32,
+        plot_curve=True,
+        use_hardlink=True,
+    )

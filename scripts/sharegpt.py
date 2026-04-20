@@ -378,24 +378,28 @@ def build_sharegpt_pddl(
             if not seg_dir.is_dir():
                 continue
 
-            pngs = [
+            imgs = [
                 p for p in seg_dir.iterdir()
-                if p.is_file() and p.suffix.lower() == ".png" and p.stem.isdigit()
+                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"} and p.stem.isdigit()
             ]
-            if pngs:
-                pngs.sort(key=lambda p: int(p.stem))
-                image_path = str(pngs[0])
+            if imgs:
+                imgs.sort(key=lambda p: int(p.stem))
+                image_path = str(imgs[0])
                 break
 
         if image_path is None and task_id is not None:
-            candidate = images_root / task_domain / task_id / f"{episode_id}.png"
-            if candidate.is_file():
-                image_path = str(candidate)
+            for ext in [".png", ".jpg", ".jpeg"]:
+                candidate = images_root / task_domain / task_id / f"{episode_id}{ext}"
+                if candidate.is_file():
+                    image_path = str(candidate)
+                    break
 
         if image_path is None:
-            candidate = images_root / task_domain / f"{episode_id}.png"
-            if candidate.is_file():
-                image_path = str(candidate)
+            for ext in [".png", ".jpg", ".jpeg"]:
+                candidate = images_root / task_domain / f"{episode_id}{ext}"
+                if candidate.is_file():
+                    image_path = str(candidate)
+                    break
 
         if image_path is None:
             return "skipped_missing_image", None
@@ -459,7 +463,7 @@ def build_sharegpt_pddl(
 
 if __name__ == "__main__":
     root_dir = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm")
-    task_domain = "agibot"
+    task_domain = "unidomain"
 
     instructions_json = root_dir / f"tasks/instructions/instructions_{task_domain}.json"
     eval_root = root_dir / f"eval_results/gemini-3-flash-preview/{task_domain}"
@@ -478,5 +482,5 @@ if __name__ == "__main__":
         eval_root=eval_root,
         prompt_path=root_dir / "src/swm/prompt_templates/training_input.txt",
         out_path=root_dir / f"eval_results/gemini-3-flash-preview/{task_domain}_sharegpt.json",
-        max_workers=128,
+        max_workers=1280,
     )

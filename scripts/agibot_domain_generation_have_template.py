@@ -354,6 +354,6 @@ if __name__ == "__main__":
     MAX_PLAN_ATTEMPTS = 3
     MAX_WORKERS = 50
 
-    task_domain = "human_aug_v1"
+    task_domain = "agibot_aug_v1"
     tasks = load_tasks(root_dir, task_domain)
     run_all_tasks(root_dir, tasks)

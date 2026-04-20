@@ -2,8 +2,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 
-IMG_DIR = Path("/home/xyx/下载/swm/tasks/images/swm_100")
-TARGET_SIZE = (1280, 720)
+IMG_DIR = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/tasks/images/swm")
+LANDSCAPE_TARGET = (1280, 720)
+PORTRAIT_TARGET = (720, 1280)
 WORKERS = 16
 
 EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -16,14 +17,27 @@ def resize_one(img_path: Path):
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
 
-            # 直接缩放到 1280x720
-            img = img.resize(TARGET_SIZE, Image.Resampling.LANCZOS)
+            w, h = img.size
+            new_size = None
 
-            save_kwargs = {}
-            if img_path.suffix.lower() in {".jpg", ".jpeg"}:
-                save_kwargs["quality"] = 95
+            # 横图：宽 > 高，且宽高都超过阈值时，缩放到 (1280, 720)
+            if w > h and w > 1280 and h > 720:
+                new_size = LANDSCAPE_TARGET
 
-            img.save(img_path, **save_kwargs)
+            # 竖图：宽 < 高，且宽高都超过阈值时，缩放到 (720, 1280)
+            elif w < h and w > 720 and h > 1280:
+                new_size = PORTRAIT_TARGET
+
+            # 其他情况不改
+            if new_size is not None:
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+                save_kwargs = {}
+                if img_path.suffix.lower() in {".jpg", ".jpeg"}:
+                    save_kwargs["quality"] = 95
+
+                img.save(img_path, **save_kwargs)
+
         return True, img_path
     except Exception as e:
         return False, f"{img_path}: {e}"

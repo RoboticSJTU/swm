@@ -16,9 +16,9 @@ def get_client(model: str):
         return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xyx.openapi-qb-ai.sii.edu.cn/v1")
 
     if model.startswith("Qwen3.5-27B"):
-        return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xy.openapi-qb-ai.sii.edu.cn/v1")
+        return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xy.openapi-qb.sii.edu.cn/v1")
     
-    return OpenAI(api_key="0", base_url="https://ai-notebook-inspire.sii.edu.cn/ws-9dcc0e1f-80a4-4af2-bc2f-0e352e7b17e6/project-0a63ad2d-c102-4f9f-bdf4-af1a164bc0b0/user-4f2781ab-e1e4-41f6-9367-e0ea36e3562e/vscode/850c6ac3-236b-444e-b556-623a20ed4f95/15ea42f2-4f31-4bbc-8a9d-ec887302fd39/proxy/8000/v1")
+    return OpenAI(api_key="0", base_url="https://notebook-inspire.sii.edu.cn/ws-9dcc0e1f-80a4-4af2-bc2f-0e352e7b17e6/project-0a63ad2d-c102-4f9f-bdf4-af1a164bc0b0/user-4f2781ab-e1e4-41f6-9367-e0ea36e3562e/vscode/2c981536-a6e2-4841-a280-9ee68d91da37/9e550a23-93c4-4850-bf11-4a9fc13de194/proxy/8000/v1")
 
 
 def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) -> str:
@@ -37,7 +37,7 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
     kwargs = dict(
         model=model,
         messages=[{"role": "user", "content": content}],
-        temperature=0.3,
+        temperature=0,
     )
 
     if model.startswith("Qwen3.5"):
@@ -46,6 +46,7 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
         
         # 非推模式
         kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        kwargs["temperature"] = 0.7
 
     output = client.chat.completions.create(**kwargs).choices[0].message.content
     return output

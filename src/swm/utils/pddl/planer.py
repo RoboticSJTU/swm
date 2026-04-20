@@ -1,8 +1,14 @@
 from pathlib import Path
 import subprocess
 from swm.utils.pddl.plan_reorder import plan_reorder
-
+import re
 fast_downward_path = Path(__file__).parent.parent.parent.parent.parent / "downward" / "fast-downward.py"
+
+def extract_error_msg(e):
+    msg = str(e)
+    m = re.search(r"\]'\s*([^\n]+)", msg)
+    return m.group(1) if m else msg
+
 def solve_pddl(domain_file, problem_file):
     """求解PDDL，并返回True或False来判断是否求解成功，且支持并行化求解"""
 
@@ -26,15 +32,13 @@ def solve_pddl(domain_file, problem_file):
             stderr=subprocess.PIPE,
             text=True,
             check=True,
-            timeout=3000,
+            timeout=60,
             cwd=domain_file.parent,
         )
         plan_reorder(domain_file, problem_file, plan_file, plan_file)
-        
         return True
 
     except Exception as e:
         with open(error_file, "w", encoding="utf-8") as f:
             f.write(e.stdout)
         return False
-    

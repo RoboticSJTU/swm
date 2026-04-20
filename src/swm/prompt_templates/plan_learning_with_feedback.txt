@@ -14,7 +14,7 @@ You are now processing Group: [G{group_idx}].
 ## Task 1. Validate history
 If the action history is "none", skip Task 1 (set history_check=true, history_reasoning="", history_feedback="", and earliest_bad_group=-1), then proceed directly to Task 2.
 (1) State Consistency Validation
-- Single-hand constraint: If the hand is holding o, then it cannot manipulate a different object. (e.g., pick up cup, then open microwave - is invalid).
+- Single-hand constraint: If a hand is holding o, then it cannot manipulate a different object. (e.g., pick up cup, then open microwave - is invalid).
 - **World-state match: K0 must match the expected checkable post-state of the last history action (e.g., open/closed, on/off, holding/hand_free), allowing the last action to be in-progress, i.e., the current group starts with a continuation of the last action without mismatch.** 
 (2) Physical Executability Validation
 Verify that each action is physically executable. For example: place an object without first picking it up - is valid.

@@ -1,28 +1,33 @@
 Now you need to help a single-armed robot to plan to finish the given task.
 The given image shows the initial scene.
 
-Here are some examples of the available action APIs for the robot.
-(1) pick up: pick up some object.
-(2) put down: put down the object in the robot's hand on/in some object.
-(3) open: open some object such as drawer, door, etc.
-(4) close: close some object such as drawer, door, etc.
-(5) fold: fold some object such as towel, tissue, etc.
-(6) wipe: wipe some object using the object in the robot's hand.
-(7) scrunch: scrunch some object such as tissue, etc
-(8) stir: stir some object using the object in the robot's hand.
-(9) push: push some object such as block, etc.
-(10) slide: slide some object such as block, etc.
-(11) press: press some object such as button, etc.
-(12) turn on: turn on some object such as light, tap, etc.
-(13) turn off: turn off some object such as light, tap, etc
-(14) pull: pull some object such as rod, handle, etc.
-(15) pour: pour some object using the object in the robot's hand.
-(16) lean: lean some object against some other object, such as lean a board against a wall.
+Here are the only available action APIs for the robot.
+(1) pick up: pick up object from source.
+(2) put down: put down the held object on/in target area.
+(3) open: open object such as drawer, door, etc.
+(4) close: close object such as drawer, door, etc.
+(5) rotate: rotate object or control such as bowl, dial, knob, etc.
+(6) wipe: wipe object using the tool in the robot's hand.
+(7) scoop: scoop object using the tool in the robot's hand.
+(8) stir: stir object using the tool in the robot's hand.
+(9) push: push object such as block, box, etc.
+(10) pull: pull object such as curtain, rope, etc.
+(11) press: press object such as button, switch, etc.
+(12) turn on: turn on object such as light, faucet, appliance, etc.
+(13) turn off: turn off object such as light, faucet, appliance, etc.
+(14) pour: pour contents from the object in the robot's hand into/onto target area.
+(15) fill: fill object from source such as faucet, etc.
+(16) insert: insert the held object into target object such as key into lock, etc.
+(17) remove: remove object from an inserted or attached position such as key from lock, etc.
+(18) lock: lock object such as drawer, door, etc. using the object in the robot's hand or its built-in mechanism.
+(19) unlock: unlock object such as drawer, door, etc. using the object in the robot's hand or its built-in mechanism.
+(20) screw: screw object such as bottle cap, jar lid, etc. onto object.
+(21) unscrew: unscrew object such as bottle cap, jar lid, etc. from object.
 
 When you make decisions, you should consider constraints based on your common sense.
 For example, the robot cannot pick up another object when it is already holding one because it is single-armed.
 
-Instructions: {instruction}
+Instruction: {instruction}
 
 Your output should include two parts:
 (1) reasoning: analyze the image and output the reasons.
@@ -34,5 +39,4 @@ Your output should be in JSON format like below (Do NOT output comments):
     "plan_sequence": ["pick up the green block from table", "place the green block on the red block"]
 }}
 
-Do NOT output any strange symbols like "\".
-Your output (please do not output ```json```):
+Your output (please do not output ```json):
