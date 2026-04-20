@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
 
-
 Literal = tuple[str, ...]
 ResourceSig = tuple[str, ...]
 ObjectSig = tuple[str, ...]
@@ -58,7 +57,9 @@ class OccupancyModel:
             resource = self.implicit_resource
 
         obj = tuple(lit[1 + i] for i in self.object_positions)
-        return (resource, obj) if obj else None
+        if not obj:
+            return None
+        return resource, obj
 
     def build(self, resource: ResourceSig, obj: ObjectSig) -> Literal:
         args: list[str | None] = [None] * self.occ_arity
@@ -84,45 +85,59 @@ class OccupancyModel:
 
 
 # =========================
-# PDDL 解析
+# PDDL parsing
 # =========================
 def load_sexpr(path: Path):
     text = re.sub(r";[^\n]*", "", path.read_text(encoding="utf-8")).lower()
     tokens = text.replace("(", " ( ").replace(")", " ) ").split()
+    idx = 0
 
     def parse():
-        if not tokens:
+        nonlocal idx
+        if idx >= len(tokens):
             raise ValueError(f"Unexpected EOF in {path}")
 
-        token = tokens.pop(0)
-        if token == "(":
+        tok = tokens[idx]
+        idx += 1
+        if tok == "(":
             out = []
-            while tokens and tokens[0] != ")":
+            while idx < len(tokens) and tokens[idx] != ")":
                 out.append(parse())
-            if not tokens:
+            if idx >= len(tokens):
                 raise ValueError(f"Missing ')' in {path}")
-            tokens.pop(0)
+            idx += 1
             return out
-
-        if token == ")":
+        if tok == ")":
             raise ValueError(f"Unexpected ')' in {path}")
-
-        return token
+        return tok
 
     root = parse()
-    if tokens:
+    if idx != len(tokens):
         raise ValueError(f"Unparsed tokens remain in {path}")
     return root
 
 
+def ensure_supported_pddl(path: Path) -> None:
+    root = load_sexpr(path)
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, str):
+            if cur in {"when", "forall", "or"}:
+                raise NotImplementedError(f"Unsupported PDDL construct '{cur}' in {path}")
+            continue
+        if isinstance(cur, list):
+            stack.extend(cur)
+
+
 def strip_types(items: list[str]) -> list[str]:
-    out = []
-    skip = False
+    out: list[str] = []
+    skip_next = False
     for x in items:
         if x == "-":
-            skip = True
-        elif skip:
-            skip = False
+            skip_next = True
+        elif skip_next:
+            skip_next = False
         else:
             out.append(x)
     return out
@@ -131,21 +146,18 @@ def strip_types(items: list[str]) -> list[str]:
 def read_literals(expr) -> tuple[set[Literal], set[Literal]]:
     if expr is None:
         return set(), set()
-
     if isinstance(expr, str):
         raise ValueError(f"Unexpected atom: {expr}")
-
     if expr[0] == "and":
-        pos, neg = set(), set()
+        pos: set[Literal] = set()
+        neg: set[Literal] = set()
         for sub in expr[1:]:
-            p, n = read_literals(sub)
-            pos |= p
-            neg |= n
+            sub_pos, sub_neg = read_literals(sub)
+            pos |= sub_pos
+            neg |= sub_neg
         return pos, neg
-
     if expr[0] == "not":
         return set(), {tuple(expr[1])}
-
     return {tuple(expr)}, set()
 
 
@@ -154,7 +166,7 @@ def parse_domain(path: Path) -> dict[str, ActionSchema]:
     if root[0] != "define":
         raise ValueError(f"{path} is not a valid domain file")
 
-    schemas = {}
+    schemas: dict[str, ActionSchema] = {}
     for item in root[1:]:
         if not isinstance(item, list) or not item or item[0] != ":action":
             continue
@@ -163,7 +175,6 @@ def parse_domain(path: Path) -> dict[str, ActionSchema]:
         params: list[str] = []
         precondition = None
         effect = None
-
         i = 2
         while i < len(item):
             key = item[i]
@@ -196,7 +207,6 @@ def parse_problem(path: Path) -> tuple[set[Literal], set[Literal], set[Literal]]
     for item in root[1:]:
         if not isinstance(item, list) or not item:
             continue
-
         if item[0] == ":init":
             for lit in item[1:]:
                 if isinstance(lit, list) and lit and lit[0] == "not":
@@ -209,7 +219,6 @@ def parse_problem(path: Path) -> tuple[set[Literal], set[Literal], set[Literal]]
                     if atom in init_neg:
                         raise ValueError(f"{path}: contradictory init literal {atom}")
                     init_state.add(atom)
-
         elif item[0] == ":goal":
             goal_pos, goal_neg = read_literals(item[1])
 
@@ -217,40 +226,30 @@ def parse_problem(path: Path) -> tuple[set[Literal], set[Literal], set[Literal]]
 
 
 def parse_plan(path: Path) -> tuple[list[tuple[str, list[str]]], list[str]]:
-    plan = []
-    comments = []
-
+    actions: list[tuple[str, list[str]]] = []
+    comments: list[str] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line:
             continue
-
         if line.startswith(";"):
             comments.append(line)
             continue
-
         m = re.match(r"^\(([^()]*)\)$", line.lower())
-        if not m:
-            continue
-
-        parts = m.group(1).split()
-        plan.append((parts[0], parts[1:]))
-
-    return plan, comments
+        if m:
+            parts = m.group(1).split()
+            actions.append((parts[0], parts[1:]))
+    return actions, comments
 
 
 # =========================
-# grounding + 执行
+# Grounding and execution
 # =========================
-def ground_plan(raw_plan, schemas):
-    def substitute(lit, mapping):
-        return tuple(mapping.get(x, x) for x in lit)
-
-    plan = []
+def ground_plan(raw_plan: list[tuple[str, list[str]]], schemas: dict[str, ActionSchema]) -> list[GroundAction]:
+    plan: list[GroundAction] = []
     for name, args in raw_plan:
         if name not in schemas:
             raise KeyError(f"Action '{name}' not found in domain")
-
         schema = schemas[name]
         if len(args) != len(schema.params):
             raise ValueError(
@@ -258,32 +257,19 @@ def ground_plan(raw_plan, schemas):
             )
 
         mapping = dict(zip(schema.params, args))
-
-        pre_pos = {substitute(lit, mapping) for lit in schema.pre_pos}
-        pre_neg = {substitute(lit, mapping) for lit in schema.pre_neg}
-        add_eff = {substitute(lit, mapping) for lit in schema.add_eff}
-        del_eff = {substitute(lit, mapping) for lit in schema.del_eff}
-
-        # 关键修复：若同一 grounded literal 同时 add 和 del，按 apply_action 的语义保留 add
+        pre_pos = {tuple(mapping.get(x, x) for x in lit) for lit in schema.pre_pos}
+        pre_neg = {tuple(mapping.get(x, x) for x in lit) for lit in schema.pre_neg}
+        add_eff = {tuple(mapping.get(x, x) for x in lit) for lit in schema.add_eff}
+        del_eff = {tuple(mapping.get(x, x) for x in lit) for lit in schema.del_eff}
         del_eff -= add_eff
 
-        plan.append(
-            GroundAction(
-                name=name,
-                args=args,
-                pre_pos=pre_pos,
-                pre_neg=pre_neg,
-                add_eff=add_eff,
-                del_eff=del_eff,
-            )
-        )
+        plan.append(GroundAction(name, args, pre_pos, pre_neg, add_eff, del_eff))
     return plan
 
 
 def apply_action(state: set[Literal], action: GroundAction) -> set[Literal]:
     missing = action.pre_pos - state
     violated = action.pre_neg & state
-
     if missing or violated:
         msg = [f"Action not applicable: {action.to_line()}"]
         if missing:
@@ -298,19 +284,13 @@ def apply_action(state: set[Literal], action: GroundAction) -> set[Literal]:
     return new_state
 
 
-def rollout(
-    init_state: set[Literal],
-    plan: list[GroundAction],
-    trace: bool = False,
-) -> set[Literal] | list[set[Literal]]:
+def rollout(init_state: set[Literal], plan: list[GroundAction], trace: bool = False):
     state = set(init_state)
     states = [set(state)] if trace else None
-
     for action in plan:
         state = apply_action(state, action)
         if trace:
             states.append(set(state))
-
     return states if trace else state
 
 
@@ -319,43 +299,45 @@ def goals_satisfied(state: set[Literal], goal_pos: set[Literal], goal_neg: set[L
 
 
 # =========================
-# occupancy 推理
+# Occupancy inference
 # =========================
-def infer_occupancy_model(
-    init_state: set[Literal],
-    plan: list[GroundAction],
-) -> OccupancyModel | None:
+def infer_occupancy_model(init_state: set[Literal], plan: list[GroundAction]) -> OccupancyModel | None:
     states = rollout(init_state, plan, trace=True)
     assert isinstance(states, list)
 
-    pred_arities: dict[str, int] = {}
+    pred_arity: dict[str, int] = {}
     pred_literals: dict[str, list[Literal]] = {}
     add_count: dict[str, int] = {}
     del_count: dict[str, int] = {}
 
-    def record(lit: Literal):
+    def record(lit: Literal) -> None:
         pred = lit[0]
         arity = len(lit) - 1
-        old = pred_arities.get(pred)
-        if old is not None and old != arity:
+        if pred in pred_arity and pred_arity[pred] != arity:
             raise ValueError(f"Predicate {pred} appears with inconsistent arity")
-        pred_arities[pred] = arity
-        pred_literals.setdefault(pred, []).append(lit)
+        pred_arity[pred] = arity
+        if pred not in pred_literals:
+            pred_literals[pred] = []
+        pred_literals[pred].append(lit)
 
     for state in states:
         for lit in state:
             record(lit)
-
     for action in plan:
         for lit in action.pre_pos | action.pre_neg | action.add_eff | action.del_eff:
             record(lit)
         for lit in action.add_eff:
-            add_count[lit[0]] = add_count.get(lit[0], 0) + 1
+            pred = lit[0]
+            if pred not in add_count:
+                add_count[pred] = 0
+            add_count[pred] += 1
         for lit in action.del_eff:
-            del_count[lit[0]] = del_count.get(lit[0], 0) + 1
+            pred = lit[0]
+            if pred not in del_count:
+                del_count[pred] = 0
+            del_count[pred] += 1
 
-    # 第一层：标准锚点 hand_free / holding
-    if pred_arities.get("hand_free") == 1 and pred_arities.get("holding") == 2:
+    if pred_arity.get("hand_free") == 1 and pred_arity.get("holding") == 2:
         resources = {tuple(lit[1:]) for lit in pred_literals.get("hand_free", [])}
         if resources:
             return OccupancyModel(
@@ -368,47 +350,13 @@ def infer_occupancy_model(
                 implicit_resource=None,
             )
 
-    # 第二层：泛化占用推理
     dynamic_preds = [
-        pred
-        for pred in pred_arities
-        if add_count.get(pred, 0) > 0 and del_count.get(pred, 0) > 0
+        pred for pred in pred_arity if add_count.get(pred, 0) > 0 and del_count.get(pred, 0) > 0
     ]
     if not dynamic_preds:
         return None
 
-    def all_position_subsets(arity: int):
-        positions = list(range(arity))
-        for r in range(arity + 1):
-            for subset in combinations(positions, r):
-                yield tuple(subset)
-
-    def project_candidate(
-        lit: Literal,
-        occ_pred: str,
-        occ_arity: int,
-        resource_positions: tuple[int, ...],
-        object_positions: tuple[int, ...],
-        resources: set[ResourceSig],
-        implicit_resource: ResourceSig | None,
-    ) -> tuple[ResourceSig, ObjectSig] | None:
-        if lit[0] != occ_pred or len(lit) != occ_arity + 1:
-            return None
-
-        if resource_positions:
-            resource = tuple(lit[1 + i] for i in resource_positions)
-            if resource not in resources:
-                return None
-        else:
-            if implicit_resource is None:
-                return None
-            resource = implicit_resource
-
-        obj = tuple(lit[1 + i] for i in object_positions)
-        return (resource, obj) if obj else None
-
     candidates: list[tuple[tuple, OccupancyModel]] = []
-
     for free_pred in dynamic_preds:
         resources = {tuple(lit[1:]) for lit in pred_literals.get(free_pred, [])}
         if not resources:
@@ -418,177 +366,174 @@ def infer_occupancy_model(
             if occ_pred == free_pred:
                 continue
 
-            occ_arity = pred_arities[occ_pred]
-            for resource_positions in all_position_subsets(occ_arity):
-                object_positions = tuple(i for i in range(occ_arity) if i not in resource_positions)
-                if not object_positions:
-                    continue
-
-                implicit_resource = None
-                if not resource_positions:
-                    if len(resources) != 1:
+            occ_arity = pred_arity[occ_pred]
+            positions = list(range(occ_arity))
+            for r in range(occ_arity + 1):
+                for resource_positions in combinations(positions, r):
+                    object_positions = tuple(i for i in positions if i not in resource_positions)
+                    if not object_positions:
                         continue
-                    implicit_resource = next(iter(resources))
 
-                acquire = 0
-                release = 0
-                state_matches = 0
-                free_overlap = 0
-                mutex_conflicts = 0
-                object_conflicts = 0
-                outside_resource = 0
-                occ_seen = 0
-                free_init_count = sum(1 for lit in states[0] if lit[0] == free_pred)
-                occ_init_count = sum(1 for lit in states[0] if lit[0] == occ_pred)
+                    implicit_resource: ResourceSig | None = None
+                    if not resource_positions:
+                        if len(resources) != 1:
+                            continue
+                        implicit_resource = next(iter(resources))
 
-                for state in states:
-                    free_now = {
-                        tuple(lit[1:])
-                        for lit in state
-                        if lit[0] == free_pred and len(lit) == pred_arities[free_pred] + 1
-                    }
-                    resource_to_objects: dict[ResourceSig, set[ObjectSig]] = {}
-                    object_to_resources: dict[ObjectSig, set[ResourceSig]] = {}
+                    def project(lit: Literal) -> tuple[ResourceSig, ObjectSig] | None:
+                        if lit[0] != occ_pred or len(lit) != occ_arity + 1:
+                            return None
+                        if resource_positions:
+                            resource = tuple(lit[1 + i] for i in resource_positions)
+                            if resource not in resources:
+                                return None
+                        else:
+                            if implicit_resource is None:
+                                return None
+                            resource = implicit_resource
+                        obj = tuple(lit[1 + i] for i in object_positions)
+                        if not obj:
+                            return None
+                        return resource, obj
 
-                    for lit in state:
-                        projected = project_candidate(
-                            lit,
-                            occ_pred,
-                            occ_arity,
-                            resource_positions,
-                            object_positions,
-                            resources,
-                            implicit_resource,
-                        )
+                    acquire = 0
+                    release = 0
+                    state_matches = 0
+                    free_overlap = 0
+                    mutex_conflicts = 0
+                    object_conflicts = 0
+                    outside_resource = 0
+                    occ_seen = 0
+                    free_init_count = sum(1 for lit in states[0] if lit[0] == free_pred)
+                    occ_init_count = sum(1 for lit in states[0] if lit[0] == occ_pred)
 
-                        if lit[0] == occ_pred and len(lit) == occ_arity + 1:
-                            occ_seen += 1
-                            if projected is None:
+                    for state in states:
+                        free_now = {
+                            tuple(lit[1:])
+                            for lit in state
+                            if lit[0] == free_pred and len(lit) == pred_arity[free_pred] + 1
+                        }
+                        resource_to_objects: dict[ResourceSig, set[ObjectSig]] = {}
+                        object_to_resources: dict[ObjectSig, set[ResourceSig]] = {}
+
+                        for lit in state:
+                            if lit[0] == occ_pred and len(lit) == occ_arity + 1:
+                                occ_seen += 1
+                            projected = project(lit)
+                            if lit[0] == occ_pred and len(lit) == occ_arity + 1 and projected is None:
                                 outside_resource += 1
+                            if projected is None:
                                 continue
 
-                        if projected is None:
-                            continue
+                            resource, obj = projected
+                            state_matches += 1
+                            if resource in free_now:
+                                free_overlap += 1
+                            if resource not in resource_to_objects:
+                                resource_to_objects[resource] = set()
+                            resource_to_objects[resource].add(obj)
+                            if obj not in object_to_resources:
+                                object_to_resources[obj] = set()
+                            object_to_resources[obj].add(resource)
 
-                        resource, obj = projected
-                        state_matches += 1
-                        if resource in free_now:
-                            free_overlap += 1
-                        resource_to_objects.setdefault(resource, set()).add(obj)
-                        object_to_resources.setdefault(obj, set()).add(resource)
+                        for values in resource_to_objects.values():
+                            if len(values) > 1:
+                                mutex_conflicts += len(values) - 1
+                        for values in object_to_resources.values():
+                            if len(values) > 1:
+                                object_conflicts += len(values) - 1
 
-                    mutex_conflicts += sum(len(v) - 1 for v in resource_to_objects.values() if len(v) > 1)
-                    object_conflicts += sum(len(v) - 1 for v in object_to_resources.values() if len(v) > 1)
+                    if occ_seen == 0:
+                        continue
 
-                if occ_seen == 0:
-                    continue
+                    for action in plan:
+                        deleted_free = {
+                            tuple(lit[1:])
+                            for lit in action.del_eff
+                            if lit[0] == free_pred and len(lit) == pred_arity[free_pred] + 1
+                        }
+                        added_free = {
+                            tuple(lit[1:])
+                            for lit in action.add_eff
+                            if lit[0] == free_pred and len(lit) == pred_arity[free_pred] + 1
+                        }
+                        added_occ_resources: set[ResourceSig] = set()
+                        deleted_occ_resources: set[ResourceSig] = set()
 
-                for action in plan:
-                    deleted_free = {
-                        tuple(lit[1:])
-                        for lit in action.del_eff
-                        if lit[0] == free_pred and len(lit) == pred_arities[free_pred] + 1
-                    }
-                    added_free = {
-                        tuple(lit[1:])
-                        for lit in action.add_eff
-                        if lit[0] == free_pred and len(lit) == pred_arities[free_pred] + 1
-                    }
+                        for lit in action.add_eff:
+                            projected = project(lit)
+                            if projected is not None:
+                                added_occ_resources.add(projected[0])
+                        for lit in action.del_eff:
+                            projected = project(lit)
+                            if projected is not None:
+                                deleted_occ_resources.add(projected[0])
 
-                    added_occ_resources = set()
-                    deleted_occ_resources = set()
+                        acquire += len(deleted_free & added_occ_resources)
+                        release += len(added_free & deleted_occ_resources)
 
-                    for lit in action.add_eff:
-                        projected = project_candidate(
-                            lit,
-                            occ_pred,
-                            occ_arity,
-                            resource_positions,
-                            object_positions,
-                            resources,
-                            implicit_resource,
-                        )
-                        if projected is not None:
-                            added_occ_resources.add(projected[0])
+                    if acquire + release == 0 and state_matches == 0:
+                        continue
 
-                    for lit in action.del_eff:
-                        projected = project_candidate(
-                            lit,
-                            occ_pred,
-                            occ_arity,
-                            resource_positions,
-                            object_positions,
-                            resources,
-                            implicit_resource,
-                        )
-                        if projected is not None:
-                            deleted_occ_resources.add(projected[0])
-
-                    acquire += len(deleted_free & added_occ_resources)
-                    release += len(added_free & deleted_occ_resources)
-
-                if acquire + release == 0 and state_matches == 0:
-                    continue
-
-                score = (
-                    1 if acquire + release > 0 else 0,
-                    acquire + release,
-                    min(acquire, release),
-                    free_init_count,
-                    -pred_arities[free_pred],
-                    -occ_init_count,
-                    state_matches,
-                    -free_overlap,
-                    -mutex_conflicts,
-                    -object_conflicts,
-                    -outside_resource,
-                    1 if resource_positions else 0,
-                )
-
-                candidates.append(
-                    (
-                        score,
-                        OccupancyModel(
-                            free_pred=free_pred,
-                            occ_pred=occ_pred,
-                            occ_arity=occ_arity,
-                            resource_positions=resource_positions,
-                            object_positions=object_positions,
-                            resources=resources,
-                            implicit_resource=implicit_resource,
-                        ),
+                    score = (
+                        1 if acquire + release > 0 else 0,
+                        acquire + release,
+                        min(acquire, release),
+                        free_init_count,
+                        -pred_arity[free_pred],
+                        -occ_init_count,
+                        state_matches,
+                        -free_overlap,
+                        -mutex_conflicts,
+                        -object_conflicts,
+                        -outside_resource,
+                        1 if resource_positions else 0,
                     )
-                )
+                    candidates.append(
+                        (
+                            score,
+                            OccupancyModel(
+                                free_pred=free_pred,
+                                occ_pred=occ_pred,
+                                occ_arity=occ_arity,
+                                resource_positions=tuple(resource_positions),
+                                object_positions=object_positions,
+                                resources=resources,
+                                implicit_resource=implicit_resource,
+                            ),
+                        )
+                    )
 
     if not candidates:
         return None
-
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
 
 # =========================
-# 严格前驱 DAG
+# Strict DAG
 # =========================
 def build_predecessors(
     init_state: set[Literal],
     goal_pos: set[Literal],
     goal_neg: set[Literal],
     plan: list[GroundAction],
+    occupancy_model: OccupancyModel | None,
 ) -> dict[int, set[int]]:
     n = len(plan)
     preds = {i: set() for i in range(n)}
 
-    def add_edge(i: int, j: int):
+    resource_preds = {"hand_free", "holding"}
+    if occupancy_model is not None:
+        resource_preds.add(occupancy_model.free_pred)
+        resource_preds.add(occupancy_model.occ_pred)
+
+    def add_edge(i: int, j: int) -> None:
         if i != j:
             preds[j].add(i)
 
     def latest_supporter(end: int, lit: Literal, positive: bool) -> int | None:
-        if positive:
-            provider = -1 if lit in init_state else None
-        else:
-            provider = -1 if lit not in init_state else None
-
+        provider = (-1 if lit in init_state else None) if positive else (-1 if lit not in init_state else None)
         for i in range(end):
             if positive:
                 if lit in plan[i].del_eff:
@@ -600,14 +545,15 @@ def build_predecessors(
                     provider = None
                 if lit in plan[i].del_eff:
                     provider = i
-
         return provider
 
-    pos_links = []
-    neg_links = []
+    pos_links: list[tuple[int, int, Literal]] = []
+    neg_links: list[tuple[int, int, Literal]] = []
 
     for consumer, action in enumerate(plan):
         for lit in action.pre_pos:
+            if lit[0] in resource_preds:
+                continue
             provider = latest_supporter(consumer, lit, True)
             if provider is None:
                 raise ValueError(
@@ -619,6 +565,8 @@ def build_predecessors(
                 add_edge(provider, consumer)
 
         for lit in action.pre_neg:
+            if lit[0] in resource_preds:
+                continue
             provider = latest_supporter(consumer, lit, False)
             if provider is None:
                 raise ValueError(
@@ -633,7 +581,6 @@ def build_predecessors(
         for k, action in enumerate(plan):
             if k == consumer or lit not in action.del_eff:
                 continue
-
             if provider == -1:
                 if k < consumer:
                     add_edge(consumer, k)
@@ -647,7 +594,6 @@ def build_predecessors(
         for k, action in enumerate(plan):
             if k == consumer or lit not in action.add_eff:
                 continue
-
             if provider == -1:
                 if k < consumer:
                     add_edge(consumer, k)
@@ -679,7 +625,7 @@ def build_predecessors(
 
 
 # =========================
-# 搜索重排
+# Reordering search
 # =========================
 def reorder_by_search(
     init_state: set[Literal],
@@ -690,43 +636,65 @@ def reorder_by_search(
     occupancy_model: OccupancyModel | None,
 ) -> list[GroundAction]:
     n = len(plan)
-    all_done = (1 << n) - 1
-    failed = set()
+    done_all = (1 << n) - 1
+    failed: set[tuple[int, frozenset[Literal]]] = set()
 
     pos_supporters: dict[tuple[int, Literal], list[int]] = {}
     neg_supporters: dict[tuple[int, Literal], list[int]] = {}
+    state_preds = {lit[0] for action in plan for lit in (action.add_eff | action.del_eff)}
+    resource_preds = {"hand_free"}
+    if occupancy_model is not None:
+        resource_preds.add(occupancy_model.free_pred)
+        resource_preds.add(occupancy_model.occ_pred)
 
-    for consumer, action in enumerate(plan):
+    use_pos: dict[Literal, list[int]] = {}
+    use_neg: dict[Literal, list[int]] = {}
+    adders: dict[Literal, list[int]] = {}
+    deleters: dict[Literal, list[int]] = {}
+    state_items: set[tuple[str, Literal]] = set()
+
+    for idx, action in enumerate(plan):
         for lit in action.pre_pos:
             providers = []
             if lit in init_state:
                 providers.append(-1)
-            providers.extend(i for i in range(consumer) if lit in plan[i].add_eff)
-            pos_supporters[(consumer, lit)] = providers
+            providers.extend(i for i in range(idx) if lit in plan[i].add_eff)
+            pos_supporters[(idx, lit)] = providers
+            if lit[0] in state_preds and lit[0] not in resource_preds:
+                state_items.add(("pos", lit))
+                if lit not in use_pos:
+                    use_pos[lit] = []
+                use_pos[lit].append(idx)
 
         for lit in action.pre_neg:
             providers = []
             if lit not in init_state:
                 providers.append(-1)
-            providers.extend(i for i in range(consumer) if lit in plan[i].del_eff)
-            neg_supporters[(consumer, lit)] = providers
+            providers.extend(i for i in range(idx) if lit in plan[i].del_eff)
+            neg_supporters[(idx, lit)] = providers
+            if lit[0] in state_preds and lit[0] not in resource_preds:
+                state_items.add(("neg", lit))
+                if lit not in use_neg:
+                    use_neg[lit] = []
+                use_neg[lit].append(idx)
 
-    state_preds = {lit[0] for action in plan for lit in (action.add_eff | action.del_eff)}
-    excluded = {"hand_free"}
-    if occupancy_model is not None:
-        excluded.add(occupancy_model.free_pred)
-        excluded.add(occupancy_model.occ_pred)
+        for lit in action.add_eff:
+            if lit not in adders:
+                adders[lit] = []
+            adders[lit].append(idx)
+        for lit in action.del_eff:
+            if lit not in deleters:
+                deleters[lit] = []
+            deleters[lit].append(idx)
 
-    state_chain_requirements: dict[int, set[tuple[str, Literal]]] = {}
-    for i, action in enumerate(plan):
-        reqs = set()
-        for lit in action.pre_pos:
-            if lit[0] in state_preds and lit[0] not in excluded:
-                reqs.add(("pos", lit))
-        for lit in action.pre_neg:
-            if lit[0] in state_preds and lit[0] not in excluded:
-                reqs.add(("neg", lit))
-        state_chain_requirements[i] = reqs
+    for lit in goal_pos:
+        if lit[0] in state_preds and lit[0] not in resource_preds:
+            state_items.add(("pos", lit))
+    for lit in goal_neg:
+        if lit[0] in state_preds and lit[0] not in resource_preds:
+            state_items.add(("neg", lit))
+
+    state_items = sorted(state_items)
 
     def potential(distance: int) -> float:
         return 1.0 / (distance + 1.0)
@@ -734,50 +702,91 @@ def reorder_by_search(
     def current_holding(state: set[Literal]) -> dict[ResourceSig, ObjectSig]:
         if occupancy_model is None:
             return {}
-
         buckets: dict[ResourceSig, set[ObjectSig]] = {}
         for lit in state:
             projected = occupancy_model.project(lit)
             if projected is None:
                 continue
             resource, obj = projected
-            buckets.setdefault(resource, set()).add(obj)
-
-        out = {}
+            if resource not in buckets:
+                buckets[resource] = set()
+            buckets[resource].add(obj)
+        out: dict[ResourceSig, ObjectSig] = {}
         for resource, objects in buckets.items():
             if len(objects) == 1:
                 out[resource] = next(iter(objects))
         return out
 
-    def open_state_chains(state: set[Literal], done_mask: int) -> set[int]:
-        active = set()
-        for consumer in range(n):
-            if done_mask & (1 << consumer):
+    def target_state_ready(target: int, state: set[Literal]) -> bool:
+        action = plan[target]
+        for lit in action.pre_pos:
+            if lit[0] in state_preds and lit[0] not in resource_preds and lit not in state:
+                return False
+        for lit in action.pre_neg:
+            if lit[0] in state_preds and lit[0] not in resource_preds and lit in state:
+                return False
+        return True
+
+    def state_targets(state: set[Literal], done_mask: int) -> dict[int, float]:
+        targets: dict[int, float] = {}
+        done_steps = [i for i in range(n) if done_mask & (1 << i)]
+
+        for sign, lit in state_items:
+            if sign == "pos":
+                if lit not in state:
+                    continue
+                use_list = use_pos.get(lit, [])
+                establish_list = adders.get(lit, [])
+                flip_list = deleters.get(lit, [])
+                goal_needed = lit in goal_pos
+            else:
+                if lit in state:
+                    continue
+                use_list = use_neg.get(lit, [])
+                establish_list = deleters.get(lit, [])
+                flip_list = adders.get(lit, [])
+                goal_needed = lit in goal_neg
+
+            started = False
+            for i in done_steps:
+                if i in use_list or i in establish_list:
+                    started = True
+                    break
+            if not started:
                 continue
 
-            for sign, lit in state_chain_requirements[consumer]:
-                if sign == "pos":
-                    if lit in state and any(
-                        (done_mask & (1 << i)) and lit in plan[i].add_eff
-                        for i in range(consumer)
-                    ):
-                        active.add(consumer)
+            target: int | None = None
+            is_support = False
+            for j in use_list:
+                if not (done_mask & (1 << j)):
+                    target = j
+                    is_support = True
+                    break
+
+            if target is None and not goal_needed:
+                for j in flip_list:
+                    if not (done_mask & (1 << j)):
+                        target = j
                         break
-                else:
-                    if lit not in state and any(
-                        (done_mask & (1 << i)) and lit in plan[i].del_eff
-                        for i in range(consumer)
-                    ):
-                        active.add(consumer)
-                        break
-        return active
+
+            if target is None:
+                continue
+
+            weight = 1.0
+            if is_support and not target_state_ready(target, state):
+                weight = 0.0
+
+            if target not in targets or weight > targets[target]:
+                targets[target] = weight
+
+        return targets
 
     def make_distance(state: set[Literal], done_mask: int):
-        memo = {}
-        visiting = set()
+        memo: dict[int, frozenset[int] | None] = {}
+        visiting: set[int] = set()
         impossible = frozenset(range(n))
 
-        def needed(idx: int):
+        def needed(idx: int) -> frozenset[int] | None:
             if done_mask & (1 << idx):
                 return None
             if idx in memo:
@@ -786,7 +795,7 @@ def reorder_by_search(
                 return impossible
 
             visiting.add(idx)
-            need = set()
+            need: set[int] = set()
 
             for p in preds[idx]:
                 if done_mask & (1 << p):
@@ -802,61 +811,49 @@ def reorder_by_search(
             for lit in plan[idx].pre_pos:
                 if lit in state:
                     continue
-
-                best = None
+                best: frozenset[int] | None = None
                 for provider in pos_supporters[(idx, lit)]:
                     if provider == -1:
                         continue
-
                     if done_mask & (1 << provider):
                         if lit in state:
                             best = frozenset()
                             break
                         continue
-
                     sub = needed(provider)
                     if sub is None:
                         continue
-
                     cand = frozenset(set(sub) | {provider})
                     if best is None or len(cand) < len(best):
                         best = cand
-
                 if best is None:
                     visiting.remove(idx)
                     memo[idx] = None
                     return None
-
                 need.update(best)
 
             for lit in plan[idx].pre_neg:
                 if lit not in state:
                     continue
-
                 best = None
                 for provider in neg_supporters[(idx, lit)]:
                     if provider == -1:
                         continue
-
                     if done_mask & (1 << provider):
                         if lit not in state:
                             best = frozenset()
                             break
                         continue
-
                     sub = needed(provider)
                     if sub is None:
                         continue
-
                     cand = frozenset(set(sub) | {provider})
                     if best is None or len(cand) < len(best):
                         best = cand
-
                 if best is None:
                     visiting.remove(idx)
                     memo[idx] = None
                     return None
-
                 need.update(best)
 
             visiting.remove(idx)
@@ -869,12 +866,6 @@ def reorder_by_search(
 
         return dist
 
-    def finish_state_chain(dist_fn, idx: int, executed_now: bool = False) -> int | None:
-        if executed_now:
-            return 0
-        d = dist_fn(idx)
-        return None if d is None else d + 1
-
     def finish_holding(
         state: set[Literal],
         dist_fn,
@@ -884,58 +875,24 @@ def reorder_by_search(
     ) -> int | None:
         if current_holding(state).get(resource) != obj:
             return 0
-
         assert occupancy_model is not None
-        lit = occupancy_model.build(resource, obj)
-
-        best = None
+        holding_lit = occupancy_model.build(resource, obj)
+        best: int | None = None
         for j, action in enumerate(plan):
             if done_mask & (1 << j):
                 continue
-            if lit not in action.del_eff:
+            if holding_lit not in action.del_eff:
                 continue
-
             d = dist_fn(j)
             if d is None:
                 continue
-
             cand = d + 1
             if best is None or cand < best:
                 best = cand
-
-        return best
-
-    def current_chains(state: set[Literal], done_mask: int) -> list[tuple]:
-        chains = [("state", idx) for idx in sorted(open_state_chains(state, done_mask))]
-        for resource, obj in sorted(current_holding(state).items()):
-            chains.append(("holding", resource, obj))
-        return chains
-
-    def new_chain_bonus(
-        chain_set_now: set[tuple],
-        chains_next: list[tuple],
-        next_state: set[Literal],
-        next_mask: int,
-        dist_next,
-    ) -> float:
-        best = 0.0
-        for chain in chains_next:
-            if chain in chain_set_now:
-                continue
-
-            if chain[0] == "state":
-                distance = finish_state_chain(dist_next, chain[1])
-            else:
-                _, resource, obj = chain
-                distance = finish_holding(next_state, dist_next, next_mask, resource, obj)
-
-            if distance is not None:
-                best = max(best, potential(distance))
-
         return best
 
     def rank_ready_actions(state: set[Literal], done_mask: int) -> list[int]:
-        ready = []
+        ready: list[int] = []
         for i, action in enumerate(plan):
             if done_mask & (1 << i):
                 continue
@@ -951,42 +908,66 @@ def reorder_by_search(
             return []
 
         dist_now = make_distance(state, done_mask)
-        chains_now = current_chains(state, done_mask)
-        chain_set_now = set(chains_now)
-        scored = []
+        state_targets_now = state_targets(state, done_mask)
+        holding_now = current_holding(state)
+        scored: list[tuple[tuple, int]] = []
 
         for i in ready:
             next_state = apply_action(state, plan[i])
             next_mask = done_mask | (1 << i)
             dist_next = make_distance(next_state, next_mask)
-            chains_next = current_chains(next_state, next_mask)
+            state_targets_next = state_targets(next_state, next_mask)
+            holding_next = current_holding(next_state)
 
             progress = 0.0
-            for chain in chains_now:
-                if chain[0] == "state":
-                    idx = chain[1]
-                    before = finish_state_chain(dist_now, idx)
-                    after = finish_state_chain(dist_next, idx, executed_now=(idx == i))
-                else:
-                    _, resource, obj = chain
-                    before = finish_holding(state, dist_now, done_mask, resource, obj)
-                    after = finish_holding(next_state, dist_next, next_mask, resource, obj)
+            for target in state_targets_now:
+                before = dist_now(target)
+                before = None if before is None else before + 1
+                if before is None:
+                    continue
+                after = 0 if target == i else dist_next(target)
+                after = after if target == i or after is None else after + 1
+                if after is None:
+                    continue
+                gain = potential(after) - potential(before)
+                if target != i:
+                    gain *= state_targets_next.get(target, 0.0)
+                if gain > 0:
+                    progress += gain
 
+            for resource, obj in holding_now.items():
+                before = finish_holding(state, dist_now, done_mask, resource, obj)
+                after = finish_holding(next_state, dist_next, next_mask, resource, obj)
                 if before is None or after is None:
                     continue
-
                 gain = potential(after) - potential(before)
                 if gain > 0:
                     progress += gain
 
-            bonus = new_chain_bonus(chain_set_now, chains_next, next_state, next_mask, dist_next)
+            bonus = 0.0
+            for target, weight in state_targets_next.items():
+                if target in state_targets_now:
+                    continue
+                d = dist_next(target)
+                if d is None:
+                    continue
+                bonus = max(bonus, potential(d + 1) * weight)
+
+            for resource, obj in holding_next.items():
+                if holding_now.get(resource) == obj:
+                    continue
+                d = finish_holding(next_state, dist_next, next_mask, resource, obj)
+                if d is None:
+                    continue
+                bonus = max(bonus, potential(d))
+
             scored.append(((1 if progress > 0 else 0, progress, bonus, -i), i))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [i for _, i in scored]
 
-    def dfs(done_mask: int, state: frozenset[Literal]):
-        if done_mask == all_done:
+    def dfs(done_mask: int, state: frozenset[Literal]) -> list[int] | None:
+        if done_mask == done_all:
             return [] if goals_satisfied(set(state), goal_pos, goal_neg) else None
 
         key = (done_mask, state)
@@ -1009,49 +990,56 @@ def reorder_by_search(
     reordered = [plan[i] for i in order]
     final_state = rollout(init_state, reordered)
     assert isinstance(final_state, set)
-
     return reordered if goals_satisfied(final_state, goal_pos, goal_neg) else plan
 
 
 # =========================
-# 主流程
+# Main entry
 # =========================
 def plan_reorder(domain_path: Path, problem_path: Path, plan_path: Path, output_path: Path) -> None:
-    schemas = parse_domain(domain_path)
-    init_state, goal_pos, goal_neg = parse_problem(problem_path)
-    raw_plan, comments = parse_plan(plan_path)
-    plan = ground_plan(raw_plan, schemas)
+    try:
+        ensure_supported_pddl(domain_path)
+        ensure_supported_pddl(problem_path)
 
-    original_final = rollout(init_state, plan)
-    assert isinstance(original_final, set)
-    if not goals_satisfied(original_final, goal_pos, goal_neg):
-        missing = sorted(goal_pos - original_final)
-        violated = sorted(goal_neg & original_final)
-        msg = ["Original plan does not satisfy goal."]
-        if missing:
-            msg.append(f"Missing positive goals: {missing}")
-        if violated:
-            msg.append(f"Violated negative goals: {violated}")
-        raise ValueError("\n".join(msg))
+        schemas = parse_domain(domain_path)
+        init_state, goal_pos, goal_neg = parse_problem(problem_path)
+        raw_plan, comments = parse_plan(plan_path)
+        plan = ground_plan(raw_plan, schemas)
 
-    occupancy_model = infer_occupancy_model(init_state, plan)
-    preds = build_predecessors(init_state, goal_pos, goal_neg, plan)
-    reordered = reorder_by_search(init_state, goal_pos, goal_neg, plan, preds, occupancy_model)
+        original_final = rollout(init_state, plan)
+        assert isinstance(original_final, set)
+        if not goals_satisfied(original_final, goal_pos, goal_neg):
+            missing = sorted(goal_pos - original_final)
+            violated = sorted(goal_neg & original_final)
+            msg = ["Original plan does not satisfy goal."]
+            if missing:
+                msg.append(f"Missing positive goals: {missing}")
+            if violated:
+                msg.append(f"Violated negative goals: {violated}")
+            raise ValueError("\n".join(msg))
 
-    final_state = rollout(init_state, reordered)
-    assert isinstance(final_state, set)
-    if not goals_satisfied(final_state, goal_pos, goal_neg):
-        missing = sorted(goal_pos - final_state)
-        violated = sorted(goal_neg & final_state)
-        msg = ["Final reordered plan does not satisfy goal."]
-        if missing:
-            msg.append(f"Missing positive goals: {missing}")
-        if violated:
-            msg.append(f"Violated negative goals: {violated}")
-        raise ValueError("\n".join(msg))
+        occupancy_model = infer_occupancy_model(init_state, plan)
+        preds = build_predecessors(init_state, goal_pos, goal_neg, plan, occupancy_model)
+        reordered = reorder_by_search(init_state, goal_pos, goal_neg, plan, preds, occupancy_model)
 
-    lines = [action.to_line() for action in reordered] + comments
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        final_state = rollout(init_state, reordered)
+        assert isinstance(final_state, set)
+        if not goals_satisfied(final_state, goal_pos, goal_neg):
+            missing = sorted(goal_pos - final_state)
+            violated = sorted(goal_neg & final_state)
+            msg = ["Final reordered plan does not satisfy goal."]
+            if missing:
+                msg.append(f"Missing positive goals: {missing}")
+            if violated:
+                msg.append(f"Violated negative goals: {violated}")
+            raise ValueError("\n".join(msg))
+
+        lines = [action.to_line() for action in reordered] + comments
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    except NotImplementedError as e:
+        print(f"[plan_reorder] {e}. Skip reordering and keep original plan.")
+        output_path.write_text(plan_path.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 if __name__ == "__main__":
