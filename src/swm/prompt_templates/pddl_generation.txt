@@ -1,4 +1,4 @@
-You are an expert in writing a PDDL domain and problem for a **Single-armed** robot to fully and correctly achieve the instruction.
+You are an expert in writing a PDDL domain and problem for a Single-arm robot to fully and correctly achieve the instruction.
 
 Inputs:
 - Instruction: {instruction_with_steps}

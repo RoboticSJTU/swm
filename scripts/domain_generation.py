@@ -199,8 +199,6 @@ def run_single_task(task: dict, root_dir: Path):
     retry_state = RetryState()
     planning_success = False
     judge_pass = False
-    final_domain = ""
-    final_problem = ""
     for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
         round_result = generate_pddl(
             generate_pddl_model_name=PDDL_MODEL,
@@ -265,8 +263,8 @@ if __name__ == "__main__":
     PDDL_MODEL = "gemini-3-flash-preview"
     JUDGE_MODEL = PDDL_MODEL
     MAX_STEP_BACKTRACKS = 10
-    MAX_PLAN_ATTEMPTS = 1
-    MAX_WORKERS = 50
+    MAX_PLAN_ATTEMPTS = 3
+    MAX_WORKERS = 100
 
     task_domain = "human"
     tasks = load_tasks(root_dir, task_domain)

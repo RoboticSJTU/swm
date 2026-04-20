@@ -52,7 +52,7 @@ def generate_pddl(
     if retry_state.solver_feedback:
         feedback_parts.append("[Solver failure]\n" + retry_state.solver_feedback.strip())
     if retry_state.judge_feedback:
-        feedback_parts.append("[Judge failure]\n" + retry_state.judge_feedback.strip())
+        feedback_parts.append("[Judge failure]\n" + str(retry_state.judge_feedback).strip())
     feedback = "\n".join(feedback_parts)
     
     prompt = construct_prompt_with_feedback(

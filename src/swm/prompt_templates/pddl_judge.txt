@@ -76,7 +76,7 @@ Examples of invalid cases:
 ## Output Format
 Output valid JSON without any markdown code block.
 {{
-  "reasoning": "A two-part analysis with the following structure:(1) Goal Completeness Validation. (2) Action Correctness Validation.",
+  "reasoning": "A two-part analysis:(1) Goal Completeness Validation.\\n(2) Action Correctness Validation.",
   "pass": true or false,
-  "feedback": "If pass=false: Provide two-part revision guidance with the following structure: (1) Error: identify the earliest critical wrong step or missing required result, and state the violated constraint. (2) Fix: state the minimal correction needed. If pass=true: empty string."
+  "feedback": "If pass=false: Provide feedback as a two-part plain-text string: (1) Error: identify the earliest critical wrong step or missing required result, and state the violated constraint.\\n(2) Fix: state the minimal correction needed. If pass=true: empty string."
 }}
