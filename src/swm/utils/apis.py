@@ -9,8 +9,8 @@ import os
 load_dotenv(find_dotenv())
 
 def get_client(model: str):
-    if model.startswith(("gemini", "gpt")):
-        return OpenAI(api_key=os.getenv("SII_API_KEY"), base_url="http://apicz.boyuerichdata.com/v1")
+    if model.startswith(("gemini", "gpt", "o")):
+        return OpenAI(api_key=os.getenv("SII_API_KEY"), base_url="http://apicz.boyuerichdata.com/v1", timeout=60, max_retries=0)
 
     if model.startswith("Qwen3.5-397B-A17B"):
         return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xyx.openapi-qb-ai.sii.edu.cn/v1")
@@ -22,6 +22,7 @@ def get_client(model: str):
 
 
 def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) -> str:
+    # print(prompt)
     content = [{"type": "text", "text": prompt}]
     if image_paths:
         if not isinstance(image_paths, (list, tuple)):
@@ -37,7 +38,7 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
     kwargs = dict(
         model=model,
         messages=[{"role": "user", "content": content}],
-        temperature=0,
+        temperature=1,
     )
 
     if model.startswith("Qwen3.5"):

@@ -1,42 +1,41 @@
 You are given segmented keyframes from a full video demonstration of an instruction.
 
-## Context
+Context:
 The keyframes of a full video demonstration of the instruction are split into {num_groups} groups, with group indices starting from 0.
 You will receive one group at a time to describe the atomic actions in that group, enabling a complete and accurate description of the entire video.
 Now, you are processing Group: [G{group_idx}].
 
-## Input
+Input:
 - **Instruction: {instruction}** 
 - A group of time-ordered keyframes: K0 ... K{{N-1}} (earlier → later)
 - Action history from all previous groups: {history}
 
-## **Task 1. Validate history** 
+**Task 1. Validate history** 
 If the action history is "none", skip Task 1 (set history_check=true, history_reasoning="", history_feedback="", and earliest_bad_group=-1), then proceed directly to Task 2.
 (1) State Consistency Validation
 - Single-hand constraint: If a hand is holding o, then it cannot manipulate a different object. (e.g., pick up cup, then open microwave - is invalid).
 - **World-state match: K0 must match the expected checkable post-state of the last history action (e.g., open/closed, on/off, holding/hand_free), allowing the last action to be in-progress, i.e., the current group starts with a continuation of the last action without mismatch.** 
 (2) Physical Executability Validation
-Verify that each action is physically executable. For example: place an object without first picking it up - is valid.
+Verify that each action is physically executable. For example: place an object without first picking it up - is invalid.
 
-### Task 1 Note
+Task 1 Note:
 - If the group starts by continuing the last history action, do not set history_check=false, and do not repeat that action in this group’s output.
 - If any violation is found in (1)-(2), set history_check=false, identify the earliest incorrect history group and the incorrect action from that group, then skip Task 2 (set action_reasoning="" and action="none").
 - In history_feedback, never use "this group" or "current group". Always name the evidence group explicitly, e.g., "at K0 of [G2]".
 
-## **Task 2. Infer actions (only if history_check=true)** 
+**Task 2. Infer actions (only if history_check=true)** 
 Use a vision-first two-pass workflow. Instruction and history may only help disambiguate visually supported actions, not predict the next action.
 (1) Pairwise pass: For each (Ki, Ki+1), infer actions only from completed visible state changes or contact changes.
 (2) Global verification: Review all keyframes to ensure the pairwise-inferred actions are globally consistent with the group’s observable world-state changes.
 
-### **Task 2 Note** 
+**Task 2 Note:** 
 - **Vision-first:** output only actions grounded in directly visible evidence, not in motion trends, target proximity, or likely intent. Actions must satisfy state consistency and physical executability.
-- **Use immediate containing/supporting region: When referring to a source or region, use the immediate containing or supporting region, not a more distant one. e.g., If spoon is in bowl on sink, say pick up spoon from bowl, not from sink.** 
+- **Use the immediate containing/supporting region: refer to an object by its direct container or support, not a farther region. e.g., If spoon is in bowl on sink, say pick up spoon from bowl, not from sink; pick up the green bowl from the yellow bowl beneath it, not from the stack of bowls on the counter.** 
 - **Be specific:** Make actions specific by stating the immediate purpose, effect, or visible reorientation (e.g., upright, upside down) when clearly supported, and disambiguate objects/locations using structural position (e.g., top/middle/bottom), relative location (e.g., left/right), or stable attributes.
   Example: Push button to open something or to start something, NOT just Push button. 
 - **Clear state change required:** If there is no clear new discrete state change (just continuing the last history action, ambiguous or arm motion, etc.), output "none".
 - **No low-level primitives:** Do not output low-level primitives such as grasp, release, reach, approach, move to.
 
-## Output Requirements
 Output valid JSON without any markdown code block (e.g., ```json):
 {{
   "history_reasoning": "\"\" OR a two-part analysis: (1) State consistency Validation. (2) Physical Executability Validation.",
@@ -44,5 +43,5 @@ Output valid JSON without any markdown code block (e.g., ```json):
   "earliest_bad_group": "-1 OR the earliest incorrect history group index k, where 0 <= k < {group_idx}.",
   "history_feedback": "\"\" OR exactly one line as: [Gk] <incorrect action> is incorrect, because <reason>, where k = earliest_bad_group. For example, [G0] Place paper cup in microwave is incorrect, because the microwave door is closed at K0 of [G1].",
   "action_reasoning": "\"\" OR A two-part analysis: (1) Pairwise pass. (2) Global verification.",
-  "action": "none OR atomic actions (e.g, Pick up bottle from counter with right hand.\\nPour water from bottle into paper cup with right hand)."
+  "action": "none OR atomic actions (e.g, Pick up bottle from counter.\\nPour water from bottle into paper cup)."
 }}

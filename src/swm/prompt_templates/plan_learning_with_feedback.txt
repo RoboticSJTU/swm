@@ -1,36 +1,36 @@
 You are revising a previously failed action description for the current keyframe group.
 Your primary goal is to correct the previous output according to the feedback, while staying strictly grounded in the visual evidence.
 
-## Context
+Context:
 The keyframes of a full video demonstration of the instruction are split into {num_groups} groups, with group indices starting from 0.
 You are now processing Group: [G{group_idx}].
 
-## Input
+Input:
 - **Instruction: {instruction}** 
 - A group of time-ordered keyframes: K0 ... K{{N-1}} (earlier → later)
 - Action history from all previous groups: {history}
 - Previous failed output for the current group: {error_action}, and its feedback: {feedback}
 
-## Task 1. Validate history
+Task 1. Validate history
 If the action history is "none", skip Task 1 (set history_check=true, history_reasoning="", history_feedback="", and earliest_bad_group=-1), then proceed directly to Task 2.
 (1) State Consistency Validation
 - Single-hand constraint: If a hand is holding o, then it cannot manipulate a different object. (e.g., pick up cup, then open microwave - is invalid).
 - **World-state match: K0 must match the expected checkable post-state of the last history action (e.g., open/closed, on/off, holding/hand_free), allowing the last action to be in-progress, i.e., the current group starts with a continuation of the last action without mismatch.** 
 (2) Physical Executability Validation
-Verify that each action is physically executable. For example: place an object without first picking it up - is valid.
+Verify that each action is physically executable. For example: place an object without first picking it up - is invalid.
 
-### Task 1 Note
+Task 1 Note:
 - If the group starts by continuing the last history action, do not set history_check=false, and do not repeat that action in this group’s output.
 - If any violation is found in (1)-(2), set history_check=false, identify the earliest incorrect history group and the incorrect action from that group, then skip Task 2 (set action_reasoning="" and action="none").
 - In history_feedback, never use "this group" or "current group". Always name the evidence group explicitly, e.g., "at K0 of [G2]".
 
-## Task 2. Infer actions (only if history_check=true)
+Task 2. Infer actions (only if history_check=true)
 Use a vision-first three-pass workflow. Instruction and history may only help disambiguate visually supported actions, not predict the next action.
 (1) Failure diagnosis: Identify the key issues in the previous failed output.
 (2) Pairwise pass: For each (Ki, Ki+1), infer actions only from completed visible state changes or contact changes.
 (3) Global verification: Review all keyframes to ensure the pairwise-inferred actions are globally consistent with the group’s observable world-state changes.
 
-### **Task 2 Note** 
+**Task 2 Note:** 
 - This is a regeneration step. Prioritize correcting the previous failed output based on the feedback, but keep only revisions that are visually supported.
 - **Vision-first:** output only actions grounded in directly visible evidence, not in motion trends, target proximity, or likely intent. Actions must satisfy state consistency and physical executability.
 - **Use immediate containing/supporting region: When referring to a source or region, use the immediate containing or supporting region, not a more distant one. e.g., If spoon is in bowl on sink, say pick up spoon from bowl, not from sink.** 
@@ -39,7 +39,6 @@ Use a vision-first three-pass workflow. Instruction and history may only help di
 - **Clear state change required:** If there is no clear new discrete state change (just continuing the last history action, ambiguous or arm motion, etc.), output "none".
 - **No low-level primitives:** Do not output low-level primitives such as grasp, release, reach, approach, move to.
 
-## Output Requirements
 Output valid JSON without any markdown code block (e.g., ```json):
 {{
   "history_reasoning": "\"\" OR a two-part analysis: (1) State consistency Validation. (2) Physical Executability Validation.",
@@ -47,5 +46,5 @@ Output valid JSON without any markdown code block (e.g., ```json):
   "earliest_bad_group": "-1 OR the earliest incorrect history group index k, where 0 <= k < {group_idx}.",
   "history_feedback": "\"\" OR exactly one line as: [Gk] <incorrect action> is incorrect, because <reason>, where k = earliest_bad_group. For example, [G0] Place paper cup in microwave is incorrect, because the microwave door is closed at K0 of [G1].",
   "action_reasoning": "\"\" OR A three-part analysis: (1) Failure diagnosis. (2) Pairwise pass. (3) Global verification.",
-  "action": "none OR atomic actions (e.g, Pick up bottle from counter with right hand.\\nPour water from bottle into paper cup with right hand)."
+  "action": "none OR atomic actions (e.g, Pick up bottle from counter.\\nPour water from bottle into paper cup)."
 }}

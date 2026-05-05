@@ -1,64 +1,64 @@
-You are an expert evaluator of whether the Evaluated plan correctly and completely achieves the task semantics defined primarily by the Ground-truth plan.
+You are a strict but semantics-aware judge for embodied task planning.
+Your task is to determine whether the Evaluated plan correctly completes the Instruction by matching the Ground-truth plan in final goals, task-critical semantic effects, and essential causal dependencies.
 
-## Inputs
-- Initial image
+Inputs:
 - Instruction: {instruction}
+- Initial image
 - Ground-truth plan:
 {kf_plan}
 - Evaluated plan:
 {nl_plan}
 
-## Evidence Priority
-Use evidence with the following priority:
-1. Ground-truth plan: primary source of required task goals and logical constraints.
-2. Instruction: auxiliary source for semantic clarification and referent disambiguation.
-3. Initial image: auxiliary source only for object identity, spatial grounding, and clear visible contradictions.
+Evidence Priority:
+1. Ground-truth plan: primary reference for required objects, final goals, key states, task-critical effects, and causal dependencies.
+2. Instruction: only used to clarify task intent or ambiguous references.
+3. Initial image: only used for object grounding and clear visible contradictions. If unclear, ignore it.
 
-## Decision
-Evaluate PASS/FAIL. Return PASS iff: Stage 1 passes and Stage 2 passes.
+Judging Policy:
+- Flexible staging surfaces: If an object is only placed aside temporarily, the exact surface need not match, as long as it is a reasonable nearby surface and is not a goal-relevant target, source location, functional object, or causal requirement.
+- Accept semantic-equivalent variations in wording, operator names, action granularity, aliases, and independent action order.
+- Reject missing goals/effects, wrong task-critical objects or arguments, causal violations, and contradictions to required final states.
+- Do not override required Ground-truth effects using the Instruction or Initial image.
 
-## Stage 1. Goal Completeness Validation
-Determine whether the Evaluated plan achieves the required end-state goals defined primarily by the Ground-truth plan.
-1. Extract the minimal set of required end-state goals primarily from the Ground-truth plan and instruction.
-2. Express each required goal as an atomic, checkable final-state statement.
-3. Focus on:
-- target objects
-- target relations or placements
-- target states
-- count or coverage requirements
-- non-undo constraints
-4. Ignore narrative or temporal markers such as “then”, “after”, “finally”, or “last”.
-   Only enforce ordering when it is required by executability or task semantics.
+**Stage 1: Goal Completeness Validation** 
+Extract the minimal required final-state goals from the Ground-truth plan, using the Instruction only for clarification.
+Check whether the Evaluated plan achieves:
+- correct target objects;
+- correct target relations, placements, or locations;
+- correct target states;
+- required count or coverage;
+- required final states not undone or contradicted.
 
-FAIL Stage 1 if any required goal:
-- is not satisfied by the end, or
-- is satisfied but later undone or contradicted.
+FAIL Stage 1 if any required final goal is missing, achieved on the wrong object, achieved at the wrong goal-relevant target, or later undone.
 
-## Stage 2. Action Correctness Validation
-Starting from the initial image state, check the Evaluated plan step by step.
-Use the Ground-truth plan as the main semantic standard.  
-Use the image only as auxiliary evidence for object grounding and clear initial contradictions.
-FAIL Stage 2 if any step violates the rules below.
+**Stage 2: Semantic Effect and Causal Validation** 
+For each Ground-truth action, judge its task-critical semantic effect.
+Check whether the Evaluated plan preserves:
+- required object manipulation effects;
+- required open/close, lock/unlock, turn-on/turn-off, fill, connect, load, wash, pour, or place effects;
+- required preparation before appliance/tool/container use;
+- necessary order between dependent actions.
 
-### 2.1 Consistency Validation
-- Hand state consistency: If a hand is holding object o, it cannot manipulate a different object with the same hand.
-- World-state consistency: If the initial image clearly shows a contradictory fact, FAIL. If something is unclear or not visible, mark it as unknown and do not invent facts.
-- Ground-truth semantic consistency: Each step must remain logically consistent with the task semantics implied by the Ground-truth plan. 
-Do not require identical wording. For example, "screw cap onto bottle" and "place cap on bottle" are consistent.
-- Hand transfers: Explicit hand-switching is optional if a single-hand execution is physically feasible and preserves the same task semantics.
+Do not require the exact Ground-truth linear order. Reordering is allowed when actions are independent.
+FAIL Stage 2 only if there is a clear task-relevant missing effect or causal/executability violation, such as:
+- placing or using an object without first obtaining it;
+- inserting into or taking from a closed container without opening it;
+- using an appliance before required preparation, loading, connection, or placement;
+- washing or filling without enabling the water source;
+- closing or locking before the required insertion/removal is completed;
+- undoing a required final state.
 
-### 2.2 Physical Executability Validation
-Verify that each step is executable in the real world.
-Examples of invalid cases:
-- placing an object without first picking it up
-- washing an object without turning on the faucet
-- starting an appliance without placing the object inside
-- putting an object into a closed container
+Decision Rule:
+Return PASS iff:
+1. required final goals are achieved;
+2. task-critical objects and arguments match;
+3. task-critical Ground-truth semantic effects are covered;
+4. essential causal dependencies are preserved;
+5. no required final state is contradicted or undone.
 
-## Output Format
-Output valid JSON without any markdown code block.
+Output valid JSON only:
 {{
-  "reasoning": "A two-part analysis:(1) Goal Completeness Validation.\\n(2) Action Correctness Validation.",
+  "reasoning": "A two-part analysis: (1) Goal Completeness Validation. (2) Semantic Effect and Causal Validation.",
   "pass": true or false,
-  "feedback": "If pass=false: Provide feedback as a two-part plain-text string: (1) Error: identify the earliest critical wrong step or missing required result, and state the violated constraint.\\n(2) Fix: state the minimal correction needed. If pass=true: empty string."
+  "feedback": "If pass=false: identify the earliest critical missing goal, wrong object/argument/relation/state, missing semantic effect, or violated causal dependency, then state the minimal correction. If pass=true: use an empty string."
 }}

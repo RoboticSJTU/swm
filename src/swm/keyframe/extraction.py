@@ -54,12 +54,16 @@ def extract_keyframes_from_frames(frames_root, keyframes_root, smooth_k=5, merge
 
         window_step = min(90, window_step)
         
+        # 关键帧存在则跳过，
         out = keyframes_root / ep.name
-        out.mkdir(parents=True, exist_ok=True)
-        
-        # 已抽过：存在至少一张 png 就跳过
-        if next(out.rglob("*.png"), None) is not None:
+        nested_done = next(keyframes_root.glob(f"*/{ep.name}/seg_*/*.png"), None)
+        if nested_done:
             return
+        out.mkdir(parents=True, exist_ok=True)
+        flat_done = next(out.rglob("*.png"), None)
+        if flat_done:
+            return
+        
         # 1) energy
         energies_dir = frames_root / "energies"
         energies_dir.mkdir(parents=True, exist_ok=True)
