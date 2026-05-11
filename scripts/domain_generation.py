@@ -370,9 +370,9 @@ if __name__ == "__main__":
     Learn_steps_MODEL = "gemini-3-flash-preview"
     JUDGE_MODEL = "gemini-3-flash-preview"
     MAX_STEP_BACKTRACKS = 10
-    MAX_PLAN_ATTEMPTS = 8
+    MAX_PLAN_ATTEMPTS = 6
     MAX_WORKERS = 200
 
-    task_domain = "human_aug_v6"
+    task_domain = "human_aug_v0"
     tasks = load_tasks(root_dir, task_domain)
     run_all_tasks(root_dir, tasks)

@@ -2,100 +2,100 @@ import json
 import re
 import shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 """
-本脚本用于将通过 judge 的 PDDL 结果整理成 ShareGPT 训练数据。
+批量清洗评测结果并生成 ShareGPT 训练数据。
 
-核心原则：
-1. 原始 domain.pddl / problem.pddl 文件绝对不修改。
-2. 删除注释、统一 domain/problem 名字、删除 objects 类型标注等清理操作，
-   只作用于最终写入 ShareGPT JSON 的 assistant 输出。
-3. clean_eval_results 只负责删除无效 episode，不清理、不覆盖 PDDL 文件。
+整体流程：
+1. 遍历多个 task domain，例如 human、human_aug_v1 到 human_aug_v6；
+2. 读取每个 domain 对应的 instruction 文件，只支持嵌套 JSON 结构；
+3. 并发清理无效的 eval episode 目录：
+   - 删除不在 instruction 中的 episode；
+   - 删除没有 round 结果的 episode；
+   - 删除缺少 domain.pddl、problem.pddl 或 judge.json 的 episode；
+   - 删除 judge.json 中没有 pass 字段或 pass != true 的 episode；
+   - 删除清理后产生的空 task 目录；
+4. 基于保留下来的有效 episode 并发构造 ShareGPT 样本：
+   - 读取 prompt 模板并填入 instruction；
+   - 读取最新 round 中的 domain.pddl 和 problem.pddl；
+   - 仅在写入 JSON 时清理 PDDL 文本，不修改原始 PDDL 文件；
+   - 统一 domain/problem 名称，去除 PDDL 注释，并移除 problem objects 中的类型标注；
+   - 将 domain 中 action 的 :precondition 和 :effect 统一压缩为单行；
+   - 查找对应 episode 的首帧 keyframe 图像，找不到时回退到 tasks/images 中查找；
+5. 并发处理多个 domain，将所有有效样本合并后写入统一的 sharegpt.json。
 """
-
-# ============================================================
-# 配置区：只需要改这里
-# ============================================================
 
 ROOT_DIR = Path("/home/xyx/下载/swm")
-TASK_DOMAIN = "human_aug_v6"
+MODEL_NAME = "gemini-3-flash-preview"
 PDDL_DOMAIN_NAME = "single_arm"
 
-INSTRUCTIONS_JSON = ROOT_DIR / f"tasks/instructions/instructions_{TASK_DOMAIN}.json"
-MODEL_NAME = "gemini-3-flash-preview"
-EVAL_ROOT = ROOT_DIR / f"eval_results/{MODEL_NAME}/{TASK_DOMAIN}"
+TASK_DOMAINS = [
+    "human",
+    "human_aug_v0",
+]
+
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
 PROMPT_PATH = ROOT_DIR / "src/swm/prompt_templates/training_input.txt"
 
-OUT_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/{TASK_DOMAIN}_sharegpt_tag_no_all_com.json"
+OUT_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/sharegpt.json"
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 
+MAX_DOMAIN_WORKERS = 7
+MAX_EPISODE_WORKERS = 512
 
-# ============================================================
-# 读取 instruction json
-# ============================================================
-
-def instruction_to_text(instruction):
-    if isinstance(instruction, str):
-        return instruction
-
-    if isinstance(instruction, list) and all(isinstance(x, str) for x in instruction):
-        return "\n".join(instruction)
-
-    raise ValueError(f"非法 instruction 类型: {type(instruction)}")
-
-
-def load_instruction_records(instructions_json, task_domain):
-    data = json.loads(instructions_json.read_text(encoding="utf-8"))
-
-    if not isinstance(data, dict):
-        raise ValueError(f"instructions_json 必须是 dict: {instructions_json}")
-
-    records = []
-
-    # 格式 1：
-    # {
-    #   "human": {
-    #       "episode_1": "xxx"
-    #   }
-    # }
-    if len(data) == 1 and task_domain in data and isinstance(data[task_domain], dict):
-        for episode_id, instruction in data[task_domain].items():
-            records.append({
-                "task_id": None,
-                "episode_id": episode_id,
-                "instruction": instruction_to_text(instruction),
-            })
-        return records
-
-    # 格式 2：
-    # {
-    #   "task_1": {
-    #       "episode_1": "xxx"
-    #   }
-    # }
-    for task_id, episode_map in data.items():
-        if not isinstance(episode_map, dict):
-            raise ValueError(f"非法 json 格式: {task_id} 对应的值不是 dict")
-
-        for episode_id, instruction in episode_map.items():
-            records.append({
-                "task_id": task_id,
-                "episode_id": episode_id,
-                "instruction": instruction_to_text(instruction),
-            })
-
-    return records
+PRINT_DELETES = False
 
 
 # ============================================================
-# 仅用于写入 JSON 的 PDDL 清理
-# 注意：这些函数不能写回原始 .pddl 文件
+# 只用于写入 ShareGPT JSON 的 PDDL 清理
+# 原始 domain.pddl / problem.pddl 不会被修改
 # ============================================================
 
-def remove_comments_for_json(text):
+def compact_domain_precondition_effect(text):
+    for keyword in [":precondition", ":effect"]:
+        pos = 0
+
+        while True:
+            start = text.find(keyword, pos)
+            if start == -1:
+                break
+
+            expr_start = start + len(keyword)
+
+            while expr_start < len(text) and text[expr_start].isspace():
+                expr_start += 1
+
+            if expr_start >= len(text) or text[expr_start] != "(":
+                pos = start + len(keyword)
+                continue
+
+            depth = 0
+            end = expr_start
+
+            while end < len(text):
+                if text[end] == "(":
+                    depth += 1
+                elif text[end] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end += 1
+                        break
+                end += 1
+
+            expr = text[expr_start:end]
+            expr = re.sub(r"\s+", " ", expr.strip())
+
+            replacement = f"{keyword} {expr}"
+            text = text[:start] + replacement + text[end:]
+            pos = start + len(replacement)
+
+    return text
+
+
+def clean_pddl_for_json(text, is_domain):
     lines = []
 
     for line in text.splitlines():
@@ -103,105 +103,214 @@ def remove_comments_for_json(text):
         if line:
             lines.append(line)
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
 
+    if is_domain:
+        text = re.sub(
+            r"\(\s*define\s*\(\s*domain\s+[^()\s]+\s*\)",
+            f"(define (domain {PDDL_DOMAIN_NAME})",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        text = compact_domain_precondition_effect(text)
+        return text.strip()
 
-def clean_domain_for_json(domain_text, domain_name):
-    domain_text = remove_comments_for_json(domain_text)
-
-    domain_text = re.sub(
-        r"\(\s*define\s*\(\s*domain\s+[^()\s]+\s*\)",
-        f"(define (domain {domain_name})",
-        domain_text,
-        count=1,
-        flags=re.IGNORECASE,
-    )
-
-    return domain_text.strip()
-
-
-def clean_problem_for_json(problem_text, domain_name):
-    problem_text = remove_comments_for_json(problem_text)
-
-    # 删除 (:objects ...) 中的类型标注：
-    #   obj1 obj2 - object
-    # 变成：
-    #   obj1 obj2
     def remove_object_types(match):
-        head = match.group(1)
-        body = match.group(2)
-        tail = match.group(3)
+        body = re.sub(r"\s*-\s*[^\s()]+", "", match.group(2))
+        return match.group(1) + body + match.group(3)
 
-        body = re.sub(r"\s*-\s*[^\s()]+", "", body)
-        return head + body + tail
-
-    problem_text = re.sub(
+    text = re.sub(
         r"(\(\s*:objects\b)(.*?)(\n\s*\))",
         remove_object_types,
-        problem_text,
+        text,
         count=1,
         flags=re.IGNORECASE | re.DOTALL,
     )
 
-    problem_text = re.sub(
+    text = re.sub(
         r"\(\s*define\s*\(\s*problem\s+[^()\s]+\s*\)",
         "(define (problem task)",
-        problem_text,
+        text,
         count=1,
         flags=re.IGNORECASE,
     )
 
-    problem_text = re.sub(
+    text = re.sub(
         r"\(\s*:domain\s+[^()\s]+\s*\)",
-        f"(:domain {domain_name})",
-        problem_text,
+        f"(:domain {PDDL_DOMAIN_NAME})",
+        text,
         count=1,
         flags=re.IGNORECASE,
     )
 
-    return problem_text.strip()
+    return text.strip()
 
 
 # ============================================================
-# eval 目录辅助逻辑
+# 并发检查并清理单个 episode
 # ============================================================
 
-def latest_round_dir(episode_dir):
+def check_and_clean_episode(ep_dir, eval_root, allowed_keys):
+    parts = ep_dir.relative_to(eval_root).parts
+
+    if len(parts) == 1:
+        task_id = None
+        episode_id = parts[0]
+    elif len(parts) == 2:
+        task_id = parts[0]
+        episode_id = parts[1]
+    else:
+        return {
+            "status": "unexpected_path",
+            "reason": "unexpected_path",
+            "ep_dir": ep_dir,
+            "task_id": None,
+            "episode_id": None,
+            "round_dir": None,
+            "deleted": False,
+        }
+
+    if (task_id, episode_id) not in allowed_keys:
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_not_in_instruction",
+            "reason": "not_in_instruction",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
+
     round_dirs = [
-        p for p in episode_dir.iterdir()
-        if p.is_dir() and p.name.startswith("round") and p.name[5:].isdigit()
+        p for p in ep_dir.iterdir()
+        if p.is_dir() and re.fullmatch(r"round\d+", p.name)
     ]
+    round_dirs.sort(key=lambda p: int(p.name.replace("round", "")))
 
     if not round_dirs:
-        return None
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_no_round",
+            "reason": "no_round",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
 
-    return max(round_dirs, key=lambda p: int(p.name[5:]))
+    round_dir = round_dirs[-1]
+    domain_path = round_dir / "domain.pddl"
+    problem_path = round_dir / "problem.pddl"
+    judge_path = round_dir / "judge.json"
+
+    if not domain_path.is_file():
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_no_domain",
+            "reason": "no_domain",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
+
+    if not problem_path.is_file():
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_no_problem",
+            "reason": "no_problem",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
+
+    if not judge_path.is_file():
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_no_judge",
+            "reason": "no_judge",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
+
+    judge = json.loads(judge_path.read_text(encoding="utf-8"))
+
+    if "pass" not in judge:
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_no_pass_field",
+            "reason": "no_pass_field",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
+
+    if judge["pass"] is not True:
+        shutil.rmtree(ep_dir)
+        return {
+            "status": "deleted_failed",
+            "reason": "judge_failed",
+            "ep_dir": ep_dir,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "round_dir": None,
+            "deleted": True,
+        }
+
+    return {
+        "status": "kept",
+        "reason": "kept",
+        "ep_dir": ep_dir,
+        "task_id": task_id,
+        "episode_id": episode_id,
+        "round_dir": round_dir,
+        "deleted": False,
+    }
 
 
-def find_episode_dir(eval_root, task_id, episode_id):
-    candidates = []
+# ============================================================
+# 并发构造单个 ShareGPT 样本
+# ============================================================
+
+def build_one_sample(record, task_domain, prompt_template, valid_round_map):
+    task_id = record["task_id"]
+    episode_id = record["episode_id"]
+
+    round_dir = valid_round_map.get((task_id, episode_id))
+
+    if round_dir is None:
+        return "skipped_missing_episode", None
+
+    domain_path = round_dir / "domain.pddl"
+    problem_path = round_dir / "problem.pddl"
+
+    if not domain_path.is_file() or not problem_path.is_file():
+        return "skipped_missing_pddl", None
+
+    image_path = None
+    keyframe_dirs = []
 
     if task_id is not None:
-        candidates.append(eval_root / task_id / episode_id)
+        keyframe_dirs.append(
+            KEYFRAMES_ROOT / task_domain / task_id / episode_id / "seg_00"
+        )
 
-    candidates.append(eval_root / episode_id)
+    keyframe_dirs.append(
+        KEYFRAMES_ROOT / task_domain / episode_id / "seg_00"
+    )
 
-    for path in candidates:
-        if path.is_dir():
-            return path
-
-    return None
-
-
-def find_image(task_domain, task_id, episode_id, keyframes_root, images_root):
-    seg_dirs = []
-
-    if task_id is not None:
-        seg_dirs.append(keyframes_root / task_domain / task_id / episode_id / "seg_00")
-
-    seg_dirs.append(keyframes_root / task_domain / episode_id / "seg_00")
-
-    for seg_dir in seg_dirs:
+    for seg_dir in keyframe_dirs:
         if not seg_dir.is_dir():
             continue
 
@@ -211,34 +320,109 @@ def find_image(task_domain, task_id, episode_id, keyframes_root, images_root):
             and p.suffix.lower() in IMAGE_SUFFIXES
             and p.stem.isdigit()
         ]
+        images.sort(key=lambda p: int(p.stem))
 
         if images:
-            images.sort(key=lambda p: int(p.stem))
-            return str(images[0])
+            image_path = str(images[0])
+            break
 
-    if task_id is not None:
+    if image_path is None:
+        image_candidates = []
+
+        if task_id is not None:
+            for suffix in IMAGE_SUFFIXES:
+                image_candidates.append(
+                    IMAGES_ROOT / task_domain / task_id / f"{episode_id}{suffix}"
+                )
+
         for suffix in IMAGE_SUFFIXES:
-            path = images_root / task_domain / task_id / f"{episode_id}{suffix}"
+            image_candidates.append(
+                IMAGES_ROOT / task_domain / f"{episode_id}{suffix}"
+            )
+
+        for path in image_candidates:
             if path.is_file():
-                return str(path)
+                image_path = str(path)
+                break
 
-    for suffix in IMAGE_SUFFIXES:
-        path = images_root / task_domain / f"{episode_id}{suffix}"
-        if path.is_file():
-            return str(path)
+    if image_path is None:
+        return "skipped_missing_image", None
 
-    return None
+    domain_text = clean_pddl_for_json(
+        domain_path.read_text(encoding="utf-8"),
+        is_domain=True,
+    )
+
+    problem_text = clean_pddl_for_json(
+        problem_path.read_text(encoding="utf-8"),
+        is_domain=False,
+    )
+
+    sample = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "<image>\n" + prompt_template.replace(
+                    "{instruction}",
+                    record["instruction"],
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    f"<domain>\n{domain_text}\n</domain>\n"
+                    f"<problem>\n{problem_text}\n</problem>"
+                ),
+            },
+        ],
+        "images": [image_path],
+    }
+
+    return "saved", sample
 
 
 # ============================================================
-# 1. 清理无效 episode
-# 注意：这里不再修改 domain.pddl / problem.pddl
+# 处理单个 domain
 # ============================================================
 
-def clean_eval_results(records, eval_root):
+def process_one_domain(task_domain):
+    instructions_json = ROOT_DIR / f"tasks/instructions/instructions_{task_domain}.json"
+    eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
+
+    print(f"\n========== start {task_domain} ==========")
+
+    # ------------------------------------------------------------
+    # 1. 读取 instructions
+    # 只支持嵌套结构：
+    #   {
+    #     "task_1": {
+    #       "episode_1": "..."
+    #     }
+    #   }
+    # ------------------------------------------------------------
+
+    data = json.loads(instructions_json.read_text(encoding="utf-8"))
+    records = []
+
+    for task_id, episode_map in data.items():
+        for episode_id, instruction in episode_map.items():
+            if isinstance(instruction, list):
+                instruction = "\n".join(instruction)
+
+            records.append({
+                "task_id": task_id,
+                "episode_id": episode_id,
+                "instruction": instruction,
+            })
+
     allowed_keys = {(r["task_id"], r["episode_id"]) for r in records}
 
-    stats = {
+    # ------------------------------------------------------------
+    # 2. 并发清理无效 eval episode
+    # 同时记录每个有效 episode 的最新 round_dir，后续构造数据时不再重复遍历 round
+    # ------------------------------------------------------------
+
+    clean_stats = {
         "total_episode_dirs": 0,
         "kept": 0,
         "deleted_not_in_instruction": 0,
@@ -253,90 +437,50 @@ def clean_eval_results(records, eval_root):
     }
 
     episode_dirs = sorted(
-        [p for p in eval_root.rglob("*") if p.is_dir() and p.name.startswith("episode")],
+        [
+            p for p in list(eval_root.glob("task_*/episode_*")) + list(eval_root.glob("episode_*"))
+            if p.is_dir()
+        ],
         key=lambda p: str(p),
     )
 
-    def delete_episode(ep_dir, stat_key, reason):
-        shutil.rmtree(ep_dir)
-        stats[stat_key] += 1
-        print(f"[DELETE] {ep_dir} -> {reason}")
+    clean_stats["total_episode_dirs"] = len(episode_dirs)
 
-    for ep_dir in episode_dirs:
-        stats["total_episode_dirs"] += 1
+    valid_round_map = {}
 
-        parts = ep_dir.relative_to(eval_root).parts
+    with ThreadPoolExecutor(max_workers=MAX_EPISODE_WORKERS) as executor:
+        futures = [
+            executor.submit(check_and_clean_episode, ep_dir, eval_root, allowed_keys)
+            for ep_dir in episode_dirs
+        ]
 
-        if len(parts) == 1:
-            task_id = None
-            episode_id = parts[0]
-        elif len(parts) == 2:
-            task_id = parts[0]
-            episode_id = parts[1]
-        else:
-            stats["unexpected_path"] += 1
-            print(f"[SKIP] unexpected episode path: {ep_dir}")
-            continue
+        for future in as_completed(futures):
+            result = future.result()
+            status = result["status"]
 
-        if (task_id, episode_id) not in allowed_keys:
-            delete_episode(ep_dir, "deleted_not_in_instruction", "not_in_instruction")
-            continue
+            clean_stats[status] += 1
 
-        round_dir = latest_round_dir(ep_dir)
-        if round_dir is None:
-            delete_episode(ep_dir, "deleted_no_round", "no_round")
-            continue
-
-        domain_path = round_dir / "domain.pddl"
-        problem_path = round_dir / "problem.pddl"
-        judge_path = round_dir / "judge.json"
-
-        if not domain_path.is_file():
-            delete_episode(ep_dir, "deleted_no_domain", "no_domain")
-            continue
-
-        if not problem_path.is_file():
-            delete_episode(ep_dir, "deleted_no_problem", "no_problem")
-            continue
-
-        if not judge_path.is_file():
-            delete_episode(ep_dir, "deleted_no_judge", "no_judge")
-            continue
-
-        judge = json.loads(judge_path.read_text(encoding="utf-8"))
-
-        if "pass" not in judge:
-            delete_episode(ep_dir, "deleted_no_pass_field", "no_pass_field")
-            continue
-
-        if judge["pass"] is not True:
-            delete_episode(ep_dir, "deleted_failed", "judge_failed")
-            continue
-
-        stats["kept"] += 1
+            if status == "kept":
+                valid_round_map[(result["task_id"], result["episode_id"])] = result["round_dir"]
+            elif PRINT_DELETES and result["deleted"]:
+                print(f"[{task_domain}] [DELETE] {result['ep_dir']} -> {result['reason']}")
+            elif PRINT_DELETES and status == "unexpected_path":
+                print(f"[{task_domain}] [SKIP] unexpected episode path: {result['ep_dir']}")
 
     for path in sorted(eval_root.iterdir(), key=lambda p: str(p)):
         if path.is_dir() and not path.name.startswith("episode") and not any(path.iterdir()):
             path.rmdir()
-            stats["removed_empty_task_dirs"] += 1
-            print(f"[DELETE] empty task dir -> {path}")
+            clean_stats["removed_empty_task_dirs"] += 1
+            if PRINT_DELETES:
+                print(f"[{task_domain}] [DELETE] empty task dir -> {path}")
 
-    print("\n[clean_eval_results] done")
-    for key, value in stats.items():
-        print(f"{key:<28}: {value}")
+    # ------------------------------------------------------------
+    # 3. 并发构造当前 domain 的 ShareGPT 数据
+    # ------------------------------------------------------------
 
-    return stats
+    prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
 
-
-# ============================================================
-# 2. 构造 ShareGPT 数据
-# 只在这里清理注释，原始 PDDL 文件不会被修改
-# ============================================================
-
-def build_sharegpt(records, task_domain, keyframes_root, images_root, eval_root, prompt_path, out_path, domain_name):
-    prompt_template = prompt_path.read_text(encoding="utf-8")
-
-    stats = {
+    build_stats = {
         "total_records": len(records),
         "saved": 0,
         "skipped_missing_episode": 0,
@@ -347,89 +491,89 @@ def build_sharegpt(records, task_domain, keyframes_root, images_root, eval_root,
 
     samples = []
 
-    for record in records:
-        task_id = record["task_id"]
-        episode_id = record["episode_id"]
+    with ThreadPoolExecutor(max_workers=MAX_EPISODE_WORKERS) as executor:
+        futures = [
+            executor.submit(
+                build_one_sample,
+                record,
+                task_domain,
+                prompt_template,
+                valid_round_map,
+            )
+            for record in records
+        ]
 
-        ep_dir = find_episode_dir(eval_root, task_id, episode_id)
-        if ep_dir is None:
-            stats["skipped_missing_episode"] += 1
-            continue
+        for future in as_completed(futures):
+            status, sample = future.result()
+            build_stats[status] += 1
 
-        round_dir = latest_round_dir(ep_dir)
-        if round_dir is None:
-            stats["skipped_no_round"] += 1
-            continue
+            if sample is not None:
+                samples.append(sample)
 
-        domain_path = round_dir / "domain.pddl"
-        problem_path = round_dir / "problem.pddl"
+    print(f"\n[{task_domain}] clean_eval_results")
+    for key, value in clean_stats.items():
+        print(f"{key:<28}: {value}")
 
-        if not domain_path.is_file() or not problem_path.is_file():
-            stats["skipped_missing_pddl"] += 1
-            continue
+    print(f"\n[{task_domain}] build_sharegpt")
+    for key, value in build_stats.items():
+        print(f"{key:<28}: {value}")
 
-        image_path = find_image(
-            task_domain=task_domain,
-            task_id=task_id,
-            episode_id=episode_id,
-            keyframes_root=keyframes_root,
-            images_root=images_root,
-        )
+    print(f"========== done {task_domain} ==========")
 
-        if image_path is None:
-            stats["skipped_missing_image"] += 1
-            continue
+    return {
+        "task_domain": task_domain,
+        "samples": samples,
+        "clean_stats": clean_stats,
+        "build_stats": build_stats,
+    }
 
-        # 关键点：
-        # 这里只清理写入 JSON 的文本，不写回原始 .pddl 文件。
-        domain_text = clean_domain_for_json(
-            domain_path.read_text(encoding="utf-8"),
-            domain_name,
-        )
 
-        problem_text = clean_problem_for_json(
-            problem_path.read_text(encoding="utf-8"),
-            domain_name,
-        )
+# ============================================================
+# 并发处理多个 domain，并合并输出为一个 sharegpt.json
+# ============================================================
 
-        user_content = "<image>\n" + prompt_template.replace(
-            "{instruction}",
-            record["instruction"],
-        )
+def process_many_domains(task_domains):
+    all_samples = []
+    results = []
 
-        assistant_content = (
-            f"<domain>\n{domain_text}\n</domain>\n"
-            f"<problem>\n{problem_text}\n</problem>"
-        )
+    with ThreadPoolExecutor(max_workers=MAX_DOMAIN_WORKERS) as executor:
+        future_map = {}
 
-        samples.append({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": user_content,
-                },
-                {
-                    "role": "assistant",
-                    "content": assistant_content,
-                },
-            ],
-            "images": [image_path],
-        })
+        for task_domain in task_domains:
+            future = executor.submit(process_one_domain, task_domain)
+            future_map[future] = task_domain
 
-        stats["saved"] += 1
+        for future in as_completed(future_map):
+            task_domain = future_map[future]
+            result = future.result()
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(samples, ensure_ascii=False, indent=2),
+            results.append(result)
+            all_samples.extend(result["samples"])
+
+            print(
+                f"\n[MERGE] {task_domain}: "
+                f"{len(result['samples'])} samples merged"
+            )
+
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUT_PATH.write_text(
+        json.dumps(all_samples, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    print("\n[build_sharegpt] done")
-    for key, value in stats.items():
-        print(f"{key:<28}: {value}")
-    print(f"[build_sharegpt] output -> {out_path}")
+    print("\n========== final summary ==========")
+    print(f"domains          : {len(task_domains)}")
+    print(f"total samples    : {len(all_samples)}")
+    print(f"output           : {OUT_PATH}")
 
-    return samples
+    print("\n========== per-domain saved samples ==========")
+    for result in sorted(results, key=lambda x: x["task_domain"]):
+        task_domain = result["task_domain"]
+        saved = result["build_stats"]["saved"]
+        total = result["build_stats"]["total_records"]
+        print(f"{task_domain:<16}: {saved} / {total}")
+
+    return all_samples
 
 
 # ============================================================
@@ -437,23 +581,4 @@ def build_sharegpt(records, task_domain, keyframes_root, images_root, eval_root,
 # ============================================================
 
 if __name__ == "__main__":
-    records = load_instruction_records(
-        instructions_json=INSTRUCTIONS_JSON,
-        task_domain=TASK_DOMAIN,
-    )
-
-    clean_eval_results(
-        records=records,
-        eval_root=EVAL_ROOT,
-    )
-
-    build_sharegpt(
-        records=records,
-        task_domain=TASK_DOMAIN,
-        keyframes_root=KEYFRAMES_ROOT,
-        images_root=IMAGES_ROOT,
-        eval_root=EVAL_ROOT,
-        prompt_path=PROMPT_PATH,
-        out_path=OUT_PATH,
-        domain_name=PDDL_DOMAIN_NAME,
-    )
+    process_many_domains(TASK_DOMAINS)
