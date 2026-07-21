@@ -18,8 +18,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple, Any
 
-ROOT = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm")
-TASK_DOMAIN = "swm"
+ROOT = Path("/home/xyx/下载/swm")
+TASK_DOMAIN = "swm_3"
 IMAGE_DIR = ROOT / "tasks/images" / TASK_DOMAIN
 INSTRUCTION_PATH = ROOT / "tasks/instructions" / f"instructions_{TASK_DOMAIN}.json"
 SAVE_PATH = ROOT / "tasks/steps" / f"steps_{TASK_DOMAIN}.json"
@@ -84,6 +84,30 @@ Critical visual grounding requirements:
 4. If there are multiple similar objects or candidate targets, disambiguate only with clearly visible cues such as left/right, top/bottom, front/back, color, size, material, relative position, or visible contents.
 5. Picks should refer to the object's visible source location when that source is visually clear.
 6. Opens/closes/pulls/pushes should respect the object's visible initial state. For example, do not close something that already appears closed, and do not open something that already appears open.
+
+High-priority manipulation feasibility rules:
+1. Plate/cutting-board support rule:
+   - If a plate or cutting board is visibly leaning against a wall, backsplash, vertical surface, or is not lying flat on the table/counter, do not place anything onto it directly.
+   - First pick up the plate or cutting board, place it flat on the table/counter, and only then place the requested object onto it.
+   - This intermediate repositioning is required even if the user instruction only says to put something on the plate/cutting board.
+
+2. Bowl/rack/container accessibility rule:
+   - If a bowl, rack, basket, tray, or other target container is visibly on a rack/shelf instead of on the table/counter, do not put anything into or onto it directly.
+   - First pick up the bowl/rack/container from the rack/shelf, place it on the table/counter, and only then put the requested object into or onto it.
+   - This intermediate relocation is required even if the user instruction does not explicitly mention moving the container.
+
+3. Kettle water-filling rule:
+   - When filling a kettle from a faucet, use this order:
+     1) Open the kettle lid.
+     2) Turn on the faucet.
+     3) Pick up the kettle.
+     4) Fill the kettle from the faucet.
+   - Do not skip opening the kettle lid unless the image clearly shows that the kettle lid is already open.
+   - Do not skip turning on the faucet unless the image clearly shows that the faucet is already running.
+
+4. These feasibility rules override minimality:
+   - Include the required intermediate actions even when they make the plan longer.
+   - Only apply these rules when the relevant visual condition is clearly visible in the image.
 
 No low-level primitives:
 - Do not output low-level primitives such as grasp, release, reach, approach, move to, go to, or navigate to.

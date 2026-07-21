@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""根据视频关键帧分段和剩余动作生成多条增强指令。
+
+脚本支持断点续跑，并保存增强后的指令、步骤、元数据及对应图片软链接。
+"""
 
 import json
 import os
 import re
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from swm.utils.apis import call_gpt_json
 
 
-# ============================================================
-# Config
-# ============================================================
-
+# 修改这些配置后直接运行本文件，无需传入命令行参数。
 SOURCE_TASK_DOMAIN = "human"
-AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug_v6"
+AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug_v0"
+PLAN_MODEL_NAME = "gpt-5.6-sol"
+CALL_GPT_MODEL = "gpt-5.6-sol"
+START_TASK_ID = 261
+END_TASK_ID = 296
 
-GEN_MODEL_NAME = "gemini-3-flash-preview"
-CALL_GPT_MODEL = "gpt-5.2"
-
-MAX_WORKERS = 300
-MAX_RETRY = 5
+AUG_FACTOR = 3
+MAX_WORKERS = 50
+MAX_RETRY = 10
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 STYLE_GUIDES = [
@@ -39,638 +41,305 @@ STYLE_GUIDES = [
     "Stay close to the high-level meaning but change the wording enough to be distinct.",
 ]
 
-
-# ============================================================
-# Basic helpers
-# ============================================================
-
-def clean(text):
-    return re.sub(r"\s+", " ", str(text).strip().strip('"').strip("'"))
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def norm(text):
-    text = clean(text).lower()
-    text = re.sub(r"[^\w\s]", " ", text)
-    text = re.sub(r"\b(the|a|an|please|could|would|can|just)\b", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+def natural_key(text):
+    """让 task_2 排在 task_10 前面。"""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", str(text))]
 
 
-def nkey(text):
-    return [int(x) if x.isdigit() else x.lower() for x in re.split(r"(\d+)", str(text))]
-
-
-def read_json(path):
-    if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {}
-
-
-def write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def find_root():
-    here = Path(__file__).resolve().parent
-    if (here / "tasks").is_dir() and (here / "dataset").is_dir():
-        return here
-    if (here.parent / "tasks").is_dir() and (here.parent / "dataset").is_dir():
-        return here.parent
-    return here
-
-
-def format_actions(actions):
-    if not actions:
-        return "- none"
-    return "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions))
-
-
-def sort_nested(data):
-    sorted_data = {}
-
-    for group_id, episode_map in sorted(data.items(), key=lambda x: nkey(x[0])):
-        sorted_data[group_id] = dict(sorted(episode_map.items(), key=lambda x: nkey(x[0])))
-
-    return sorted_data
-
-
-# ============================================================
-# Data loading
-# ============================================================
-
-def load_source_items(path):
-    data = read_json(path)
-
-    flat_mode = (
-        len(data) == 1
-        and SOURCE_TASK_DOMAIN in data
-        and isinstance(data[SOURCE_TASK_DOMAIN], dict)
-        and all(not isinstance(v, dict) for v in data[SOURCE_TASK_DOMAIN].values())
-    )
-
-    items = []
-
-    if flat_mode:
-        for episode_id, instruction in sorted(data[SOURCE_TASK_DOMAIN].items(), key=lambda x: nkey(x[0])):
-            instruction = clean(instruction)
-            if instruction:
-                items.append((SOURCE_TASK_DOMAIN, str(episode_id), instruction))
-        return items, flat_mode
-
-    for group_id, episode_map in sorted(data.items(), key=lambda x: nkey(x[0])):
-        for episode_id, instruction in sorted(episode_map.items(), key=lambda x: nkey(x[0])):
-            instruction = clean(instruction)
-            if instruction:
-                items.append((str(group_id), str(episode_id), instruction))
-
-    return items, flat_mode
-
-
-def read_group_actions(path):
-    actions = {}
-
-    for line in path.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"^\[G(\d+)\]\s*(.+?)\s*$", line.strip())
-        if not m:
-            continue
-
-        gid = int(m.group(1))
-        action = clean(m.group(2))
-
-        if gid not in actions:
-            actions[gid] = []
-        actions[gid].append(action)
-
-    return actions
-
-
-def load_existing_progress(meta_data, instruction_data):
-    count_by_pair = {}
-    texts_by_pair = {}
-
-    for group_id in meta_data:
-        if not isinstance(meta_data[group_id], dict):
-            continue
-
-        for episode_id in meta_data[group_id]:
-            meta = meta_data[group_id][episode_id]
-            if not isinstance(meta, dict):
+def collect_jobs(source_data, progress_counts):
+    """为每个关键帧分段整理原指令、已完成动作、剩余动作和图片。"""
+    jobs = []
+    for group_id, episodes in sorted(source_data.items(), key=lambda item: natural_key(item[0])):
+        for episode_id, instruction in sorted(episodes.items(), key=lambda item: natural_key(item[0])):
+            instruction = " ".join(str(instruction).strip(" \"'").split())
+            if not instruction:
                 continue
 
-            if "source_group_id" in meta:
-                source_group_id = meta["source_group_id"]
-            elif "source_task_id" in meta:
-                source_group_id = meta["source_task_id"]
-            else:
-                continue
-
-            if "source_episode_id" not in meta or "start_gid" not in meta:
-                continue
-
-            pair = (
-                str(source_group_id),
-                str(meta["source_episode_id"]),
-                int(meta["start_gid"]),
+            keyframe_dir = ROOT / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / group_id / episode_id
+            group_file = (
+                ROOT
+                / "eval_results"
+                / PLAN_MODEL_NAME
+                / SOURCE_TASK_DOMAIN
+                / group_id
+                / episode_id
+                / "kf_plan_group.txt"
             )
 
-            if pair not in count_by_pair:
-                count_by_pair[pair] = 0
-            count_by_pair[pair] += 1
-
-            if group_id in instruction_data and episode_id in instruction_data[group_id]:
-                text = clean(instruction_data[group_id][episode_id])
-                if text:
-                    if pair not in texts_by_pair:
-                        texts_by_pair[pair] = []
-                    texts_by_pair[pair].append(text)
-
-    return count_by_pair, texts_by_pair
-
-
-# ============================================================
-# Job collection
-# ============================================================
-
-def collect_jobs(root, source_items, flat_mode, count_by_pair):
-    jobs = []
-
-    for group_id, episode_id, instruction in source_items:
-        if flat_mode:
-            keyframe_dir = root / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / episode_id
-            group_file = root / "eval_results" / GEN_MODEL_NAME / SOURCE_TASK_DOMAIN / episode_id / "kf_plan_group.txt"
-        else:
-            keyframe_dir = root / "dataset" / "keyframes" / SOURCE_TASK_DOMAIN / group_id / episode_id
-            group_file = root / "eval_results" / GEN_MODEL_NAME / SOURCE_TASK_DOMAIN / group_id / episode_id / "kf_plan_group.txt"
-
-        if not keyframe_dir.is_dir() or not group_file.is_file():
-            continue
-
-        group_actions = read_group_actions(group_file)
-        if not group_actions:
-            continue
-
-        group_ids = sorted(group_actions)
-
-        seg_dirs = []
-        for path in keyframe_dir.iterdir():
-            m = re.fullmatch(r"seg_(\d+)", path.name)
-            if path.is_dir() and m:
-                seg_dirs.append((int(m.group(1)), path))
-        seg_dirs.sort(key=lambda x: x[0])
-
-        for start_gid, seg_dir in seg_dirs:
-            if start_gid not in group_actions:
+            if not keyframe_dir.is_dir() or not group_file.is_file():
                 continue
 
-            images = [p for p in seg_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS]
-            images.sort(key=lambda p: nkey(p.name))
+            actions = {}
+            for line in group_file.read_text(encoding="utf-8").splitlines():
+                match = re.match(r"^\[G(\d+)\]\s*(.+?)\s*$", line.strip())
+                if match:
+                    gid = int(match.group(1))
+                    actions.setdefault(gid, []).append(" ".join(match.group(2).split()))
 
-            if not images:
-                continue
+            for segment_dir in sorted(keyframe_dir.glob("seg_*"), key=lambda path: natural_key(path.name)):
+                match = re.fullmatch(r"seg_(\d+)", segment_dir.name)
+                if not segment_dir.is_dir() or not match:
+                    continue
 
-            completed = []
-            remaining = []
+                start_gid = int(match.group(1))
+                if start_gid not in actions:
+                    continue
 
-            for gid in group_ids:
-                if gid < start_gid:
-                    completed.extend(group_actions[gid])
-                else:
-                    remaining.extend(group_actions[gid])
+                images = sorted(
+                    [path for path in segment_dir.iterdir() if path.suffix.lower() in IMAGE_EXTS],
+                    key=lambda path: natural_key(path.name),
+                )
+                if not images:
+                    continue
 
-            if not remaining:
-                continue
+                completed = []
+                remaining = []
+                for gid in sorted(actions):
+                    if gid < start_gid:
+                        completed.extend(actions[gid])
+                    else:
+                        remaining.extend(actions[gid])
 
-            pair = (group_id, episode_id, start_gid)
-            existing = count_by_pair[pair] if pair in count_by_pair else 0
-            target = len(remaining)
-            need = target - existing
+                pair = (str(group_id), str(episode_id), start_gid)
+                existing = progress_counts[pair] if pair in progress_counts else 0
+                target = len(remaining) * AUG_FACTOR
+                if target > existing:
+                    jobs.append(
+                        {
+                            "group_id": str(group_id),
+                            "episode_id": str(episode_id),
+                            "instruction": instruction,
+                            "start_gid": start_gid,
+                            "image_path": images[0],
+                            "completed": completed,
+                            "remaining": remaining,
+                            "target": target,
+                            "existing": existing,
+                            "need": target - existing,
+                        }
+                    )
 
-            if need <= 0:
-                continue
-
-            jobs.append({
-                "group_id": group_id,
-                "episode_id": episode_id,
-                "instruction": instruction,
-                "start_gid": start_gid,
-                "image_path": images[0],
-                "completed": completed,
-                "remaining": remaining,
-                "target": target,
-                "existing": existing,
-                "need": need,
-            })
-
-    jobs.sort(key=lambda x: (nkey(x["group_id"]), nkey(x["episode_id"]), x["start_gid"]))
-    return jobs
-
-
-# ============================================================
-# GPT generation
-# ============================================================
-
-def build_prompt(job, existing_texts, last_error):
-    styles = []
-    for i in range(job["need"]):
-        style = STYLE_GUIDES[(job["existing"] + i) % len(STYLE_GUIDES)]
-        styles.append(f"{i + 1}. slot={i + 1}: {style}")
-
-    if existing_texts:
-        existing_block = "\n".join(f"- {x}" for x in existing_texts)
-    else:
-        existing_block = "none"
-
-    retry_block = ""
-    if last_error:
-        retry_block = f"""
-Previous output problem:
-{last_error}
-Regenerate the full JSON and fix it.
-"""
-
-    return f"""You are generating augmented robot task instructions for the SAME image and the SAME remaining task.
-
-The dataset trains a vision-language robot planner.
-The language instruction should describe the high-level goal.
-The image should preserve hidden executable preconditions.
-Do not turn the instruction into a step-by-step robot plan.
-
-Core rule:
-- Keep WHAT final state should be achieved.
-- Remove HOW the robot should make the task executable.
-- Do not leak implicit constraints that are visible in the image.
-
-Usually remove:
-- source locations,
-- current supports,
-- blockers or occluders,
-- intermediate tools,
-- hidden state activations,
-- low-level pick/lift/grab/take/remove steps,
-- action ordering caused only by executability.
-
-Usually keep:
-- final target objects,
-- final destination or container,
-- final spatial relation,
-- explicit final states such as closed, locked, returned, turned off, or placed,
-- tools or objects only if they are part of the final requested result.
-
-Examples:
-Bad: Lift the green bowl out of the yellow bowl and place it on the white plate.
-Good: Place the green bowl on the white plate.
-
-Bad: Use the key to open the drawer.
-Good: Open the drawer.
-
-Good: Put the pill bottle into the top drawer, then close and lock the drawer and return the key.
-
-Inputs:
-
-Original full instruction:
-{job["instruction"]}
-
-Completed actions already done:
-{format_actions(job["completed"])}
-
-Remaining steps for reference only:
-{format_actions(job["remaining"])}
-
-Existing augmented instructions for this same source segment:
-{existing_block}
-
-Style slots:
-{chr(10).join(styles)}
-
-Task:
-Generate exactly {job["need"]} new instructions.
-
-Requirements:
-- Describe only the remaining task.
-- Preserve the remaining final goal.
-- Do not ask for completed parts again.
-- Do not invent new objects, tools, destinations, states, or goals.
-- Do not mention image, photo, scene, camera, frame, or robot.
-- Do not mention Remaining steps or Completed actions.
-- Avoid exact duplicates and near-identical templates.
-- Avoid repeating existing augmented instructions.
-- Keep every instruction concise.
-
-Return JSON only:
-{{
-  "shared_goal": "brief summary of the common high-level remaining goal",
-  "hidden_details_not_mentioned": ["brief hidden details intentionally kept out of language"],
-  "variants": [
-    {{
-      "slot": 1,
-      "instruction": "generated instruction",
-      "style_label": "short style label"
-    }}
-  ]
-}}
-
-Output rules:
-- variants must contain exactly {job["need"]} items.
-- slot must be integers from 1 to {job["need"]}, each exactly once.
-- Do not output markdown.
-- Do not output reasoning outside JSON.
-{retry_block}"""
+    return sorted(
+        jobs,
+        key=lambda job: (
+            natural_key(job["group_id"]),
+            natural_key(job["episode_id"]),
+            job["start_gid"],
+        ),
+    )
 
 
-def validate(job, data, existing_texts):
-    if not isinstance(data, dict):
-        return False, [], "response is not a JSON dict"
+def generate_instructions(prompt_template, job, existing_instructions):
+    """调用模型生成一个分段的全部增强指令；格式错误时重新生成。"""
+    error = ""
+    banned_words = [
+        "image",
+        "photo",
+        "scene",
+        "camera",
+        "frame",
+        "robot",
+        "left hand",
+        "right hand",
+        "both hands",
+        "remaining steps",
+        "completed actions",
+    ]
 
-    if "variants" not in data or not isinstance(data["variants"], list):
-        return False, [], "missing variants list"
-
-    if len(data["variants"]) != job["need"]:
-        return False, [], f"expected {job['need']} variants, got {len(data['variants'])}"
-
-    existing_norms = {norm(x) for x in existing_texts}
-    variants = {}
-
-    for item in data["variants"]:
-        if not isinstance(item, dict):
-            return False, [], "one variant is not a dict"
-
-        if "slot" not in item or "instruction" not in item:
-            return False, [], "missing slot or instruction"
-
-        try:
-            slot = int(item["slot"])
-        except Exception:
-            return False, [], "slot is not an integer"
-
-        if slot < 1 or slot > job["need"]:
-            return False, [], f"unexpected slot: {slot}"
-
-        if slot in variants:
-            return False, [], f"duplicate slot: {slot}"
-
-        instruction = clean(item["instruction"])
-        instruction_norm = norm(instruction)
-
-        if len(instruction_norm.split()) < 3:
-            return False, [], f"slot {slot}: instruction too short"
-
-        banned = [
-            "image", "photo", "scene", "camera", "frame", "robot",
-            "left hand", "right hand", "both hands",
-            "remaining steps", "completed actions",
-        ]
-
-        for word in banned:
-            if word in instruction_norm:
-                return False, [], f"slot {slot}: contains banned text: {word}"
-
-        if instruction_norm in existing_norms:
-            return False, [], f"slot {slot}: duplicates existing instruction"
-
-        if "style_label" in item:
-            style_label = clean(item["style_label"])
-        else:
-            style_label = f"style_{slot}"
-
-        variants[slot] = {
-            "slot": slot,
-            "instruction": instruction,
-            "style_label": style_label,
-        }
-
-    if set(variants) != set(range(1, job["need"] + 1)):
-        return False, [], "missing slots"
-
-    generated_norms = [norm(variants[i]["instruction"]) for i in range(1, job["need"] + 1)]
-    if len(set(generated_norms)) != len(generated_norms):
-        return False, [], "duplicate generated instructions"
-
-    return True, [variants[i] for i in range(1, job["need"] + 1)], ""
-
-
-def generate(job, existing_texts):
-    last_error = ""
+    def normalize(text):
+        text = re.sub(r"[^\w\s]", " ", " ".join(str(text).lower().split()))
+        text = re.sub(r"\b(the|a|an|please|could|would|can|just)\b", " ", text)
+        return " ".join(text.split())
 
     for retry in range(1, MAX_RETRY + 1):
+        styles = [
+            f"{slot}. slot={slot}: {STYLE_GUIDES[(job['existing'] + slot - 1) % len(STYLE_GUIDES)]}"
+            for slot in range(1, job["need"] + 1)
+        ]
+        prompt = prompt_template.format(
+            instruction=job["instruction"],
+            completed_actions="\n".join(
+                f"{index}. {action}" for index, action in enumerate(job["completed"], 1)
+            )
+            or "- none",
+            remaining_actions="\n".join(
+                f"{index}. {action}" for index, action in enumerate(job["remaining"], 1)
+            )
+            or "- none",
+            existing_block="\n".join(f"- {text}" for text in existing_instructions) or "none",
+            style_slots="\n".join(styles),
+            need=job["need"],
+            retry_block=(
+                f"Previous output problem:\n{error}\nRegenerate the full JSON and fix it." if error else ""
+            ),
+        )
+
         try:
-            prompt = build_prompt(job, existing_texts, last_error)
             data = call_gpt_json(CALL_GPT_MODEL, prompt, [job["image_path"]])
-            ok, variants, error = validate(job, data, existing_texts)
+            variants = sorted(data["variants"], key=lambda item: int(item["slot"]))
+            instructions = [" ".join(str(item["instruction"]).strip(" \"'").split()) for item in variants]
+            normalized = [normalize(text) for text in instructions]
 
-            if ok:
-                hidden = []
-                if "hidden_details_not_mentioned" in data:
-                    hidden = data["hidden_details_not_mentioned"]
+            if len(variants) != job["need"]:
+                raise ValueError(f"expected {job['need']} variants, got {len(variants)}")
+            if [int(item["slot"]) for item in variants] != list(range(1, job["need"] + 1)):
+                raise ValueError("slots must be consecutive and unique")
+            if any(len(text.split()) < 3 for text in normalized):
+                raise ValueError("an instruction is too short")
+            if any(word in text for text in normalized for word in banned_words):
+                raise ValueError("an instruction contains banned text")
+            if len(set(normalized)) != len(normalized):
+                raise ValueError("generated instructions contain duplicates")
+            if set(normalized) & {normalize(text) for text in existing_instructions}:
+                raise ValueError("an instruction duplicates existing data")
 
-                shared_goal = ""
-                if "shared_goal" in data:
-                    shared_goal = clean(data["shared_goal"])
+            for item, instruction in zip(variants, instructions):
+                item["instruction"] = instruction
 
-                return {
-                    "ok": True,
-                    "job": job,
-                    "variants": variants,
-                    "shared_goal": shared_goal,
-                    "hidden": hidden,
-                    "retry": retry,
-                    "error": "",
-                }
+            return {
+                "ok": True,
+                "job": job,
+                "variants": variants,
+                "shared_goal": data["shared_goal"],
+                "hidden_details_not_mentioned": data["hidden_details_not_mentioned"],
+                "retry": retry,
+                "error": "",
+            }
+        except Exception as exception:
+            error = str(exception)
 
-            last_error = error
+    return {"ok": False, "job": job, "variants": [], "retry": MAX_RETRY, "error": error}
 
-        except Exception as e:
-            last_error = str(e)
 
-    return {
-        "ok": False,
-        "job": job,
-        "variants": [],
-        "shared_goal": "",
-        "hidden": [],
-        "retry": MAX_RETRY,
-        "error": last_error,
+def main():
+    prompt_path = ROOT / "src" / "swm" / "prompt_templates" / "instruction_aug.txt"
+    source_path = ROOT / "tasks" / "instructions" / f"instructions_{SOURCE_TASK_DOMAIN}.json"
+    instruction_path = ROOT / "tasks" / "instructions" / f"instructions_{AUG_TASK_DOMAIN}.json"
+    steps_path = ROOT / "tasks" / "steps" / f"steps_{AUG_TASK_DOMAIN}.json"
+    meta_path = ROOT / "tasks" / "meta" / f"meta_{AUG_TASK_DOMAIN}.json"
+    image_root = ROOT / "tasks" / "images" / AUG_TASK_DOMAIN
+
+    prompt_template = prompt_path.read_text(encoding="utf-8")
+    source_data = json.loads(source_path.read_text(encoding="utf-8"))
+    source_data = {
+        f"task_{task_id}": source_data[f"task_{task_id}"]
+        for task_id in range(START_TASK_ID, END_TASK_ID + 1)
     }
+    instruction_data = json.loads(instruction_path.read_text(encoding="utf-8")) if instruction_path.is_file() else {}
+    steps_data = json.loads(steps_path.read_text(encoding="utf-8")) if steps_path.is_file() else {}
+    meta_data = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
 
+    # 已生成数量用于断点续跑，已有文本用于避免重复。
+    progress_counts = {}
+    existing_texts = {}
+    for group_id, episodes in meta_data.items():
+        for episode_id, meta in episodes.items():
+            if not isinstance(meta, dict) or not {"source_group_id", "source_episode_id", "start_gid"} <= meta.keys():
+                continue
+            pair = (str(meta["source_group_id"]), str(meta["source_episode_id"]), int(meta["start_gid"]))
+            progress_counts[pair] = progress_counts[pair] + 1 if pair in progress_counts else 1
+            if group_id in instruction_data and episode_id in instruction_data[group_id]:
+                existing_texts.setdefault(pair, []).append(instruction_data[group_id][episode_id])
 
-# ============================================================
-# Saving
-# ============================================================
+    jobs = collect_jobs(source_data, progress_counts)
+    print(f"jobs: {len(jobs)}")
+    if not jobs:
+        print("No jobs to run.")
+        return
 
-def next_episode_id_map(instruction_data):
-    next_ids = {}
+    results = []
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(jobs))) as executor:
+        futures = [
+            executor.submit(
+                generate_instructions,
+                prompt_template,
+                job,
+                existing_texts[pair] if pair in existing_texts else [],
+            )
+            for job in jobs
+            for pair in [(job["group_id"], job["episode_id"], job["start_gid"])]
+        ]
+        for index, future in enumerate(as_completed(futures), 1):
+            result = future.result()
+            results.append(result)
+            job = result["job"]
+            print(
+                f"[{index}/{len(futures)}] {'OK' if result['ok'] else 'FAIL'} "
+                f"{job['group_id']}/{job['episode_id']}/G{job['start_gid']} "
+                f"target={job['target']} existing={job['existing']} need={job['need']} "
+                f"new={len(result['variants'])} retry={result['retry']} {result['error']}"
+            )
 
-    for group_id in instruction_data:
-        max_id = 0
+    results.sort(
+        key=lambda result: (
+            natural_key(result["job"]["group_id"]),
+            natural_key(result["job"]["episode_id"]),
+            result["job"]["start_gid"],
+        )
+    )
 
-        for episode_id in instruction_data[group_id]:
-            m = re.search(r"(\d+)$", str(episode_id))
-            if m:
-                max_id = max(max_id, int(m.group(1)))
+    next_episode_id = {}
+    for group_id, episodes in instruction_data.items():
+        numbers = [int(match.group(1)) for name in episodes if (match := re.search(r"(\d+)$", name))]
+        next_episode_id[group_id] = max(numbers) + 1 if numbers else 1
 
-        next_ids[group_id] = max_id + 1
-
-    return next_ids
-
-
-def link_image(src, dst):
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    if dst.exists() or dst.is_symlink():
-        dst.unlink()
-
-    src = Path(src).resolve()
-    rel_src = Path(os.path.relpath(src, start=dst.parent))
-    dst.symlink_to(rel_src)
-
-
-def save_results(root, results, instruction_data, steps_data, meta_data, image_root):
-    next_ids = next_episode_id_map(instruction_data)
     created = 0
-
     for result in results:
         if not result["ok"]:
             continue
 
         job = result["job"]
         group_id = job["group_id"]
-
         if group_id not in instruction_data:
             instruction_data[group_id] = {}
-        if group_id not in steps_data:
             steps_data[group_id] = {}
-        if group_id not in meta_data:
             meta_data[group_id] = {}
-        if group_id not in next_ids:
-            next_ids[group_id] = 1
+            next_episode_id[group_id] = 1
 
         for variant in result["variants"]:
-            episode_id = f"episode_{next_ids[group_id]}"
-            next_ids[group_id] += 1
-
-            dst_image = image_root / group_id / f"{episode_id}.png"
-            link_image(job["image_path"], dst_image)
+            episode_id = f"episode_{next_episode_id[group_id]}"
+            next_episode_id[group_id] += 1
+            output_image = image_root / group_id / f"{episode_id}.png"
+            output_image.parent.mkdir(parents=True, exist_ok=True)
+            if output_image.exists() or output_image.is_symlink():
+                output_image.unlink()
+            output_image.symlink_to(os.path.relpath(job["image_path"].resolve(), output_image.parent))
 
             instruction_data[group_id][episode_id] = variant["instruction"]
             steps_data[group_id][episode_id] = job["remaining"]
-
             meta_data[group_id][episode_id] = {
-                "source_group_id": job["group_id"],
+                "source_group_id": group_id,
                 "source_episode_id": job["episode_id"],
                 "source_instruction": job["instruction"],
                 "start_gid": job["start_gid"],
-                "slot": variant["slot"],
+                "slot": int(variant["slot"]),
                 "style_label": variant["style_label"],
                 "shared_goal": result["shared_goal"],
-                "hidden_details_not_mentioned": result["hidden"],
+                "hidden_details_not_mentioned": result["hidden_details_not_mentioned"],
                 "source_image_path": str(job["image_path"]),
-                "image_path": str(dst_image.relative_to(root)),
+                "image_path": str(output_image.relative_to(ROOT)),
                 "steps": job["remaining"],
                 "completed_actions": job["completed"],
                 "target_count": job["target"],
                 "existing_count_before_run": job["existing"],
                 "need_count_before_run": job["need"],
-                "aug_version": "simple_grouped_implicit_instruction_aug_v2",
+                "aug_version": "simple_grouped_implicit_instruction_aug_v3",
             }
-
             created += 1
 
-    return created
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def main():
-    root = find_root()
-
-    src_instruction_path = root / "tasks" / "instructions" / f"instructions_{SOURCE_TASK_DOMAIN}.json"
-    out_instruction_path = root / "tasks" / "instructions" / f"instructions_{AUG_TASK_DOMAIN}.json"
-    out_steps_path = root / "tasks" / "steps" / f"steps_{AUG_TASK_DOMAIN}.json"
-    out_meta_path = root / "tasks" / "meta" / f"meta_{AUG_TASK_DOMAIN}.json"
-    out_image_root = root / "tasks" / "images" / AUG_TASK_DOMAIN
-
-    out_image_root.mkdir(parents=True, exist_ok=True)
-
-    source_items, flat_mode = load_source_items(src_instruction_path)
-
-    instruction_data = read_json(out_instruction_path)
-    steps_data = read_json(out_steps_path)
-    meta_data = read_json(out_meta_path)
-
-    count_by_pair, texts_by_pair = load_existing_progress(meta_data, instruction_data)
-    jobs = collect_jobs(root, source_items, flat_mode, count_by_pair)
-
-    print(f"jobs: {len(jobs)}")
-
-    if not jobs:
-        print("No jobs to run.")
-        return
-
-    results = []
-    workers = min(MAX_WORKERS, len(jobs))
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = []
-
-        for job in jobs:
-            pair = (job["group_id"], job["episode_id"], job["start_gid"])
-            if pair in texts_by_pair:
-                existing_texts = texts_by_pair[pair]
-            else:
-                existing_texts = []
-
-            futures.append(executor.submit(generate, job, existing_texts))
-
-        for i, future in enumerate(as_completed(futures), 1):
-            result = future.result()
-            results.append(result)
-
-            job = result["job"]
-            status = "OK" if result["ok"] else "FAIL"
-
-            print(
-                f"[{i}/{len(futures)}] {status} "
-                f"{job['group_id']}/{job['episode_id']}/G{job['start_gid']} "
-                f"target={job['target']} "
-                f"existing={job['existing']} "
-                f"need={job['need']} "
-                f"new={len(result['variants'])} "
-                f"retry={result['retry']} "
-                f"{result['error']}"
-            )
-
-    results.sort(key=lambda r: (
-        nkey(r["job"]["group_id"]),
-        nkey(r["job"]["episode_id"]),
-        r["job"]["start_gid"],
-    ))
-
-    created = save_results(
-        root,
-        results,
-        instruction_data,
-        steps_data,
-        meta_data,
-        out_image_root,
-    )
-
-    instruction_data = sort_nested(instruction_data)
-    steps_data = sort_nested(steps_data)
-    meta_data = sort_nested(meta_data)
-
-    write_json(out_instruction_path, instruction_data)
-    write_json(out_steps_path, steps_data)
-    write_json(out_meta_path, meta_data)
-
-    total = sum(len(v) for v in instruction_data.values())
+    for path, data in [(instruction_path, instruction_data), (steps_path, steps_data), (meta_path, meta_data)]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"created: {created}")
-    print(f"total: {total}")
-    print(f"output instruction json: {out_instruction_path}")
-    print(f"output steps json: {out_steps_path}")
-    print(f"output meta json: {out_meta_path}")
-    print(f"output image root: {out_image_root}")
+    print(f"total: {sum(len(episodes) for episodes in instruction_data.values())}")
+    print(f"output instruction json: {instruction_path}")
+    print(f"output steps json: {steps_path}")
+    print(f"output meta json: {meta_path}")
+    print(f"output image root: {image_root}")
 
 
 if __name__ == "__main__":

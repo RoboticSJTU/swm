@@ -1,6 +1,6 @@
 from pathlib import Path
 from swm.utils.plan_learning import get_prompt_from_template
-from swm.utils.apis import call_gpt_json
+from swm.utils.apis import call_gpt_json, call_gpt
 
 def judge_pddl(
     model: str,

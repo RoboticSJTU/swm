@@ -10,7 +10,7 @@ load_dotenv(find_dotenv())
 
 def get_client(model: str):
     if model.startswith(("gemini", "gpt", "o")):
-        return OpenAI(api_key=os.getenv("SII_API_KEY"), base_url="http://apicz.boyuerichdata.com/v1", timeout=60, max_retries=0)
+        return OpenAI(api_key=os.getenv("SII_API_KEY"), base_url="https://dasuapi.com/v1", timeout=600, max_retries=0)
 
     if model.startswith("Qwen3.5-397B-A17B"):
         return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xyx.openapi-qb-ai.sii.edu.cn/v1")
@@ -38,8 +38,8 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
     kwargs = dict(
         model=model,
         messages=[{"role": "user", "content": content}],
-        temperature=1,
-    )
+        temperature=0.3
+       )
 
     if model.startswith("Qwen3.5"):
         # # # 推理模式
@@ -53,7 +53,7 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
     return output
 
 def call_gpt_json(model: str, prompt: str, image_paths: Optional[List[Path]] = None):
-    for _ in range(100):
+    for _ in range(20):
         output = None
         try:
             output = call_gpt(model, prompt, image_paths)

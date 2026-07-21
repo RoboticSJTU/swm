@@ -1,305 +1,193 @@
 import json
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List
-from swm.utils.plan_learning import learn_steps_from_keyframes, get_first_keyframe_image
-from swm.utils.construct_prompt import construct_instruction_with_steps
-from swm.utils.pddl.judge import judge_pddl
-from swm.utils.pddl.generation import is_task_finished, find_task_image, format_numbered_steps, RetryState, generate_pddl
-import traceback
-from swm.keyframe.extraction import extract_frames_from_video, extract_keyframes_from_frames
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
-def load_tasks(root_dir: Path, task_domain: str) -> List[Dict[str, Any]]:
-    """
-    只支持统一嵌套格式：
-    (1) instructions_{task_domain}.json:
-    {
-      "task_1": {
-        "episode_1": "instruction ..."
-      }
-    }
-    """
-
-    tasks_path = root_dir / "tasks" / "instructions" / f"instructions_{task_domain}.json"
-    steps_path = root_dir / "tasks" / "steps" / f"steps_{task_domain}.json"
-    task_img_dir = root_dir / "tasks" / "images" / task_domain
-    instructions_all_task = json.loads(tasks_path.read_text(encoding="utf-8"))
-
-    videos_root = root_dir / "dataset" / "videos" / task_domain
-    frames_root = root_dir / "dataset" / "frames" / task_domain
-    keyframes_root = root_dir / "dataset" / "keyframes" / task_domain
+from swm.keyframe.extraction import extract_frames, extract_keyframes
+from swm.utils.construct_prompt import construct_instruction_with_steps
+from swm.utils.pddl.generation import RetryState, generate_pddl
+from swm.utils.pddl.judge import judge_pddl
+from swm.utils.plan_learning import learn_steps_from_keyframes
 
 
-    # 关键帧提取
-    try:
-        extract_frames_from_video(videos_root, frames_root, max_workers=16)
-        extract_keyframes_from_frames(frames_root, keyframes_root, smooth_k=5, merge_pct=0.5,max_workers=16, plot_energy=True)
-    except Exception as e:
-        print(f"[Warn] keyframe extraction failed for domain {task_domain}: {e}")
+# =========================
+# Configuration
+# =========================
+ROOT_DIR = Path(__file__).parent.parent
+INPUT_MODE = "prepared"  # "video" or "prepared"
+TASK_DOMAIN = "human_aug_v0"
+START_TASK_ID = 261
+END_TASK_ID = 296
 
-    move_keyframes_to_nested(keyframes_root, instructions_all_task)
+PDDL_MODEL = "gpt-5.6-sol"
+LEARN_STEPS_MODEL = "gpt-5.6-sol"
+JUDGE_MODEL = "gpt-5.6-sol"
 
-    if steps_path.is_file():
-        steps_all_task = json.loads(steps_path.read_text(encoding="utf-8"))
-    else:
-        steps_all_task = {}
+TASK_WORKERS = 30 # 主线程并发数
+MAX_STEP_BACKTRACKS = 10
+MAX_PLAN_ATTEMPTS = 3
+PREPROCESS_WORKERS = 16 # 关键帧提取并发
+
+USE_ACTION_TEMPLATE = True
+ACTION_TEMPLATE_DOMAIN = "human"
+ACTION_TEMPLATE_MODEL = "gemini-3-flash-preview"
+
+
+def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
+    instructions_path = root_dir / "tasks" / "instructions" / f"instructions_{task_domain}.json"
+    instructions = json.loads(instructions_path.read_text(encoding="utf-8"))
+
+    if input_mode == "prepared":
+        steps_path = root_dir / "tasks" / "steps" / f"steps_{task_domain}.json"
+        meta_path = root_dir / "tasks" / "meta" / f"meta_{task_domain}.json"
+        all_steps = json.loads(steps_path.read_text(encoding="utf-8"))
+        all_meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
     tasks = []
-
-    for task_id, ep2instruction in sorted(instructions_all_task.items()):
-        if task_id in steps_all_task:
-            task_steps = steps_all_task[task_id]
-        else:
-            task_steps = {}
-
-        for episode_id, instruction in sorted(ep2instruction.items()):
-            instruction = str(instruction).strip()
-            if not instruction:
-                continue
-
-            image_path = None
-            for ext in ("png", "jpg", "jpeg", "webp"):
-                p = task_img_dir / task_id / f"{episode_id}.{ext}"
-                if p.is_file():
-                    image_path = p
-                    break
-
-            if episode_id in task_steps:
-                json_steps = task_steps[episode_id]
-            else:
-                json_steps = []
-
-            steps = [str(step).strip() for step in json_steps if str(step).strip()]
-
-            keyframe_dir = keyframes_root / task_id / episode_id
-
-            tasks.append({
+    for task_id, episodes in sorted(instructions.items()):
+        task_number = int(task_id.removeprefix("task_"))
+        if task_number < START_TASK_ID or task_number > END_TASK_ID:
+            continue
+        for episode_id, instruction in sorted(episodes.items()):
+            task = {
                 "task_domain": task_domain,
                 "task_id": task_id,
                 "episode_id": episode_id,
-                "instruction": instruction,
-                "keyframe_dir": str(keyframe_dir),
-                "image_path": str(image_path) if image_path is not None else None,
-                "steps": steps,
-            })
+                "instruction": str(instruction).strip(),
+                "save_dir": root_dir / "eval_results" / PDDL_MODEL / task_domain / task_id / episode_id,
+                "group_key": (task_id, episode_id),
+            }
+
+            if input_mode == "video":
+                task["video_path"] = root_dir / "dataset" / "videos" / task_domain / f"{episode_id}.mp4"
+                task["frames_dir"] = root_dir / "dataset" / "frames" / task_domain / episode_id
+                task["keyframe_dir"] = root_dir / "dataset" / "keyframes" / task_domain / task_id / episode_id
+            else:
+                task["image_path"] = root_dir / "tasks" / "images" / task_domain / task_id / f"{episode_id}.png"
+                task["steps"] = [str(step).strip() for step in all_steps[task_id][episode_id]]
+                task["group_key"] = (
+                    task_id,
+                    str(all_meta[task_id][episode_id]["source_episode_id"]),
+                    int(all_meta[task_id][episode_id]["start_gid"]),
+                )
+
+            tasks.append(task)
 
     return tasks
 
-def move_keyframes_to_nested(keyframes_root: Path, instructions_all_task: dict):
-    for task_id, ep2instruction in instructions_all_task.items():
-        for episode_id in ep2instruction:
-            flat_dir = keyframes_root / episode_id
-            nested_dir = keyframes_root / task_id / episode_id
 
-            if flat_dir.is_dir() and not nested_dir.is_dir():
-                nested_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(flat_dir), str(nested_dir))
-                print(f"[move] {flat_dir} -> {nested_dir}")
+def prepare_video_task(task: dict) -> None:
+    # Existing nested keyframes are the final cache and need no preprocessing.
+    if list(task["keyframe_dir"].glob("seg_*/*.png")):
+        return
 
-
-def get_task_image_and_steps(task: dict, save_dir: Path):
-    """
-    steps 优先级: steps.json -> kf_plan.txt -> keyframes 学习
-    """
-    kf_plan_path = save_dir / "kf_plan.txt"
-    keyframe_dir = Path(task["keyframe_dir"])
-    image_path = Path(task["image_path"]) if task.get("image_path") else None
-
-    if keyframe_dir.is_dir():
-        task_img = get_first_keyframe_image(keyframe_dir)
-    elif image_path is not None and image_path.is_file():
-        task_img = image_path
-    else:
-        raise ValueError(f"no task image: {task['task_domain']}/{task['task_id']}/{task['episode_id']}")
-
-    # 1. 优先 steps.json
-    if task["steps"]:
-        steps = task["steps"]
-        kf_plan_path.write_text("\n".join(steps) + "\n", encoding="utf-8")
-        return task_img, steps
-
-    # 2. 再用已有 kf_plan.txt
-    if kf_plan_path.is_file():
-        steps = [x.strip() for x in kf_plan_path.read_text(encoding="utf-8").splitlines() if x.strip()]
-        if steps:
-            return task_img, steps
-
-    # 3. 最后从 keyframes 学
-    if keyframe_dir.is_dir():
-        return learn_steps_from_keyframes(
-            model_name=Learn_steps_MODEL,
-            keyframe_dir=keyframe_dir,
-            instruction=task["instruction"],
-            save_dir=save_dir,
-            max_backtracks=MAX_STEP_BACKTRACKS,
-        )
-
-    raise ValueError(f"no steps available: {task['task_domain']}/{task['task_id']}/{task['episode_id']}")
-
-
-def run_all_tasks(root_dir: Path, tasks: List[Dict[str, Any]]):
-    total_loaded = len(tasks)
-
-    # 过滤已经完成的任务
-    tasks = [
-        task for task in tasks
-        if not is_task_finished(
-            save_dir=root_dir / "eval_results" / PDDL_MODEL / task["task_domain"] / task["task_id"] / task["episode_id"],
-            max_attempts=MAX_PLAN_ATTEMPTS,
-        )
-    ]
-
-    total = len(tasks)
-    print(f"loaded: {total_loaded}, to run: {total}, skipped: {total_loaded - total}")
-
-    all_results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        future_to_task = {
-            ex.submit(run_single_task, task, root_dir): task
-            for task in tasks
-        }
-
-        for done_i, future in enumerate(as_completed(future_to_task), 1):
-            task = future_to_task[future]
-            tag = f"{task['task_domain']}/{task['task_id']}/{task['episode_id']}"
-
-            try:
-                result = future.result()
-            except Exception:
-                print(f"[{done_i}/{total}] ❌ {tag} crashed:")
-                print(traceback.format_exc())
-                result = {
-                    "task_domain": task["task_domain"],
-                    "task_id": task["task_id"],
-                    "completed": False,
-                    "planning_success": False,
-                    "judge_pass": False,
-                    "sharegpt_sample": None,
-                }
-
-            all_results.append(result)
-
-            if result["completed"] and result["judge_pass"]:
-                msg = "✅ judge pass"
-            elif result["completed"]:
-                msg = "⚠️ finished (judge/planning fail)"
-            else:
-                msg = "❌ failed"
-
-            print(f"[{done_i}/{total}] {tag} {msg}")
-
-    finished = sum(r["completed"] for r in all_results)
-    passed = sum(r["completed"] and r["judge_pass"] for r in all_results)
-    print(f"finished: {finished}/{len(all_results)}")
-    print(f"judge pass: {passed}/{len(all_results)}")
-
-def find_task_action_template(root_dir: Path, model_name: str, task_domain: str, task_id: str) -> str:
-    """
-    规则：
-    1. 遍历 task 下的 episode。
-    2. 每个 episode 只读取最新 round 的 domain.pddl。
-    3. 提取 domain 中所有 (:action ...) 块。
-    4. 如果 action 前面有连续的分号注释，也一起提取。
-    5. 找到第一个可用 domain 后立即返回。
-    """
-    task_dir = root_dir / "eval_results" / model_name / task_domain / task_id
-    if not task_dir.is_dir():
-        return ""
-
-    for episode_dir in sorted(task_dir.iterdir()):
-        if not episode_dir.is_dir():
-            continue
-
-        round_dirs = [
-            p for p in episode_dir.iterdir()
-            if p.is_dir() and p.name.startswith("round") and p.name[5:].isdigit()
-        ]
-        if not round_dirs:
-            continue
-
-        latest_round = max(round_dirs, key=lambda p: int(p.name[5:]))
-        domain_path = latest_round / "domain.pddl"
-        if not domain_path.is_file():
-            continue
-
-        lines = domain_path.read_text(encoding="utf-8").splitlines()
-        action_blocks = []
-
-        i = 0
-        while i < len(lines):
-            if "(:action" not in lines[i]:
-                i += 1
-                continue
-
-            action_start = i
-
-            # 向上收集紧贴 action 的注释，允许注释和 action 之间有空行
-            comment_start = i - 1
-            while comment_start >= 0 and not lines[comment_start].strip():
-                comment_start -= 1
-            while comment_start >= 0 and lines[comment_start].lstrip().startswith(";"):
-                action_start = comment_start
-                comment_start -= 1
-
-            # 向下匹配完整 action 括号块
-            depth = 0
-            action_end = i
-            while action_end < len(lines):
-                depth += lines[action_end].count("(") - lines[action_end].count(")")
-                if depth == 0:
-                    break
-                action_end += 1
-
-            action_blocks.append("\n".join(lines[action_start:action_end + 1]).strip())
-            i = action_end + 1
-
-        if action_blocks:
-            return "\n\n".join(action_blocks)
-
-    return ""
-
-
-def run_single_task(task: dict, root_dir: Path):
-    """
-    跑单个任务：
-    1. 创建当前任务的保存目录
-    2. 获取任务图像和动作步骤
-    3. 构造带步骤的详细任务描述
-    4. 最多尝试 MAX_PLAN_ATTEMPTS 轮 PDDL 生成
-    5. 每轮规划成功后，再调用 judge 检查 plan 是否符合任务意图
-    6. 若 judge 通过，则生成 sharegpt 样本
-    """
-
-    task_domain = task["task_domain"]
-    task_id = task["task_id"]
-    episode_id = task["episode_id"]
-    instruction = task["instruction"]
-
-    # 当前任务的总保存目录：
-    save_dir = root_dir / "eval_results" / PDDL_MODEL / task_domain / task_id / episode_id
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    task_img, steps = get_task_image_and_steps(task, save_dir)
-
-   
-    # #############################################
-    # 固定传入human里面的示例！！！！！
-    action_template = find_task_action_template(
-        root_dir=root_dir,
-        model_name=PDDL_MODEL,
-        task_domain="human",
-        task_id=task_id,
+    extract_frames(task["video_path"], task["frames_dir"])
+    extract_keyframes(
+        task["frames_dir"],
+        task["keyframe_dir"],
+        smooth_k=5,
+        merge_pct=0.5,
+        plot_energy=True,
     )
 
-    # pddl生成
-    instruction_with_steps = construct_instruction_with_steps(instruction, steps)
+
+def find_task_action_template(
+    root_dir: Path,
+    model_name: str,
+    task_domain: str,
+    task_id: str,
+) -> str:
+    task_dir = root_dir / "eval_results" / model_name / task_domain / task_id
+    episode_dirs = [path for path in task_dir.glob("episode_*") if path.is_dir()]
+    if not episode_dirs:
+        return ""
+
+    first_episode = min(
+        episode_dirs,
+        key=lambda path: int(path.name.rsplit("_", 1)[1]),
+    )
+    passed_rounds = []
+    for round_dir in first_episode.glob("round*"):
+        round_number = round_dir.name.removeprefix("round")
+        judge_path = round_dir / "judge.json"
+        if round_number.isdigit() and judge_path.is_file():
+            judge_result = json.loads(judge_path.read_text(encoding="utf-8"))
+            if judge_result["pass"]:
+                passed_rounds.append(round_dir)
+
+    if not passed_rounds:
+        return ""
+
+    passed_round = max(
+        passed_rounds,
+        key=lambda path: int(path.name.removeprefix("round")),
+    )
+    domain_path = passed_round / "domain.pddl"
+    if not domain_path.is_file():
+        return ""
+
+    lines = domain_path.read_text(encoding="utf-8").splitlines()
+    action_blocks = []
+    line_index = 0
+    while line_index < len(lines):
+        if "(:action" not in lines[line_index]:
+            line_index += 1
+            continue
+
+        action_start = line_index
+        comment_index = line_index - 1
+        while comment_index >= 0 and not lines[comment_index].strip():
+            comment_index -= 1
+        while comment_index >= 0 and lines[comment_index].lstrip().startswith(";"):
+            action_start = comment_index
+            comment_index -= 1
+
+        depth = 0
+        action_end = line_index
+        while action_end < len(lines):
+            depth += lines[action_end].count("(") - lines[action_end].count(")")
+            if depth == 0:
+                break
+            action_end += 1
+
+        action_blocks.append("\n".join(lines[action_start:action_end + 1]).strip())
+        line_index = action_end + 1
+
+    return "\n\n".join(action_blocks)
+
+
+def run_task(task: dict, input_mode: str, action_template: str) -> tuple[bool, bool]:
+    save_dir = task["save_dir"]
+    save_dir.mkdir(parents=True, exist_ok=True)
+    kf_plan_path = save_dir / "kf_plan.txt"
+
+    if input_mode == "video":
+        first_segment = task["keyframe_dir"] / "seg_00"
+        task_img = sorted(first_segment.glob("*.png"), key=lambda path: int(path.stem))[0]
+
+        if kf_plan_path.is_file() and kf_plan_path.read_text(encoding="utf-8").strip():
+            steps = [line.strip() for line in kf_plan_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        else:
+            task_img, steps = learn_steps_from_keyframes(
+                model_name=LEARN_STEPS_MODEL,
+                keyframe_dir=task["keyframe_dir"],
+                instruction=task["instruction"],
+                save_dir=save_dir,
+                max_backtracks=MAX_STEP_BACKTRACKS,
+            )
+    else:
+        task_img = task["image_path"]
+        steps = task["steps"]
+        kf_plan_path.write_text("\n".join(steps) + "\n", encoding="utf-8")
+
+    instruction_with_steps = construct_instruction_with_steps(task["instruction"], steps)
     retry_state = RetryState()
     planning_success = False
     judge_pass = False
+
     for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
         round_result = generate_pddl(
-            generate_pddl_model_name=JUDGE_MODEL,
+            generate_pddl_model_name=PDDL_MODEL,
             task_img=task_img,
             instruction_with_steps=instruction_with_steps,
             save_dir=save_dir,
@@ -311,68 +199,155 @@ def run_single_task(task: dict, root_dir: Path):
         retry_state.prev_domain = round_result["domain"]
         retry_state.prev_problem = round_result["problem"]
 
-        # 求解失败
         if not round_result["ok"]:
             retry_state.solver_feedback = round_result["solver_feedback"]
             retry_state.judge_feedback = ""
             retry_state.prev_plan = ""
             continue
 
-        # 求解成功
         planning_success = True
         retry_state.solver_feedback = ""
         pddl_plan = round_result["plan"]
         nl_plan = round_result["nl_plan"]
-        round_dir = round_result["round_dir"]
-        judge_path = round_dir / "judge.json"
-        
+
+        numbered_steps = "\n".join(
+            f"{i}. {step.strip()}"
+            for i, step in enumerate(steps, 1)
+            if step.strip()
+        )
+        numbered_plan = "\n".join(
+            f"{i}. {step.strip()}"
+            for i, step in enumerate(nl_plan.splitlines(), 1)
+            if step.strip()
+        )
         judge_out = judge_pddl(
             JUDGE_MODEL,
             task_img,
-            instruction,
-            format_numbered_steps(steps),
-            format_numbered_steps(nl_plan),
+            task["instruction"],
+            numbered_steps,
+            numbered_plan,
         )
-        
-        judge_path.write_text(json.dumps(judge_out, ensure_ascii=False, indent=2),encoding="utf-8")
+        (round_result["round_dir"] / "judge.json").write_text(
+            json.dumps(judge_out, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         judge_pass = judge_out["pass"]
         if judge_pass:
             break
 
-        # judge 不通过, 把 judge 给出的反馈和当前 plan 保存下来，供下一轮纠错生成
         retry_state.judge_feedback = judge_out["feedback"]
         retry_state.prev_plan = pddl_plan
 
-    result = {
-    "task_domain": task_domain,
-    "task_id": task_id,
-    "episode_id": episode_id,
-    "completed": True,
-    "planning_success": planning_success,
-    "judge_pass": judge_pass,
-    "sharegpt_sample": None,
-}
-    return result
+    return planning_success, judge_pass
 
 
-"""
-注意! task_domain遵循以下路径命名: 
-tasks_path = root_dir / "tasks" / "instructions" / f"instructions_{task_domain}.json"
-- keyframes: 
-        keyframes_root = root_dir / "dataset" / "keyframes" / {task_domain}
-- json:  
-        img_dir = root_dir / "tasks" / "images" / {task_domain} 
-        steps_path = root_dir / "tasks" / "steps" / f"steps_{task_domain}.json"
-"""
+def has_passed(save_dir: Path) -> bool:
+    return any(
+        json.loads(path.read_text(encoding="utf-8"))["pass"]
+        for path in save_dir.glob("round*/judge.json")
+    )
+
+
+def copy_group_result(source_task: dict, group_tasks: list[dict]) -> int:
+    copied = 0
+    for task in group_tasks:
+        if task["save_dir"] == source_task["save_dir"]:
+            continue
+        if task["save_dir"].exists():
+            shutil.rmtree(task["save_dir"])
+        shutil.copytree(source_task["save_dir"], task["save_dir"])
+        copied += 1
+    return copied
+
+
+def main() -> None:
+    if INPUT_MODE not in ("video", "prepared"):
+        raise ValueError('INPUT_MODE must be "video" or "prepared"')
+
+    tasks = load_tasks(ROOT_DIR, TASK_DOMAIN, INPUT_MODE)
+    total_loaded = len(tasks)
+    failed = 0
+
+    action_templates = {task["task_id"]: "" for task in tasks}
+    if USE_ACTION_TEMPLATE:
+        for task_id in action_templates:
+            action_templates[task_id] = find_task_action_template(
+                root_dir=ROOT_DIR,
+                model_name=ACTION_TEMPLATE_MODEL,
+                task_domain=ACTION_TEMPLATE_DOMAIN,
+                task_id=task_id,
+            )
+        found_templates = sum(bool(template) for template in action_templates.values())
+        print(f"action templates: {found_templates}/{len(action_templates)}")
+
+    if INPUT_MODE == "video":
+        ready_tasks = []
+        with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
+            futures = {executor.submit(prepare_video_task, task): task for task in tasks}
+            for future in as_completed(futures):
+                task = futures[future]
+                try:
+                    future.result()
+                    ready_tasks.append(task)
+                except Exception as error:
+                    failed += 1
+                    print(f"[preprocess failed] {task['task_id']}/{task['episode_id']}: {error}")
+        tasks = ready_tasks
+
+    total_ready = len(tasks)
+    task_groups = {}
+    for task in tasks:
+        task_groups.setdefault(task["group_key"], []).append(task)
+
+    tasks = []
+    copied = 0
+    reused_groups = 0
+    for group_tasks in task_groups.values():
+        passed_tasks = [task for task in group_tasks if has_passed(task["save_dir"])]
+        if passed_tasks:
+            copied += copy_group_result(passed_tasks[0], group_tasks)
+            reused_groups += 1
+        else:
+            tasks.append(group_tasks[0])
+
+    print(
+        f"loaded samples: {total_loaded}, ready: {total_ready}, groups: {len(task_groups)}, "
+        f"to run groups: {len(tasks)}, reused groups: {reused_groups}, copied samples: {copied}"
+    )
+
+    passed = 0
+    planning_succeeded = 0
+    with ThreadPoolExecutor(max_workers=TASK_WORKERS) as executor:
+        futures = {
+            executor.submit(
+                run_task,
+                task,
+                INPUT_MODE,
+                action_templates[task["task_id"]],
+            ): task
+            for task in tasks
+        }
+        for index, future in enumerate(as_completed(futures), 1):
+            task = futures[future]
+            tag = f"{task['task_domain']}/{task['task_id']}/{task['episode_id']}"
+            try:
+                planning_success, judge_pass = future.result()
+                planning_succeeded += int(planning_success)
+                passed += int(judge_pass)
+                if judge_pass:
+                    copied += copy_group_result(task, task_groups[task["group_key"]])
+                status = "judge pass" if judge_pass else "planning/judge failed"
+            except Exception as error:
+                failed += 1
+                status = f"crashed: {error}"
+            print(f"[{index}/{len(tasks)}] {tag} {status}")
+
+    print(f"planning success: {planning_succeeded}/{len(tasks)}")
+    print(f"judge pass: {passed}/{len(tasks)}")
+    print(f"copied samples: {copied}")
+    print(f"crashed: {failed}/{total_loaded}")
+
+
 if __name__ == "__main__":
-    root_dir = Path(__file__).parent.parent
-    PDDL_MODEL = "gemini-3-flash-preview"
-    Learn_steps_MODEL = "gemini-3-flash-preview"
-    JUDGE_MODEL = "gemini-3-flash-preview"
-    MAX_STEP_BACKTRACKS = 10
-    MAX_PLAN_ATTEMPTS = 6
-    MAX_WORKERS = 200
-
-    task_domain = "human_aug_v0"
-    tasks = load_tasks(root_dir, task_domain)
-    run_all_tasks(root_dir, tasks)
+    main()

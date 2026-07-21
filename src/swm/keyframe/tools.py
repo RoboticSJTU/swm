@@ -56,6 +56,7 @@ def save_image_energy(frames_dir, save_path) -> None:
 
     np.save(save_path, np.array(energies, dtype=np.float64))
 
+
 def load_energy(save_path) -> NDArray:
     """Load energies from the given path.
 

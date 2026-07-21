@@ -40,20 +40,6 @@ QWEN_API_KEY=your_qwen_api_key_here
 
 ## 数据目录
 
-视频模式：
-
-```text
-dataset/videos/<task_domain>/<episode_id>.mp4
-tasks/instructions/instructions_<task_domain>.json
-```
-
-已准备样本模式：
-
-```text
-tasks/images/<task_domain>/<task_id>/<episode_id>.png
-tasks/instructions/instructions_<task_domain>.json
-tasks/steps/steps_<task_domain>.json
-tasks/meta/meta_<task_domain>.json
 ```
 
 如已获得数据压缩包，可执行：

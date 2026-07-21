@@ -101,16 +101,12 @@ def is_task_finished(save_dir: Path, max_attempts: int) -> bool:
     if judge_path.exists():
         try:
             judge_data = json.loads(judge_path.read_text(encoding="utf-8"))
-            if bool(judge_data.get("pass", False)):
+            if bool(judge_data["pass"]):
                 return True
         except Exception:
             pass
 
-    # 2. 已达到最大尝试次数，也跳过
-    if max_round >= max_attempts:
-        return True
-
-    return False
+    return max_round >= max_attempts
 
 
 def fix_pddl(domain_path: Path, problem_path: Path) -> bool:
@@ -183,21 +179,3 @@ def fix_pddl(domain_path: Path, problem_path: Path) -> bool:
 
     restore()
     return False
-
-
-def format_numbered_steps(steps):
-    if isinstance(steps, str):
-        steps = steps.splitlines()
-
-    return "\n".join(
-        f"{i}. {s.strip()}"
-        for i, s in enumerate(steps, 1)
-        if s and s.strip()
-    )
-    
-def find_task_image(task_img_dir: Path, task_id: str) -> Path:
-    for ext in [".png", ".jpg", ".jpeg", ".webp"]:
-        img_path = task_img_dir / f"{task_id}{ext}"
-        if img_path.exists():
-            return img_path
-    raise FileNotFoundError(f"Image not found for {task_id} in {task_img_dir}")
