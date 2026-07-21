@@ -18,8 +18,6 @@ SOURCE_TASK_DOMAIN = "human"
 AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug_v0"
 PLAN_MODEL_NAME = "gpt-5.6-sol"
 CALL_GPT_MODEL = "gpt-5.6-sol"
-START_TASK_ID = 261
-END_TASK_ID = 296
 
 AUG_FACTOR = 3
 MAX_WORKERS = 50
@@ -224,10 +222,6 @@ def main():
 
     prompt_template = prompt_path.read_text(encoding="utf-8")
     source_data = json.loads(source_path.read_text(encoding="utf-8"))
-    source_data = {
-        f"task_{task_id}": source_data[f"task_{task_id}"]
-        for task_id in range(START_TASK_ID, END_TASK_ID + 1)
-    }
     instruction_data = json.loads(instruction_path.read_text(encoding="utf-8")) if instruction_path.is_file() else {}
     steps_data = json.loads(steps_path.read_text(encoding="utf-8")) if steps_path.is_file() else {}
     meta_data = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}

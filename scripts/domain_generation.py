@@ -16,8 +16,6 @@ from swm.utils.plan_learning import learn_steps_from_keyframes
 ROOT_DIR = Path(__file__).parent.parent
 INPUT_MODE = "prepared"  # "video" or "prepared"
 TASK_DOMAIN = "human_aug_v0"
-START_TASK_ID = 261
-END_TASK_ID = 296
 
 PDDL_MODEL = "gpt-5.6-sol"
 LEARN_STEPS_MODEL = "gpt-5.6-sol"
@@ -45,9 +43,6 @@ def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
 
     tasks = []
     for task_id, episodes in sorted(instructions.items()):
-        task_number = int(task_id.removeprefix("task_"))
-        if task_number < START_TASK_ID or task_number > END_TASK_ID:
-            continue
         for episode_id, instruction in sorted(episodes.items()):
             task = {
                 "task_domain": task_domain,
