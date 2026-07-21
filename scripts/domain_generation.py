@@ -1,5 +1,4 @@
 import json
-import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -15,7 +14,7 @@ from swm.utils.plan_learning import learn_steps_from_keyframes
 # =========================
 ROOT_DIR = Path(__file__).parent.parent
 INPUT_MODE = "prepared"  # "video" or "prepared"
-TASK_DOMAIN = "human_aug_v0"
+TASK_DOMAIN = "agibot_aug_v1"
 
 PDDL_MODEL = "gpt-5.6-sol"
 LEARN_STEPS_MODEL = "gpt-5.6-sol"
@@ -27,8 +26,8 @@ MAX_PLAN_ATTEMPTS = 3
 PREPROCESS_WORKERS = 16 # 关键帧提取并发
 
 USE_ACTION_TEMPLATE = True
-ACTION_TEMPLATE_DOMAIN = "human"
-ACTION_TEMPLATE_MODEL = "gemini-3-flash-preview"
+ACTION_TEMPLATE_DOMAIN = "agibot"
+ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
 
 
 def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
@@ -37,9 +36,7 @@ def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
 
     if input_mode == "prepared":
         steps_path = root_dir / "tasks" / "steps" / f"steps_{task_domain}.json"
-        meta_path = root_dir / "tasks" / "meta" / f"meta_{task_domain}.json"
         all_steps = json.loads(steps_path.read_text(encoding="utf-8"))
-        all_meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
     tasks = []
     for task_id, episodes in sorted(instructions.items()):
@@ -50,7 +47,6 @@ def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
                 "episode_id": episode_id,
                 "instruction": str(instruction).strip(),
                 "save_dir": root_dir / "eval_results" / PDDL_MODEL / task_domain / task_id / episode_id,
-                "group_key": (task_id, episode_id),
             }
 
             if input_mode == "video":
@@ -60,11 +56,6 @@ def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
             else:
                 task["image_path"] = root_dir / "tasks" / "images" / task_domain / task_id / f"{episode_id}.png"
                 task["steps"] = [str(step).strip() for step in all_steps[task_id][episode_id]]
-                task["group_key"] = (
-                    task_id,
-                    str(all_meta[task_id][episode_id]["source_episode_id"]),
-                    int(all_meta[task_id][episode_id]["start_gid"]),
-                )
 
             tasks.append(task)
 
@@ -244,18 +235,6 @@ def has_passed(save_dir: Path) -> bool:
     )
 
 
-def copy_group_result(source_task: dict, group_tasks: list[dict]) -> int:
-    copied = 0
-    for task in group_tasks:
-        if task["save_dir"] == source_task["save_dir"]:
-            continue
-        if task["save_dir"].exists():
-            shutil.rmtree(task["save_dir"])
-        shutil.copytree(source_task["save_dir"], task["save_dir"])
-        copied += 1
-    return copied
-
-
 def main() -> None:
     if INPUT_MODE not in ("video", "prepared"):
         raise ValueError('INPUT_MODE must be "video" or "prepared"')
@@ -291,24 +270,11 @@ def main() -> None:
         tasks = ready_tasks
 
     total_ready = len(tasks)
-    task_groups = {}
-    for task in tasks:
-        task_groups.setdefault(task["group_key"], []).append(task)
-
-    tasks = []
-    copied = 0
-    reused_groups = 0
-    for group_tasks in task_groups.values():
-        passed_tasks = [task for task in group_tasks if has_passed(task["save_dir"])]
-        if passed_tasks:
-            copied += copy_group_result(passed_tasks[0], group_tasks)
-            reused_groups += 1
-        else:
-            tasks.append(group_tasks[0])
+    tasks = [task for task in tasks if not has_passed(task["save_dir"])]
 
     print(
-        f"loaded samples: {total_loaded}, ready: {total_ready}, groups: {len(task_groups)}, "
-        f"to run groups: {len(tasks)}, reused groups: {reused_groups}, copied samples: {copied}"
+        f"loaded samples: {total_loaded}, ready: {total_ready}, "
+        f"to run: {len(tasks)}, already passed: {total_ready - len(tasks)}"
     )
 
     passed = 0
@@ -330,8 +296,6 @@ def main() -> None:
                 planning_success, judge_pass = future.result()
                 planning_succeeded += int(planning_success)
                 passed += int(judge_pass)
-                if judge_pass:
-                    copied += copy_group_result(task, task_groups[task["group_key"]])
                 status = "judge pass" if judge_pass else "planning/judge failed"
             except Exception as error:
                 failed += 1
@@ -340,7 +304,6 @@ def main() -> None:
 
     print(f"planning success: {planning_succeeded}/{len(tasks)}")
     print(f"judge pass: {passed}/{len(tasks)}")
-    print(f"copied samples: {copied}")
     print(f"crashed: {failed}/{total_loaded}")
 
 
