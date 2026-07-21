@@ -1,31 +1,100 @@
-# python
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python bytecode, environments, and package artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .venv/
 venv/
-.env
+env/
+.python-version
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test, type-check, and coverage caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Editors, operating systems, and local agent state
 .vscode/
-src/swm.egg-info/
+.idea/
+.agents/
+.codex/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
 
-# data
-dataset/
-domain/
-mergy.py
-tasks/
+# Project datasets and generated task metadata
+/dataset/
+/tasks/
 
-# results
-eval_results/
+# Experiment outputs and temporary PDDL artifacts
+/eval_results/
+/results/
+/outputs/
+/runs/
+/logs/
+/cache/
+/tmp/
+/domain/
+/test_pddl/
+*.log
 
-# fastdownward
-downward/
-test_pddl/
+# External planner source/build tree
+/downward/
 
-# model
-siglip2-giant-opt-patch16-384/
-Qwen3-Reranker-0.6B/
+# Local model weights and checkpoints
+/models/
+/checkpoints/
+/weights/
+/siglip2-giant-opt-patch16-384/
+/Qwen3-Reranker-0.6B/
+/Qwen3-Embedding-0.6B/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.gguf
 
-# else
-1.py
-gpt.py
-merged_domain.pddl
-.sii/
+# Generated arrays, indexes, media, and data archives
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.joblib
+*.faiss
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Repository-local scratch files
+/1.py
+/gpt.py
+/mergy.py
+/merged_domain.pddl
+/.sii/
