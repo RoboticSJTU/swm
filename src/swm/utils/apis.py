@@ -7,11 +7,14 @@ from json_repair import repair_json
 from dotenv import load_dotenv, find_dotenv
 import os
 load_dotenv(find_dotenv())
+import httpx
 
 def get_client(model: str):
     if model.startswith(("gemini", "gpt", "o")):
-        return OpenAI(api_key=os.getenv("SII_API_KEY"), base_url="https://dasuapi.com/v1", timeout=600, max_retries=0)
-
+        # return OpenAI(api_key=os.getenv("das_API_KEY"), base_url="https://dasuapi.com/v1",http_client=httpx.Client(trust_env=False))
+        # return OpenAI(api_key=os.getenv("A6_API_KEY"), base_url="https://api.a6api.com/v1",http_client=httpx.Client(trust_env=False))
+        return OpenAI(api_key="sk-7cc3385537697923f58516028f86eba09946c0682765ba43639b21e1473fec3d", base_url="https://api.linkai.shop/v1",http_client=httpx.Client(trust_env=False))
+    
     if model.startswith("Qwen3.5-397B-A17B"):
         return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xyx.openapi-qb-ai.sii.edu.cn/v1")
 
