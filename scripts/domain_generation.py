@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from swm.keyframe.extraction import extract_frames, extract_keyframes
-from swm.utils.construct_prompt import construct_instruction_with_steps
+from swm.utils.construct_prompt import construct_instruction_with_steps, get_prompt_component
 from swm.utils.pddl.generation import RetryState, generate_pddl
 from swm.utils.pddl.judge import judge_pddl
 from swm.utils.plan_learning import learn_steps_from_keyframes
@@ -29,7 +29,8 @@ MAX_STEP_BACKTRACKS = 10
 MAX_PLAN_ATTEMPTS = 3
 PREPROCESS_WORKERS = 16 # 关键帧提取并发
 
-USE_ACTION_TEMPLATE = True
+ROBOT_CONFIGURATION = "dual-arm"  # "single-arm" or "dual-arm"
+ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
 ACTION_TEMPLATE_DOMAIN = "agibot"
 ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
 
@@ -183,6 +184,7 @@ def run_task(task: dict, input_mode: str, action_template: str) -> tuple[bool, b
             attempt=attempt,
             retry_state=retry_state,
             action_template=action_template,
+            robot_configuration=ROBOT_CONFIGURATION,
         )
 
         retry_state.prev_domain = round_result["domain"]
@@ -246,17 +248,27 @@ def main() -> None:
     total_loaded = len(tasks)
     failed = 0
 
-    action_templates = {task["task_id"]: "" for task in tasks}
-    if USE_ACTION_TEMPLATE:
-        for task_id in action_templates:
-            action_templates[task_id] = find_task_action_template(
+    task_ids = {task["task_id"] for task in tasks}
+    if ACTION_TEMPLATE_MODE == "fixed":
+        fixed_template = get_prompt_component(
+            "pddl_generation.txt", "common", "action_template"
+        )
+        action_templates = dict.fromkeys(task_ids, fixed_template)
+    elif ACTION_TEMPLATE_MODE == "retrieved":
+        action_templates = {
+            task_id: find_task_action_template(
                 root_dir=ROOT_DIR,
                 model_name=ACTION_TEMPLATE_MODEL,
                 task_domain=ACTION_TEMPLATE_DOMAIN,
                 task_id=task_id,
             )
-        found_templates = sum(bool(template) for template in action_templates.values())
-        print(f"action templates: {found_templates}/{len(action_templates)}")
+            for task_id in task_ids
+        }
+        missing = sorted(task_id for task_id, template in action_templates.items() if not template)
+        if missing:
+            raise RuntimeError(f"Missing retrieved action templates: {', '.join(missing)}")
+    else:
+        raise ValueError('ACTION_TEMPLATE_MODE must be "fixed" or "retrieved"')
 
     if INPUT_MODE == "video":
         ready_tasks = []

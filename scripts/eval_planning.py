@@ -19,6 +19,7 @@ root_dir = Path(__file__).resolve().parent.parent
 eval_model = "8B_3e"
 judge_model = "gpt-5.6-sol"
 translate_model = "gpt-5.6-sol"   # Qwen3.6-35B-A3B
+ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_2 unidomain
 datasets = ["swm", "unidomain"]
@@ -384,7 +385,11 @@ def generate_one(task: dict):
 
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        prompt = get_prompt_from_template(prompt_path, instruction=instruction)
+        prompt = get_prompt_from_template(
+            prompt_path,
+            instruction=instruction,
+            robot_configuration=ROBOT_CONFIGURATION,
+        )
         output = call_gpt(eval_model, prompt, [image_path])
 
         if eval_mode == "pddl":

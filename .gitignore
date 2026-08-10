@@ -102,6 +102,3 @@ Thumbs.db
 /experiments/
 /paper/
 s/solver_temp/
-
-# temp
-src/swm/prompt_templates/

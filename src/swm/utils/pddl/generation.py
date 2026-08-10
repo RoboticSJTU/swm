@@ -21,7 +21,8 @@ def generate_pddl(
     save_dir: Path,
     attempt: int,
     retry_state: RetryState,
-    action_template: str = ""
+    action_template: str = "",
+    robot_configuration: str = "dual-arm",
 ):
     """
     执行单个任务的一轮 PDDL 生成与规划。
@@ -62,6 +63,7 @@ def generate_pddl(
         failed_problem=retry_state.prev_problem,
         failed_plan=retry_state.prev_plan,
         action_template=action_template,
+        robot_configuration=robot_configuration,
     )
 
     data = call_gpt_json(generate_pddl_model_name, prompt, [task_img])

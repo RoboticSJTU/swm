@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 from swm.utils.apis import call_gpt_json
+from swm.utils.construct_prompt import load_prompt_components
 
 
 def get_prompt_from_template(path: Path, **values) -> str:
@@ -28,7 +29,8 @@ def learn_steps_from_keyframes(
     plan_path = save_dir / "kf_plan.txt"
     group_plan_path = save_dir / "kf_plan_group.txt"
     debug_path = save_dir / "pair_debug.log"
-    prompt_dir = Path(__file__).parent.parent / "prompt_templates"
+    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "plan_learning.txt"
+    prompt_components = load_prompt_components()["plan_learning.txt"]
 
     plan_lines = []
     history = []
@@ -41,26 +43,28 @@ def learn_steps_from_keyframes(
         images = segment_images[group_index]
         history_text = "\n".join(f"{i}. {action}" for i, action in enumerate(history, 1)) or "none"
 
-        if group_index in retry_hints:
-            prompt_path = prompt_dir / "plan_learning_with_feedback.txt"
-            prompt = get_prompt_from_template(
-                prompt_path,
-                instruction=instruction,
-                history=history_text,
-                group_idx=group_index,
-                num_groups=len(segment_images),
-                error_action=retry_hints[group_index]["error_action"],
-                feedback=retry_hints[group_index]["feedback"],
+        retry_hint = retry_hints.get(group_index)
+        mode = "feedback" if retry_hint else "initial"
+        selected = prompt_components[mode]
+        feedback_context = ""
+        if retry_hint:
+            feedback_context = selected["feedback_context"].format(
+                error_action=retry_hint["error_action"],
+                feedback=retry_hint["feedback"],
             )
-        else:
-            prompt_path = prompt_dir / "plan_learning.txt"
-            prompt = get_prompt_from_template(
-                prompt_path,
-                instruction=instruction,
-                history=history_text,
-                group_idx=group_index,
-                num_groups=len(segment_images),
-            )
+
+        prompt = get_prompt_from_template(
+            prompt_path,
+            instruction=instruction,
+            history=history_text,
+            group_idx=group_index,
+            num_groups=len(segment_images),
+            task_description=selected["task_description"],
+            feedback_context=feedback_context,
+            inference_workflow=selected["inference_workflow"],
+            feedback_note=selected.get("feedback_note", ""),
+            action_reasoning_schema=selected["action_reasoning_schema"],
+        )
 
         data = call_gpt_json(model_name, prompt, images)
         debug_lines = [

@@ -1,9 +1,9 @@
-Given an instruction and image, generate complete PDDL files as a symbolic world model for high-level single-arm robotic planning.
+Given an instruction and image, generate complete PDDL files as a symbolic world model for high-level {robot_configuration} robotic planning.
 
 Input
 - Instruction: {instruction}
 - Initial scene image
-- Robot configuration: Single-arm
+- Robot configuration: {robot_configuration}
 
 Before writing PDDL, internally construct the task as a symbolic world model.
 1. Ground objects

@@ -1,37 +1,14 @@
-# TASK
+# FILE: pddl_generation.txt
 
-Your task is to diagnose why the previous PDDL domain and problem failed, use the planner output and failure feedback to identify the necessary corrections, and regenerate a valid, executable, and task-correct PDDL domain and problem.
+## MODE: common
 
-# INPUTS
-
-- Instruction: {instruction_with_steps}
-- Image of the initial scene
-- Robot configuration: Dual-arm
-- Previous failed attempt
-
+### COMPONENT: arm_abstraction
 ## Arm abstraction.
 
-* Focus on task-level manipulation causality rather than reproducing the demonstrated left/right-hand assignment.
-* Do not introduce left/right-hand preference, reachability, or capability predicates in action preconditions.
+- Model the available arms as interchangeable hand resources: use one hand object for single-arm and two hand objects for dual-arm.
+- Do not introduce left/right-hand preference, reachability, or capability predicates in action preconditions.
 
-# PREVIOUS FAILED ATTEMPT
-
-## Domain
-
-{failed_domain}
-
-## Problem
-
-{failed_problem}
-
-## Output from PDDL planner
-
-{failed_plan}
-
-## Failure Feedback
-
-{feedback}
-
+### COMPONENT: rules
 # RULES
 
 ## 1. Syntax.
@@ -49,9 +26,9 @@ Your task is to diagnose why the previous PDDL domain and problem failed, use th
 
 ### (2) Action name construction.
 
-Base naming pattern: VERB_OBJECT[_from_SOURCE][_PREP_TARGET][_with_TOOL]. 
+Base naming pattern: VERB_OBJECT[_from_SOURCE][_PREP_TARGET][_with_TOOL].
 
-- Use the base naming pattern as the default basis, and **follow similar PDDL action templates when naming actions instead of constructing action names based on steps.** 
+- Use the base naming pattern as the default basis, and **follow similar PDDL action templates when naming actions instead of constructing action names based on steps.**
 - Extend the base naming only when necessary to distinguish actions or express task-relevant state, role, pose, result, or condition. When extending the name, add the extra information as a modifier to the most relevant slot, while keeping the action name concise, readable, and action-distinguishing.
 - Each action name must contain only one main action. Do not use `to`, `and`, `then` to merge sequential actions; split them into separate operators.
 - VERB is the atomic action, such as pick, place, open, close, turn, turn_on, turn_off, pour, fill, scoop, insert, remove, wipe, wash.
@@ -71,14 +48,14 @@ Base naming pattern: VERB_OBJECT[_from_SOURCE][_PREP_TARGET][_with_TOOL].
 ### (1) Predicate modeling.
 
 - Minimize the number of predicates. Use only predicates necessary for the current task. Do not model irrelevant object attributes, fine-grained spatial details, or intermediate states.
-- **In Domain :predicates, declare each predicate name+arity only once. Reuse generic schemas across variables, object categories, and roles. e.g., use only one generic (is_off ?x), (open ?x), (on ?o ?s), or (in ?o ?c).** 
+- **In Domain :predicates, declare each predicate name+arity only once. Reuse generic schemas across variables, object categories, and roles. e.g., use only one generic (is_off ?x), (open ?x), (on ?o ?s), or (in ?o ?c).**
 
 ### (2) Predicate groups and order.
 
 - Write predicates in this group order: type predicates, state predicates, spatial predicates.
   - Type predicates are unary category predicates.
   - State predicates include hand/object/device states, with hand states first.
-  - Spatial predicates are binary generic relation predicates, e.g., on, in, under. 
+  - Spatial predicates are binary generic relation predicates, e.g., on, in, under.
 - Only include groups needed in the current context. Ordering rules must not introduce extra predicates.
 - Within state predicates, keep mutually exclusive states adjacent. In action `:effect`, write each state transition as delete-old first, then add-new.
 
@@ -93,10 +70,7 @@ Base naming pattern: VERB_OBJECT[_from_SOURCE][_PREP_TARGET][_with_TOOL].
 - Each :action must have one single-line, human-readable sentence comment above it describing the action with all abstract parameters, not instantiated names.
 - Correct: ; Pick up apple ?a from table ?t with hand ?h. Incorrect: ; Pick up apple from table with right hand.
 
-# PDDL ACTION TEMPLATE
-
-Adapt as needed to complete the specific task.
-
+### COMPONENT: action_template
 ## 1. Spatial Change.
 
 ### (1) Source only.
@@ -310,19 +284,99 @@ Adapt as needed to complete the specific task.
 :effect (and (stirred ?p))
 )
 
+## MODE: initial
 
-# Reasoning Process
+### COMPONENT: task_description
+You are an expert in writing a PDDL domain and problem grounded in the given image and instruction for robot task planning.
 
+### COMPONENT: reasoning_process
+(a) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
+(b) Domain construction: Based on the scene understanding and action templates, define only the necessary action definitions in the causal execution order. Before output, check that Domain `:predicates` has no duplicate predicate name+arity.
+(c) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
+
+### COMPONENT: reasoning_schema
+a three-part analysis with the following structure. (a) Scene understanding. (b) Domain construction. (c) Problem construction.
+
+## MODE: feedback
+
+### COMPONENT: task_description
+Your task is to diagnose why the previous PDDL domain and problem failed, use the planner output and failure feedback to identify the necessary corrections, and regenerate a valid, executable, and task-correct PDDL domain and problem.
+
+### COMPONENT: failure_context
+# PREVIOUS FAILED ATTEMPT
+
+## Domain
+
+{failed_domain}
+
+## Problem
+
+{failed_problem}
+
+## Output from PDDL planner
+
+{failed_plan}
+
+## Failure Feedback
+
+{feedback}
+
+### COMPONENT: reasoning_process
 (a) Failure diagnosis: identify the key issues in the previous attempt.
 (b) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
 (c) Domain construction: Based on the scene understanding and action templates, define only the necessary action definitions in the causal execution order. Before output, check that Domain `:predicates` has no duplicate predicate name+arity.
 (d) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
 
-# Output Format 
+### COMPONENT: reasoning_schema
+a four-part analysis with the following structure: (a) Failure diagnosis. (b) Scene understanding. (c) Domain construction. (d) Problem construction.
 
-MUST output valid JSON without any markdown code block (e.g., ```json).
-{{
-  "reasoning": "a four-part analysis with the following structure: (a) Failure diagnosis. (b) Scene understanding. (c) Domain construction. (d) Problem construction.",
-  "domain": "String format PDDL domain, not dict.",
-  "problem": "String format PDDL problem, not dict."
-}}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# FILE: plan_learning.txt
+
+## MODE: initial
+
+### COMPONENT: task_description
+You are given segmented keyframes from a full video demonstration of an instruction.
+
+### COMPONENT: inference_workflow
+Use a vision-first two-pass workflow. Instruction and history may only help disambiguate visually supported actions, not predict the next action.
+(1) Pairwise pass: For each (Ki, Ki+1), infer actions only from completed visible state changes or contact changes.
+(2) Global verification: Review all keyframes to ensure the pairwise-inferred actions are globally consistent with the group’s observable world-state changes.
+
+### COMPONENT: action_reasoning_schema
+\"\" OR a two-part analysis: (1) Pairwise pass. (2) Global verification.
+
+## MODE: feedback
+
+### COMPONENT: task_description
+You are revising a previously failed action description for the current keyframe group.
+Correct the previous output according to the feedback while staying strictly grounded in visual evidence.
+
+### COMPONENT: feedback_context
+- Previous failed output for the current group: {error_action}
+- Feedback: {feedback}
+
+### COMPONENT: inference_workflow
+Use a vision-first three-pass workflow. Instruction and history may only help disambiguate visually supported actions, not predict the next action.
+(1) Failure diagnosis: Identify the key issues in the previous failed output.
+(2) Pairwise pass: For each (Ki, Ki+1), infer actions only from completed visible state changes or contact changes.
+(3) Global verification: Review all keyframes to ensure the pairwise-inferred actions are globally consistent with the group’s observable world-state changes.
+
+### COMPONENT: feedback_note
+- This is a regeneration step. Correct the previous failed output based on the feedback, but keep only revisions that are visually supported.
+
+### COMPONENT: action_reasoning_schema
+\"\" OR a three-part analysis: (1) Failure diagnosis. (2) Pairwise pass. (3) Global verification.

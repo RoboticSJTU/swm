@@ -24,6 +24,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 MODEL_NAME = "gpt-5.6-sol"
 PDDL_DOMAIN_NAME = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
+ROBOT_CONFIGURATION = "single-arm"
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
@@ -573,7 +574,9 @@ def process_domain(task_domain, prompt_template):
             "messages": [
                 {
                     "role": "user",
-                    "content": "<image>\n" + prompt_template.replace("{instruction}", instruction),
+                    "content": "<image>\n" + prompt_template.replace(
+                        "{instruction}", instruction
+                    ).replace("{robot_configuration}", ROBOT_CONFIGURATION),
                 },
                 {
                     "role": "assistant",
