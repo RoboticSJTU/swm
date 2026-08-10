@@ -2,9 +2,9 @@
 将 eval_results 中通过评测的 PDDL 数据整理成 ShareGPT 格式，用于多模态 SFT。
 
 主要流程：
-1. 读取 instruction，修复对象编号和 on 堆叠顺序；
+1. 读取 instruction，规范唯一对象编号和 on 堆叠顺序；
 2. 删除缺少文件、评测未通过或不在 instruction 中的 episode；
-3. 统一 domain/problem 的 PDDL 格式，并查找对应图片；
+3. 删除未使用谓词，统一 domain/problem 的 PDDL 格式，并查找对应图片；
 4. 组装 user/assistant 消息，合并各数据集后写入 JSON。
 
 注意：运行时会改写 problem.pddl，并直接删除无效 episode 目录。
@@ -20,10 +20,10 @@ from pathlib import Path
 # 配置：只需要修改这里
 # ============================================================
 
-ROOT_DIR = Path("/home/xyx/下载/swm")
-MODEL_NAME = "gemini-3-flash-preview"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+MODEL_NAME = "gpt-5.6-sol"
 PDDL_DOMAIN_NAME = "single_arm"
-TASK_DOMAINS = ["human", "human_aug_v0"]
+TASK_DOMAINS = ["human", "human_aug"]
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
@@ -100,6 +100,34 @@ def predicate_name(expression):
     return expression_head(expression)
 
 
+def referenced_predicates(domain_text, problem_text):
+    """返回 operator 和 problem 实际使用的已声明谓词名。"""
+    domain = parse_pddl(domain_text)
+    problem = parse_pddl(problem_text)
+    declared = {
+        predicate_name(predicate)
+        for section in domain[2:]
+        if expression_head(section) == ":predicates"
+        for predicate in section[1:]
+    }
+    referenced = set()
+
+    def collect(expression):
+        if not isinstance(expression, list):
+            return
+        name = expression_head(expression)
+        if name in declared:
+            referenced.add(name)
+        for item in expression[1:]:
+            collect(item)
+
+    for section in domain[2:]:
+        if expression_head(section) == ":action":
+            collect(section)
+    collect(problem)
+    return referenced
+
+
 def predicate_order(domain_text):
     """
     按 :predicates 中的空行分组和定义顺序，记录每个谓词的排序位置。
@@ -151,7 +179,7 @@ def sort_facts(facts, order, keep_order_inside_group=False):
     return [fact for _, fact in sorted(enumerate(facts), key=rank)]
 
 
-def format_domain(domain_text, order):
+def format_domain(domain_text, order, referenced):
     domain = parse_pddl(domain_text)
     if expression_head(domain) != "define":
         raise ValueError("domain.pddl 缺少 define")
@@ -167,7 +195,11 @@ def format_domain(domain_text, order):
 
         if name == ":predicates":
             lines.append("  (:predicates")
-            lines.extend("    " + pddl_line(predicate) for predicate in section[1:])
+            lines.extend(
+                "    " + pddl_line(predicate)
+                for predicate in section[1:]
+                if predicate_name(predicate) in referenced
+            )
             lines.append("  )")
         elif name == ":action":
             lines.append(f"  (:action {section[1]}")
@@ -341,7 +373,7 @@ def reorder_problem_file(problem_path):
 
 
 # ============================================================
-# episode 预处理：对象改名、歧义修复和堆叠重排
+# episode 预处理：对象改名和堆叠重排
 # ============================================================
 
 def latest_round(episode_dir):
@@ -365,7 +397,7 @@ def problem_path(episode_dir):
 
 
 def rename_numbered_objects(path):
-    """仅将唯一的 object1 改为 object；多实例情况留给邻居 episode 修复。"""
+    """仅将唯一的 object1 改为 object；存在多实例歧义时不改名。"""
     text = path.read_text(encoding="utf-8")
     objects = []
     for section in parse_pddl(text)[2:]:
@@ -403,7 +435,7 @@ def rename_numbered_objects(path):
             rename_map[names_ending_in_one[0]] = base
 
     if needs_review or not rename_map:
-        return needs_review
+        return
 
     names = sorted(rename_map, key=len, reverse=True)
     pattern = re.compile(
@@ -411,63 +443,14 @@ def rename_numbered_objects(path):
     )
     text = pattern.sub(lambda match: rename_map[match.group(1)], text)
     path.write_text(text, encoding="utf-8")
-    return False
-
-
-def kf_plan_length(episode_dir):
-    path = episode_dir / "kf_plan.txt"
-    if not path.is_file():
-        return None
-    return len([line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
 
 
 def preprocess_problems(eval_root):
-    episodes = episode_dirs(eval_root)
-    review_episodes = set()
-
-    # 先扫描完全部 episode，避免把同样有歧义的 episode 当作邻居。
-    for episode in episodes:
-        path = problem_path(episode)
-        if path is not None:
-            try:
-                if rename_numbered_objects(path):
-                    review_episodes.add(episode)
-            except Exception as error:
-                print(f"[PDDL ERROR] {path}: {error}")
-
-    for target in sorted(review_episodes):
-        target_id = int(target.name[8:])
-        target_length = kf_plan_length(target)
-        candidates = [
-            episode for episode in target.parent.glob("episode_*")
-            if episode.is_dir() and episode != target and episode not in review_episodes
-        ]
-        candidates.sort(key=lambda episode: (
-            abs(int(episode.name[8:]) - target_id),
-            0 if int(episode.name[8:]) > target_id else 1,
-        ))
-
-        source = None
-        for candidate in candidates:
-            if problem_path(candidate) is not None and kf_plan_length(candidate) == target_length:
-                source = candidate
-                break
-
-        if source is None or target_length is None:
-            print(f"[REPAIR FAILED] {target}")
-            continue
-
-        for round_dir in target.glob("round*"):
-            if round_dir.is_dir() and re.fullmatch(r"round\d+", round_dir.name):
-                shutil.rmtree(round_dir)
-        shutil.copytree(latest_round(source), target / "round1")
-        print(f"[REPAIRED] {target} <- {source}")
-
-    # 修复完歧义 episode 后，再统一重排堆叠链。
     for episode in episode_dirs(eval_root):
         path = problem_path(episode)
         if path is not None:
             try:
+                rename_numbered_objects(path)
                 reorder_problem_file(path)
             except Exception as error:
                 print(f"[PDDL ERROR] {path}: {error}")
@@ -526,7 +509,7 @@ def process_domain(task_domain, prompt_template):
     records = read_instructions(task_domain)
     allowed = {(task_id, episode_id) for task_id, episode_id, _ in records}
 
-    # 先修复，再删除无效 episode，否则可用的邻居可能被提前删除。
+    # 先预处理 problem.pddl，再删除无效 episode。
     preprocess_problems(eval_root)
 
     valid_rounds = {}
@@ -579,7 +562,8 @@ def process_domain(task_domain, prompt_template):
             domain_raw = (round_dir / "domain.pddl").read_text(encoding="utf-8")
             problem_raw = (round_dir / "problem.pddl").read_text(encoding="utf-8")
             order = predicate_order(domain_raw)
-            domain_text = format_domain(domain_raw, order)
+            referenced = referenced_predicates(domain_raw, problem_raw)
+            domain_text = format_domain(domain_raw, order, referenced)
             problem_text = format_problem(problem_raw, order)
         except Exception as error:
             print(f"[PDDL ERROR] {task_id}/{episode_id}: {error}")

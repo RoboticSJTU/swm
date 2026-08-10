@@ -9,18 +9,19 @@ Inputs:
 - Evaluated plan:
 {nl_plan}
 
-Evidence Priority:
-1. Ground-truth plan: primary reference for required objects, final goals, key states, task-critical effects, and causal dependencies.
-2. Instruction: only used to clarify task intent or ambiguous references.
-3. Initial image: only used for object grounding and clear visible contradictions. If unclear, ignore it.
-
 Judging Policy:
-- Flexible staging surfaces: If an object is only placed aside temporarily, the exact surface need not match, as long as it is a reasonable nearby surface and is not a goal-relevant target, source location, functional object, or causal requirement.
+- Treat a Ground-truth action as an enabling constraint if it changes access, containment, support, obstruction, clearance, or mechanical state needed by a later action. Such constraints are task-critical and cannot be moved after the dependent action.
+- Flexible staging surfaces: If an object is only placed aside temporarily, the exact surface need not match, as long as it is a reasonable nearby surface.
 - Accept semantic-equivalent variations in wording, operator names, action granularity, aliases, and independent action order.
 - Reject missing goals/effects, wrong task-critical objects or arguments, causal violations, and contradictions to required final states.
-- Do not override required Ground-truth effects using the Instruction or Initial image.
+- Source Location Specificity: For pick/take actions, judge the source as the immediate containing or supporting region. If an object is inside a container on a table, the correct source is the container, not the table.
+- Do not require step-by-step matching with the Ground-truth plan, which may include redundant actions. However, the Evaluated plan must be physically executable throughout, not only final-state equivalent. Preserve any Ground-truth order when an earlier action enables the executability of a later action.
+- Ignore non-essential differences in left/right-hand assignment. Judge whether the object-level operation, final effects, and causal dependencies are equivalent.
+- Do not require the Evaluated plan to reproduce Ground-truth handovers. A handover may be omitted, implicit, or replaced by continuing with the same hand, as long as the task remains causally and physically executable.
+- Hand identity is task-critical only when the Instruction explicitly specifies a hand or simultaneous two-hand operation is necessary.
 
 **Stage 1: Goal Completeness Validation** 
+
 Extract the minimal required final-state goals from the Ground-truth plan, using the Instruction only for clarification.
 Check whether the Evaluated plan achieves:
 - correct target objects;
@@ -32,15 +33,18 @@ Check whether the Evaluated plan achieves:
 FAIL Stage 1 if any required final goal is missing, achieved on the wrong object, achieved at the wrong goal-relevant target, or later undone.
 
 **Stage 2: Semantic Effect and Causal Validation** 
-For each Ground-truth action, judge its task-critical semantic effect.
+
+For each Ground-truth action, judge whether its semantic effect is task-critical. Redundant or non-essential Ground-truth actions do not need to be reproduced by the Evaluated plan.
 Check whether the Evaluated plan preserves:
 - required object manipulation effects;
 - required open/close, lock/unlock, turn-on/turn-off, fill, connect, load, wash, pour, or place effects;
 - required preparation before appliance/tool/container use;
 - necessary order between dependent actions.
 
-Do not require the exact Ground-truth linear order. Reordering is allowed when actions are independent.
+Do not require the exact Ground-truth linear order. Reordering is allowed only when actions are independent and do not change each other's executability conditions.
+
 FAIL Stage 2 only if there is a clear task-relevant missing effect or causal/executability violation, such as:
+- moving an enabling Ground-truth action after the action that depends on it;
 - placing or using an object without first obtaining it;
 - inserting into or taking from a closed container without opening it;
 - using an appliance before required preparation, loading, connection, or placement;
@@ -48,10 +52,9 @@ FAIL Stage 2 only if there is a clear task-relevant missing effect or causal/exe
 - closing or locking before the required insertion/removal is completed;
 - undoing a required final state.
 
-Decision Rule:
 Return PASS iff:
 1. required final goals are achieved;
-2. task-critical objects and arguments match;
+2. task-critical objects and non-hand arguments match
 3. task-critical Ground-truth semantic effects are covered;
 4. essential causal dependencies are preserved;
 5. no required final state is contradicted or undone.

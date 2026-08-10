@@ -18,13 +18,14 @@ root_dir = Path(__file__).resolve().parent.parent
 
 eval_model = "8B_3e"
 judge_model = "gpt-5.6-sol"
-translate_model = "gpt-5.6-luna"   # Qwen3.6-35B-A3B
+translate_model = "gpt-5.6-sol"   # Qwen3.6-35B-A3B
 
 # swm swm_2 unidomain
 datasets = ["swm", "unidomain"]
 
 N = 1
-max_workers = 200
+generation_max_workers = 200
+judge_max_workers = generation_max_workers
 
 prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input.txt"
 # prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "vlm_cot.txt"
@@ -51,6 +52,13 @@ def strip_code_block(text: str) -> str:
     text = text.strip()
     m = re.match(r"^```(?:\w+)?\s*\n?(.*?)\n?```$", text, flags=re.S)
     return m.group(1).strip() if m else text
+
+
+def has_pddl_actions(plan: str) -> bool:
+    return any(
+        line.strip() and not line.lstrip().startswith((";", "#"))
+        for line in plan.splitlines()
+    )
 
 
 def steps_to_text(raw_steps) -> str:
@@ -123,6 +131,24 @@ def get_save_dir(task: dict) -> Path:
     return eval_root / dataset_name / task_name / episode_name
 
 
+def generation_complete(task: dict) -> bool:
+    save_dir = get_save_dir(task)
+
+    if eval_mode == "pddl":
+        output_files = [
+            save_dir / "domain.pddl",
+            save_dir / "problem.pddl",
+            save_dir / "plan.txt",
+        ]
+    else:
+        output_files = [save_dir / "plan_nl.txt"]
+
+    return all(
+        path.is_file() and path.read_text(encoding="utf-8").strip()
+        for path in output_files
+    )
+
+
 def new_stats() -> dict:
     return {
         "total": 0,
@@ -163,6 +189,10 @@ def translate_pddl_plan_to_nl(save_dir: Path) -> None:
     domain = domain_file.read_text(encoding="utf-8").strip()
     problem = problem_file.read_text(encoding="utf-8").strip()
     plan = plan_file.read_text(encoding="utf-8").strip()
+
+    if not has_pddl_actions(plan):
+        nl_plan_file.write_text("", encoding="utf-8")
+        return
 
     prompt = f"""
 You are a robot task-planning expert.
@@ -346,12 +376,7 @@ def generate_one(task: dict):
     reasoning_file = save_dir / "reasoning.txt"
 
     try:
-        if eval_mode == "pddl":
-            if domain_file.exists() and problem_file.exists() and pddl_plan_file.exists():
-                translate_pddl_plan_to_nl(save_dir)
-                return task, True, "cached_translate"
-
-        if eval_mode == "nl" and nl_plan_file.exists():
+        if generation_complete(task):
             return task, True, "cached"
 
         if image_path is None or not image_path.exists():
@@ -374,7 +399,6 @@ def generate_one(task: dict):
             if not pddl_plan_file.exists() or not pddl_plan_file.read_text(encoding="utf-8").strip():
                 return task, False, "missing_pddl_plan"
 
-            translate_pddl_plan_to_nl(save_dir)
             return task, True, "pddl"
 
         reasoning, nl_plan = parse_nl_output(output)
@@ -412,11 +436,19 @@ def judge_one(task: dict):
             return task, False, False, "missing_image"
 
         if not plan_file.exists():
-            return task, False, False, "missing_plan_nl"
+            if eval_mode == "pddl":
+                translate_pddl_plan_to_nl(save_dir)
+            else:
+                return task, False, False, "missing_plan_nl"
 
         pred_plan = plan_file.read_text(encoding="utf-8").strip()
         if not pred_plan:
-            return task, False, False, "empty_plan_nl"
+            if eval_mode != "pddl":
+                return task, False, False, "empty_plan_nl"
+
+            pddl_plan = (save_dir / "plan.txt").read_text(encoding="utf-8")
+            if has_pddl_actions(pddl_plan):
+                return task, False, False, "empty_plan_nl"
 
         result = judge_pddl(
             model=judge_model,
@@ -447,7 +479,8 @@ def main():
     total_all = len(all_tasks)
 
     stats = defaultdict(new_stats)
-    tasks = []
+    generation_tasks = []
+    judge_tasks = []
     skipped = 0
 
     for task in all_tasks:
@@ -475,22 +508,25 @@ def main():
             stats[dataset_name]["failed_tasks"].append(str(number(episode_name)))
             continue
 
-        tasks.append(task)
+        if generation_complete(task):
+            stats[dataset_name]["generation_success"] += 1
+            judge_tasks.append(task)
+        else:
+            generation_tasks.append(task)
 
-    total = len(tasks)
+    generation_total = len(generation_tasks)
 
     print(f"测试集: {datasets}")
     print(f"任务总数: {total_all}")
-    print(f"跳过任务数: {skipped}")
-    print(f"待评测任务数: {total}")
-
-    generated_tasks = []
+    print(f"已有 Judge 或已记录错误: {skipped}")
+    print(f"已有生成结果、待 Judge: {len(judge_tasks)}")
+    print(f"待生成 {eval_mode.upper()} 结果: {generation_total}")
 
     # =========================
-    # 所有测试集一起并发生成
+    # 阶段一：所有测试集一起并发生成
     # =========================
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(generate_one, task) for task in tasks]
+    with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
+        futures = [executor.submit(generate_one, task) for task in generation_tasks]
 
         for i, future in enumerate(as_completed(futures), 1):
             task, ok, info = future.result()
@@ -499,11 +535,11 @@ def main():
             task_name = task["task"]
             episode_name = task["episode"]
             # 注意，dataset_name一定等于task_name，所以可以简化相关代码。
-            print(f"\n[{i}/{total}] {dataset_name}/{episode_name}")
+            print(f"\n[生成 {i}/{generation_total}] {dataset_name}/{episode_name}")
 
             if ok:
                 stats[dataset_name]["generation_success"] += 1
-                generated_tasks.append(task)
+                judge_tasks.append(task)
                 print("✅ 可解")
             else:
                 stats[dataset_name]["failed_tasks"].append(str(number(episode_name)))
@@ -514,22 +550,47 @@ def main():
                     print(f"❌ 生成失败: {info}")
 
     print("\n" + "=" * 80)
-    print(f"开始 Judge 共 {len(generated_tasks)} 个任务")
+    print(f"阶段一完成，开始 Judge 共 {len(judge_tasks)} 个任务")
 
     # =========================
-    # 所有测试集一起并发 Judge
+    # 阶段二：先串行生成第一个 Judge，失败则立即退出
     # =========================
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(judge_one, task) for task in generated_tasks]
+    if judge_tasks:
+        first_task = judge_tasks[0]
+        task, ok, passed, info = judge_one(first_task)
+        dataset_name = task["dataset"]
+        task_name = task["task"]
+        episode_name = task["episode"]
 
-        for i, future in enumerate(as_completed(futures), 1):
+        print(f"\n[Judge 1/{len(judge_tasks)}] {dataset_name}/{task_name}/{episode_name}")
+
+        if not ok:
+            raise SystemExit(
+                f"❌ Judge 生成失败: {info}\n"
+                "PDDL 结果已保留；请在可访问 Judge API 的环境中重新运行本脚本。"
+            )
+
+        if passed:
+            stats[dataset_name]["judge_pass"] += 1
+            stats[dataset_name]["judge_passed_tasks"].append(str(number(episode_name)))
+            print("✅ Judge 通过")
+        else:
+            stats[dataset_name]["judge_fail"] += 1
+            stats[dataset_name]["judge_failed_tasks"].append(str(number(episode_name)))
+            print("⚠️ Judge 未通过")
+
+    # 首个 Judge 成功说明在线服务可用，再并发处理其余任务。
+    with ThreadPoolExecutor(max_workers=judge_max_workers) as executor:
+        futures = [executor.submit(judge_one, task) for task in judge_tasks[1:]]
+
+        for i, future in enumerate(as_completed(futures), 2):
             task, ok, passed, info = future.result()
 
             dataset_name = task["dataset"]
             task_name = task["task"]
             episode_name = task["episode"]
 
-            print(f"\n[Judge {i}/{len(generated_tasks)}] {dataset_name}/{task_name}/{episode_name}")
+            print(f"\n[Judge {i}/{len(judge_tasks)}] {dataset_name}/{task_name}/{episode_name}")
 
             if ok:
                 if passed:
@@ -542,11 +603,11 @@ def main():
                     stats[dataset_name]["judge_failed_tasks"].append(str(number(episode_name)))
                     print("⚠️ Judge 未通过")
             else:
-                if info == "pddl_unsolvable":
-                    stats[dataset_name]["failed_tasks"].append(str(number(episode_name)))
-                    print("⚠️ PDDL 不可解")
-                else:
-                    print(f"❌ 生成失败: {info}")
+                raise SystemExit(
+                    f"❌ Judge 生成失败: "
+                    f"{dataset_name}/{task_name}/{episode_name}: {info}\n"
+                    "已生成的 PDDL 和 Judge 结果均已保留，重新运行将自动续传。"
+                )
 
     # =========================
     # 总结报告

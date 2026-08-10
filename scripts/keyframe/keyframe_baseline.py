@@ -1,6 +1,9 @@
 import shutil
 from pathlib import Path
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
 def extract_keyframes_embedding(
     frames_root,
     keyframes_root,
@@ -160,7 +163,7 @@ def extract_keyframes_embedding(
     keyframes_root = Path(keyframes_root)
     keyframes_root.mkdir(parents=True, exist_ok=True)
 
-    model_path = "/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/siglip2-giant-opt-patch16-384"
+    model_path = ROOT_DIR / "siglip2-giant-opt-patch16-384"
     emb_dir = frames_root / "embeddings_siglip2"
     diff_dir = frames_root / "embedding_diffs_siglip2"
     emb_dir.mkdir(parents=True, exist_ok=True)
@@ -316,15 +319,15 @@ if __name__ == "__main__":
     # # uniform
     # fps = 0.25
     # group_size = 3
-    # src_root = Path("/home/xyx/下载/swm/dataset/frames/human")
-    # dst_root = Path(f"/home/xyx/下载/swm/dataset/keyframes/human_uniform_sampling_fps_{fps}_group_{group_size}")
+    # src_root = ROOT_DIR / "dataset" / "frames" / "human"
+    # dst_root = ROOT_DIR / "dataset" / "keyframes" / f"human_uniform_sampling_fps_{fps}_group_{group_size}"
     # extract_keyframes_uniform_sampling(src_root, dst_root, fps, group_size)
     
     # embedding
-    root_dir = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/dataset/")
+    dataset_dir = ROOT_DIR / "dataset"
     extract_keyframes_embedding(
-        frames_root=root_dir / "frames/human",
-        keyframes_root=root_dir / "keyframes/human_embedding_siglip2_10window",
+        frames_root=dataset_dir / "frames" / "human",
+        keyframes_root=dataset_dir / "keyframes" / "human_embedding_siglip2_10window",
         smooth_k=5,
         merge_pct=0.5,
         batch_size=2000,

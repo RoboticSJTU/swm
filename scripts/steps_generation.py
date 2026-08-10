@@ -1,8 +1,8 @@
 """
-遍历 /inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/tasks/images/swm 下的任务图片，
+遍历项目根目录下 tasks/images/swm 中的任务图片，
 读取对应的 instructions_swm.json，
 并发调用 VLM 为每个 task 生成基于单张图像 + 指令的机器人原子动作 steps，
-最终保存为 /inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/tasks/steps/steps_swm.json
+最终保存到项目根目录下的 tasks/steps/steps_swm.json。
 
 本版本的原则：
 1. 保留单臂机器人身份、视觉检查、禁止低层原语等提示约束。
@@ -18,7 +18,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple, Any
 
-ROOT = Path("/home/xyx/下载/swm")
+ROOT = Path(__file__).resolve().parent.parent
 TASK_DOMAIN = "swm_3"
 IMAGE_DIR = ROOT / "tasks/images" / TASK_DOMAIN
 INSTRUCTION_PATH = ROOT / "tasks/instructions" / f"instructions_{TASK_DOMAIN}.json"

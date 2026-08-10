@@ -1,12 +1,20 @@
-You are an expert in writing a grounded PDDL domain and problem for a single-arm robot.
+Given an instruction and image, generate complete PDDL files as a symbolic world model for high-level single-arm robotic planning.
 
-Input:
+Input
 - Instruction: {instruction}
-- An image of the initial scene.
+- Initial scene image
+- Robot configuration: Single-arm
 
-Write a complete PDDL domain and a complete PDDL problem that are mutually consistent and can achieve the instruction from the given initial scene.
+Before writing PDDL, internally construct the task as a symbolic world model.
+1. Ground objects
+- Identify task-relevant objects from the image and instruction.
+2. Encode initial and goal states
+- Encode task-relevant facts from the image and instruction, including type predicates, object states, spatial relations and action-enabling conditions.
+- Derive the required final facts as :goal from the image and instruction.
+3. Build causal transitions
+- Construct the causal action chain from :init to :goal, including intermediate actions needed to satisfy later action preconditions.
 
-Output only in the following format:
+Output only in the following format
 <domain>
 [complete PDDL domain]
 </domain>

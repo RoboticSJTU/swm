@@ -2,7 +2,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 
-IMG_DIR = Path("/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/tasks/images/swm")
+root_dir = Path(__file__).resolve().parent.parent
+IMG_DIR = root_dir / "images" / "swm"
+
 LANDSCAPE_TARGET = (1280, 720)
 PORTRAIT_TARGET = (720, 1280)
 WORKERS = 16

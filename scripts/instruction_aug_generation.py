@@ -15,11 +15,11 @@ from swm.utils.apis import call_gpt_json
 
 # 修改这些配置后直接运行本文件，无需传入命令行参数。
 SOURCE_TASK_DOMAIN = "human"
-AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug_v0"
+AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug"
 PLAN_MODEL_NAME = "gpt-5.6-sol"
 CALL_GPT_MODEL = "gpt-5.6-sol"
 
-AUG_FACTOR = 3
+AUG_FACTOR = 1
 MAX_WORKERS = 50
 MAX_RETRY = 10
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}

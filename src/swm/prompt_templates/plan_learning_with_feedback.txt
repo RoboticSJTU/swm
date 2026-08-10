@@ -37,7 +37,7 @@ Use a vision-first three-pass workflow. Instruction and history may only help di
 - **Be specific:** Make actions specific by stating the immediate purpose, effect, or visible reorientation (e.g., upright, upside down) when clearly supported, and disambiguate objects/locations using structural position (e.g., top/middle/bottom), relative location (e.g., left/right), or stable attributes.
   Example: Push button to open something or to start something, NOT just Push button. 
 - **Clear state change required:** If there is no clear new discrete state change (just continuing the last history action, ambiguous or arm motion, etc.), output "none".
-- **No low-level primitives:** Do not output low-level primitives such as grasp, release, reach, approach, move to.
+- **No low-level primitives:** Do not output low-level primitives such as grasp, release, reach, approach, move.
 
 Output valid JSON without any markdown code block (e.g., ```json):
 {{

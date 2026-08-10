@@ -1,6 +1,6 @@
 from pathlib import Path
 import re
-from swm.utils.pddl.planer import solve_pddl
+from swm.utils.pddl.planer import solve_pddl, summarize_solver_error
 import json
 from swm.utils.construct_prompt import construct_prompt_with_feedback
 from swm.utils.apis import call_gpt_json
@@ -72,7 +72,8 @@ def generate_pddl(
     
     ok = solve_pddl(domain_path, problem_path) or fix_pddl(domain_path, problem_path)
     if not ok:
-        solver_feedback = (round_dir / "error.log").read_text(encoding="utf-8")
+        error_log = (round_dir / "error.log").read_text(encoding="utf-8")
+        solver_feedback = summarize_solver_error(error_log)
         return {"ok": False,"round_dir": round_dir,"domain": domain_str,"problem": problem_str,"plan": "","nl_plan": "","solver_feedback": solver_feedback}
 
     plan_text = plan_path.read_text(encoding="utf-8")

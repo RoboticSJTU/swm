@@ -8,17 +8,21 @@ from swm.utils.pddl.generation import RetryState, generate_pddl
 from swm.utils.pddl.judge import judge_pddl
 from swm.utils.plan_learning import learn_steps_from_keyframes
 
+"""
+video 输入 原始视频/已有关键帧/kf_plan.txt”，
+prepared 输入 steps_json + 首帧图像”。
+"""
 
 # =========================
 # Configuration
 # =========================
-ROOT_DIR = Path(__file__).parent.parent
-INPUT_MODE = "prepared"  # "video" or "prepared"
-TASK_DOMAIN = "agibot_aug_v1"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+INPUT_MODE = "video"  # "video" or "prepared"
+TASK_DOMAIN = "agibot"
 
 PDDL_MODEL = "gpt-5.6-sol"
-LEARN_STEPS_MODEL = "gpt-5.6-sol"
-JUDGE_MODEL = "gpt-5.6-sol"
+LEARN_STEPS_MODEL = PDDL_MODEL
+JUDGE_MODEL = PDDL_MODEL
 
 TASK_WORKERS = 30 # 主线程并发数
 MAX_STEP_BACKTRACKS = 10
@@ -28,7 +32,6 @@ PREPROCESS_WORKERS = 16 # 关键帧提取并发
 USE_ACTION_TEMPLATE = True
 ACTION_TEMPLATE_DOMAIN = "agibot"
 ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
-
 
 def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
     instructions_path = root_dir / "tasks" / "instructions" / f"instructions_{task_domain}.json"
@@ -272,10 +275,7 @@ def main() -> None:
     total_ready = len(tasks)
     tasks = [task for task in tasks if not has_passed(task["save_dir"])]
 
-    print(
-        f"loaded samples: {total_loaded}, ready: {total_ready}, "
-        f"to run: {len(tasks)}, already passed: {total_ready - len(tasks)}"
-    )
+    print(f"loaded samples: {total_loaded}, to run: {len(tasks)}, already passed: {total_ready - len(tasks)}")
 
     passed = 0
     planning_succeeded = 0

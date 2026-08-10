@@ -10,18 +10,21 @@ load_dotenv(find_dotenv())
 import httpx
 
 def get_client(model: str):
-    if model.startswith(("gemini", "gpt", "o")):
+    if model.startswith(("gemini", "gpt", "o1", "o3", "o4")):
         # return OpenAI(api_key=os.getenv("das_API_KEY"), base_url="https://dasuapi.com/v1",http_client=httpx.Client(trust_env=False))
-        # return OpenAI(api_key=os.getenv("A6_API_KEY"), base_url="https://api.a6api.com/v1",http_client=httpx.Client(trust_env=False))
-        return OpenAI(api_key="lin_API_KEY", base_url="https://api.linkai.shop/v1",http_client=httpx.Client(trust_env=False))
-    
+        return OpenAI(api_key=os.getenv("A6_API_KEY"), base_url="https://api.a6api.com/v1",http_client=httpx.Client(trust_env=False))
+        # return OpenAI(api_key="lin_API_KEY", base_url="https://api.linkai.shop/v1",http_client=httpx.Client(trust_env=False))
+
+    if model.startswith(("kimi-k3", "qwen3.7-max", "glm-5.2")):
+        return OpenAI(api_key="sk-8eiAj4vgvVeSderCgQSFXAv347zqqZTXPUtMq2AH3jMOgUIR", base_url="https://apicz.boyuerichdata.com/v1",http_client=httpx.Client(trust_env=False))
+
     if model.startswith("Qwen3.5-397B-A17B"):
         return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xyx.openapi-qb-ai.sii.edu.cn/v1")
 
     if model.startswith("Qwen3.5-27B"):
         return OpenAI(api_key=os.getenv("QWEN_API_KEY"), base_url="https://xy.openapi-qb.sii.edu.cn/v1")
-    
-    return OpenAI(api_key="0", base_url="https://notebook-inspire.sii.edu.cn/ws-9dcc0e1f-80a4-4af2-bc2f-0e352e7b17e6/project-0a63ad2d-c102-4f9f-bdf4-af1a164bc0b0/user-4f2781ab-e1e4-41f6-9367-e0ea36e3562e/vscode/2c981536-a6e2-4841-a280-9ee68d91da37/9e550a23-93c4-4850-bf11-4a9fc13de194/proxy/8000/v1")
+
+    return OpenAI(api_key="0", base_url="http://127.0.0.1:8001/v1")
 
 
 def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) -> str:
@@ -56,7 +59,7 @@ def call_gpt(model: str, prompt: str, image_paths: Optional[List[Path]] = None) 
     return output
 
 def call_gpt_json(model: str, prompt: str, image_paths: Optional[List[Path]] = None):
-    for _ in range(20):
+    for _ in range(1000):
         output = None
         try:
             output = call_gpt(model, prompt, image_paths)

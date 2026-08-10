@@ -6,10 +6,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from swm.utils.apis import call_gpt_json
 
 
-PRED_ROOT = Path("/home/xyx/下载/swm/eval_results/gemini-3-flash-preview/human_energy_无指令")
+ROOT_DIR = Path(__file__).resolve().parents[2]
+EVAL_ROOT = ROOT_DIR / "eval_results" / "gemini-3-flash-preview"
+PRED_ROOT = EVAL_ROOT / "human_energy_无指令"
 
 MODEL = "gemini-3-flash-preview"
-GT_ROOT = Path("/home/xyx/下载/swm/eval_results/gemini-3-flash-preview/human_GT")
+GT_ROOT = EVAL_ROOT / "human_GT"
 SAVE_PATH = PRED_ROOT.with_name(PRED_ROOT.name + "_eval.json")
 MAX_WORKERS = 40
 
