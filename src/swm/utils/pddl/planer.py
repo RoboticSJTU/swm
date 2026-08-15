@@ -1,9 +1,13 @@
 from pathlib import Path
+import os
+import signal
 import subprocess
 import sys
 from swm.utils.pddl.plan_reorder import plan_reorder
 import re
 fast_downward_path = Path(__file__).parent.parent.parent.parent.parent / "downward" / "fast-downward.py"
+_FAST_DOWNWARD_TIME_LIMIT_SECONDS = 60
+_SOLVER_WALL_TIMEOUT_SECONDS = 60
 
 def summarize_solver_error(log: str) -> str:
     """Compress a Fast Downward failure log into one short message."""
@@ -52,15 +56,70 @@ def _output_text(value):
         return value.decode("utf-8", errors="replace")
     return str(value)
 
-def solve_pddl(domain_file, problem_file):
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """Terminate the solver driver and every child in its process group."""
+
+    try:
+        if os.name == "posix":
+            # The group can outlive its leader, so do not return just because
+            # the driver process itself has already exited.
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.poll() is None:  # pragma: no cover - Linux is the target
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _run_fast_downward(cmd: list[object], cwd: Path) -> None:
+    """Run Fast Downward under both an internal and process-tree wall guard."""
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=_SOLVER_WALL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            cmd,
+            _SOLVER_WALL_TIMEOUT_SECONDS,
+            output=stdout,
+            stderr=stderr,
+        )
+    except BaseException:
+        _kill_process_tree(process)
+        process.communicate()
+        raise
+
+    if process.returncode:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            cmd,
+            output=stdout,
+            stderr=stderr,
+        )
+
+
+def solve_pddl(domain_file, problem_file, *, reorder_plan=True):
     """求解PDDL，并返回True或False来判断是否求解成功，且支持并行化求解"""
 
+    domain_file = Path(domain_file).resolve()
+    problem_file = Path(problem_file).resolve()
     plan_file = Path(domain_file).parent / "plan.txt"
     error_file = Path(domain_file).parent / "error.log"
 
     cmd = [
         sys.executable,
         fast_downward_path,
+        "--overall-time-limit",
+        f"{_FAST_DOWNWARD_TIME_LIMIT_SECONDS}s",
         "--plan-file",
         plan_file,
         domain_file,
@@ -69,16 +128,9 @@ def solve_pddl(domain_file, problem_file):
         "astar(lmcut())"
     ]
     try:
-        subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-            timeout=60,
-            cwd=domain_file.parent,
-        )
-        plan_reorder(domain_file, problem_file, plan_file, plan_file)
+        _run_fast_downward(cmd, domain_file.parent)
+        if reorder_plan:
+            plan_reorder(domain_file, problem_file, plan_file, plan_file)
         return True
 
     except Exception as e:

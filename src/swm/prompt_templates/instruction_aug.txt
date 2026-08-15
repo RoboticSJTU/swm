@@ -1,0 +1,93 @@
+You are generating augmented robot task instructions for the SAME image and the SAME remaining task.
+
+The dataset trains a vision-language robot planner.
+The language instruction should describe the high-level goal.
+The image should preserve hidden executable preconditions.
+Do not turn the instruction into a step-by-step robot plan.
+
+Core rule:
+- Preserve the user's explicitly stated information.
+- Only simplify hidden or implicit executable details inferred from the image or remaining steps.
+- Do not delete context sentences that appear in the original instruction.
+
+Important distinction:
+- If a source location, support, container, blocker, or object state is explicitly written in the original instruction, keep it.
+- If it only comes from the image or remaining steps, you may omit it.
+- Do not add new final states such as close, open, lock, unlock, return, turn on, or turn off unless they are explicitly requested in the original instruction.
+
+Usually remove:
+- implicit source locations not stated in the original instruction,
+- implicit current supports not stated in the original instruction,
+- blockers or occluders not stated in the original instruction,
+- low-level pick/lift/grab/take/remove steps,
+- action ordering caused only by executability.
+
+Usually keep:
+- all explicit context from the original instruction,
+- final target objects,
+- final destination or container,
+- final spatial relation,
+- explicit final states such as closed, locked, returned, turned off, or placed.
+
+Examples:
+Bad: Lift the green bowl out of the yellow bowl and place it on the white plate.
+Good: Place the green bowl on the white plate.
+
+Bad: Use the key to open the drawer.
+Good: Open the drawer.
+
+Good: Put the pill bottle into the top drawer, then close and lock the drawer and return the key.
+
+Inputs:
+
+Original full instruction:
+{instruction}
+
+Completed actions already done:
+{completed_actions}
+
+Remaining steps for reference only:
+{remaining_actions}
+
+Existing augmented instructions for this same source segment:
+{existing_block}
+
+Style slots:
+{style_slots}
+
+Task:
+Generate exactly {need} new instructions.
+
+Requirements:
+- Describe only the remaining task.
+- Preserve the remaining final goal.
+- Do not ask for completed parts again.
+- Do not invent new objects, tools, destinations, states, or goals.
+- Do not mention image, photo, scene, camera, frame, or robot.
+- Do not mention Remaining steps or Completed actions.
+- Every generated instruction must be meaningfully different from all others in this JSON.
+- Do not generate exact duplicates or near-duplicates.
+- Do not only change polite words, word order, or synonyms while keeping the same sentence template.
+- Avoid repeating existing augmented instructions.
+- Keep every instruction concise.
+
+Return JSON only:
+{{
+  "shared_goal": "brief summary of the common high-level remaining goal",
+  "hidden_details_not_mentioned": ["brief hidden details intentionally kept out of language"],
+  "variants": [
+    {{
+      "slot": 1,
+      "instruction": "generated instruction",
+      "style_label": "short style label"
+    }}
+  ]
+}}
+
+Output rules:
+- variants must contain exactly {need} items.
+- slot must be integers from 1 to {need}, each exactly once.
+- Do not output markdown.
+- Do not output reasoning outside JSON.
+
+{retry_block}

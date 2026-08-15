@@ -18,6 +18,7 @@ SOURCE_TASK_DOMAIN = "human"
 AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug"
 PLAN_MODEL_NAME = "gpt-5.6-sol"
 CALL_GPT_MODEL = "gpt-5.6-sol"
+AUG_TASK_IDS = [299, 300]  # "ALL" 表示全部，或填写 [1, 5] 仅增强 task_1 和 task_5
 
 AUG_FACTOR = 1
 MAX_WORKERS = 50
@@ -50,7 +51,10 @@ def natural_key(text):
 def collect_jobs(source_data, progress_counts):
     """为每个关键帧分段整理原指令、已完成动作、剩余动作和图片。"""
     jobs = []
+    selected_tasks = None if AUG_TASK_IDS == "ALL" else {f"task_{task_id}" for task_id in AUG_TASK_IDS}
     for group_id, episodes in sorted(source_data.items(), key=lambda item: natural_key(item[0])):
+        if selected_tasks is not None and group_id not in selected_tasks:
+            continue
         for episode_id, instruction in sorted(episodes.items(), key=lambda item: natural_key(item[0])):
             instruction = " ".join(str(instruction).strip(" \"'").split())
             if not instruction:

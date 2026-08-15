@@ -1,67 +1,61 @@
-You are a strict but semantics-aware judge for embodied task planning.
-Your task is to determine whether the Evaluated plan correctly completes the Instruction by matching the Ground-truth plan in final goals, task-critical semantic effects, and essential causal dependencies.
+Judge whether an embodied robot plan executably and completely solves an instruction. Evaluate both stages in order; both must pass.
 
-Inputs:
-- Instruction: {instruction}
-- Initial image
-- Ground-truth plan:
+# Inputs
+
+Instruction:
+{instruction}
+
+Ground-truth reference plan:
 {kf_plan}
-- Evaluated plan:
+
+Evaluated plan:
 {nl_plan}
 
-Judging Policy:
-- Treat a Ground-truth action as an enabling constraint if it changes access, containment, support, obstruction, clearance, or mechanical state needed by a later action. Such constraints are task-critical and cannot be moved after the dependent action.
-- Flexible staging surfaces: If an object is only placed aside temporarily, the exact surface need not match, as long as it is a reasonable nearby surface.
-- Accept semantic-equivalent variations in wording, operator names, action granularity, aliases, and independent action order.
-- Reject missing goals/effects, wrong task-critical objects or arguments, causal violations, and contradictions to required final states.
-- Source Location Specificity: For pick/take actions, judge the source as the immediate containing or supporting region. If an object is inside a container on a table, the correct source is the container, not the table.
-- Do not require step-by-step matching with the Ground-truth plan, which may include redundant actions. However, the Evaluated plan must be physically executable throughout, not only final-state equivalent. Preserve any Ground-truth order when an earlier action enables the executability of a later action.
-- Ignore non-essential differences in left/right-hand assignment. Judge whether the object-level operation, final effects, and causal dependencies are equivalent.
-- Do not require the Evaluated plan to reproduce Ground-truth handovers. A handover may be omitted, implicit, or replaced by continuing with the same hand, as long as the task remains causally and physically executable.
-- Hand identity is task-critical only when the Instruction explicitly specifies a hand or simultaneous two-hand operation is necessary.
+Trusted object correspondences from structured PDDL analysis:
+{object_mapping}
 
-**Stage 1: Goal Completeness Validation** 
+Initial scene image: attached.
 
-Extract the minimal required final-state goals from the Ground-truth plan, using the Instruction only for clarification.
-Check whether the Evaluated plan achieves:
-- correct target objects;
-- correct target relations, placements, or locations;
-- correct target states;
-- required count or coverage;
-- required final states not undone or contradicted.
+# Evidence
 
-FAIL Stage 1 if any required final goal is missing, achieved on the wrong object, achieved at the wrong goal-relevant target, or later undone.
+- The Instruction defines the required outcome and scope.
+- The Ground-truth plan is valid. Derive task-critical state transitions and causal constraints without requiring wording, step count, or total order.
+- Treat object correspondences as trusted aliases. Use the image only to ground remaining references and resolve lexical ambiguity. An unclear image must not override a necessary transition demonstrated by the reference plan.
+- Distinguish persistent environmental enablers from operator-specific transient states. A reference transition that changes access, mechanical state, or usable support configuration for a later operation is authoritative and must occur before use; the Evaluated init and image cannot waive it. A transient state used by one reference operator is not automatically a precondition of a differently phrased action that is normally executable from another coherent state.
+- For facts not fixed by the Instruction, a critical reference transition, or trusted grounding, use open-world evidence: unstated means unknown. Do not invent actions, constraints, quantities, or physical facts.
 
-**Stage 2: Semantic Effect and Causal Validation** 
+# Stage 1: Executable Semantic Equivalence
 
-For each Ground-truth action, judge whether its semantic effect is task-critical. Redundant or non-essential Ground-truth actions do not need to be reproduced by the Evaluated plan.
-Check whether the Evaluated plan preserves:
-- required object manipulation effects;
-- required open/close, lock/unlock, turn-on/turn-off, fill, connect, load, wash, pour, or place effects;
-- required preparation before appliance/tool/container use;
-- necessary order between dependent actions.
+1. Derive task-critical effects and their partial-order dependencies. Dependencies arise from required states or resources, not mere reference adjacency.
+2. Simulate the Evaluated plan from the initial scene. Check each action's access, possession, support/container, device state, and other relevant preconditions; then apply its effect.
+3. PASS only if the plan is executable and preserves every critical effect and dependency.
 
-Do not require the exact Ground-truth linear order. Reordering is allowed only when actions are independent and do not change each other's executability conditions.
+Compare state transitions rather than text. Accept aliases, paraphrases, independent-action reordering, harmless redundant steps, omission of non-critical reference details, and coherent alternative preparation paths. An effect may be explicit or unambiguously established by an action and its coherent downstream use. A later wait or confirmation does not move an earlier action's semantic milestone unless an input requires observed completion before the intervening action or that action can prevent the outcome. Likewise, a location word does not imply an unstated orientation or undo a preparation that coherent downstream use confirms. The reference determines required effects and dependencies, not the only operator sequence or hidden preconditions for differently phrased actions; assess each Evaluated action by its own stated, normal semantics.
 
-FAIL Stage 2 only if there is a clear task-relevant missing effect or causal/executability violation, such as:
-- moving an enabling Ground-truth action after the action that depends on it;
-- placing or using an object without first obtaining it;
-- inserting into or taking from a closed container without opening it;
-- using an appliance before required preparation, loading, connection, or placement;
-- washing or filling without enabling the water source;
-- closing or locking before the required insertion/removal is completed;
-- undoing a required final state.
+A difference matters only if it changes identity, a precondition, critical effect, dependency, or required state. A direct support/container relation may coexist with contact or orientation: if an item is both against a wall and on a table, `pick from wall` and `pick from table` are equivalent when access is unchanged. This does not permit skipping a support/container level: an item in a tray is not directly on the table beneath it. Reject incompatible direct areas and omitted relocations/openings that change access.
 
-Return PASS iff:
-1. required final goals are achieved;
-2. task-critical objects and non-hand arguments match
-3. task-critical Ground-truth semantic effects are covered;
-4. essential causal dependencies are preserved;
-5. no required final state is contradicted or undone.
+Each step must denote a supported object-level robot operation. A handheld pour, place, carry, or tool use normally requires prior acquisition; merely naming the object does not acquire it. Do not add missing acquisition/access or expand a collective expression into repeated object operations unless a batch operation is supported.
 
-Output valid JSON only:
+Before failing, perform a necessity check: cite an input-supported fact or unambiguous action effect and show that failure follows necessarily. A merely possible physical failure is insufficient. Never assume a capacity is full, overflow or depletion occurs, an exact quantity/duration is reached, or an object is released or reoriented unless an input makes it task-critical. Do not infer one possible hidden side effect when the stated same-object trajectory remains coherent.
+
+If Stage 1 fails, identify the earliest concrete violation and do not evaluate Stage 2.
+
+# Stage 2: Instruction Completeness
+
+After Stage 1 passes, verify every requirement in the Instruction: object instances, quantities or coverage, target relations, state changes, cleanup/return conditions, and persistence. Ignore non-critical reference-only details.
+
+# Output
+
+Return JSON. `stage_2.pass` is null when Stage 1 fails. `pass` equals `stage_1.pass AND stage_2.pass`.
+
 {{
-  "reasoning": "A two-part analysis: (1) Goal Completeness Validation. (2) Semantic Effect and Causal Validation.",
-  "pass": true or false,
-  "feedback": "If pass=false: identify the earliest critical missing goal, wrong object/argument/relation/state, missing semantic effect, or violated causal dependency, then state the minimal correction. If pass=true: use an empty string."
+  "stage_1": {{
+    "pass": true or false,
+    "reason": "concise pass justification or earliest concrete violation"
+  }},
+  "stage_2": {{
+    "pass": true, false, or null,
+    "reason": "concise completeness result or not evaluated"
+  }},
+  "pass": true or false
 }}

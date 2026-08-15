@@ -19,7 +19,6 @@ from pathlib import Path
 # ============================================================
 # 配置：只需要修改这里
 # ============================================================
-
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MODEL_NAME = "gpt-5.6-sol"
 PDDL_DOMAIN_NAME = "single_arm"
@@ -30,6 +29,7 @@ KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
 PROMPT_PATH = ROOT_DIR / "src/swm/prompt_templates/training_input.txt"
 OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/{'_'.join(TASK_DOMAINS)}.json"
+ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 
@@ -397,6 +397,17 @@ def problem_path(episode_dir):
     return round_dir / "problem.pddl"
 
 
+def init_hand_states(problem_text):
+    problem = parse_pddl(problem_text)
+    for section in problem[2:]:
+        if expression_head(section) == ":init":
+            return [
+                pddl_line(atom) for atom in section[1:]
+                if expression_head(atom) in ("hand_free", "holding")
+            ]
+    return []
+
+
 def rename_numbered_objects(path):
     """仅将唯一的 object1 改为 object；存在多实例歧义时不改名。"""
     text = path.read_text(encoding="utf-8")
@@ -544,6 +555,14 @@ def process_domain(task_domain, prompt_template):
         if path.is_dir() and not path.name.startswith("episode") and not any(path.iterdir()):
             path.rmdir()
 
+    errors = []
+    if ROBOT_CONFIGURATION == "single-arm":
+        for round_dir in valid_rounds.values():
+            path = round_dir / "problem.pddl"
+            hand_states = init_hand_states(path.read_text(encoding="utf-8"))
+            if len(hand_states) > 1:
+                errors.append(f"{path.relative_to(ROOT_DIR)}: {' | '.join(hand_states)}")
+
     samples = []
     missing_episode = 0
     missing_image = 0
@@ -591,20 +610,29 @@ def process_domain(task_domain, prompt_template):
     print(f"missing episode: {missing_episode}")
     print(f"missing image  : {missing_image}")
     print(f"saved samples  : {len(samples)}")
-    return samples
+    return samples, errors
 
 
 def main():
     prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
     samples = []
+    errors = []
     for task_domain in TASK_DOMAINS:
-        samples.extend(process_domain(task_domain, prompt_template))
+        domain_samples, domain_errors = process_domain(task_domain, prompt_template)
+        samples.extend(domain_samples)
+        errors.extend(domain_errors)
 
     OUT_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_JSON_PATH.write_text(
         json.dumps(samples, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if errors:
+        ERROR_LOG_PATH.write_text("\n".join(errors) + "\n", encoding="utf-8")
+        print(f"single-arm errors: {len(errors)}")
+        print(f"error log       : {ERROR_LOG_PATH}")
+    else:
+        ERROR_LOG_PATH.unlink(missing_ok=True)
     print(f"\ntotal samples: {len(samples)}")
     print(f"output       : {OUT_JSON_PATH}")
 

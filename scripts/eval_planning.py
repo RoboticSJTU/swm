@@ -8,7 +8,7 @@ from collections import defaultdict
 import traceback
 from swm.utils.plan_learning import get_prompt_from_template
 from swm.utils.apis import call_gpt, call_gpt_json
-from swm.utils.pddl.judge import judge_pddl
+from swm.utils.pddl.judge import judge_pddl, latest_round_problem
 from swm.utils.pddl.planer import solve_pddl
 
 # =========================
@@ -462,6 +462,10 @@ def judge_one(task: dict):
             kf_plan=kf_plan,
             nl_plan=pred_plan,
             n=N,
+            predicted_problem=(save_dir / "problem.pddl") if eval_mode == "pddl" else None,
+            ground_truth_problem=latest_round_problem(
+                root_dir / "eval_results" / "gt" / task["dataset"] / task["episode"]
+            ),
         )
 
         judge_file.write_text(
