@@ -1,12 +1,7 @@
 import re
 from pathlib import Path
 
-from swm.utils.apis import call_gpt_json
-from swm.utils.construct_prompt import load_prompt_components
-
-
-def get_prompt_from_template(path: Path, **values) -> str:
-    return path.read_text(encoding="utf-8").format(**values)
+from swm.llm import call_gpt_json
 
 
 def learn_steps_from_keyframes(
@@ -29,8 +24,7 @@ def learn_steps_from_keyframes(
     plan_path = save_dir / "kf_plan.txt"
     group_plan_path = save_dir / "kf_plan_group.txt"
     debug_path = save_dir / "pair_debug.log"
-    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "plan_learning.txt"
-    prompt_components = load_prompt_components()["plan_learning.txt"]
+    prompt_dir = Path(__file__).parent / "prompt_templates"
 
     plan_lines = []
     history = []
@@ -41,29 +35,22 @@ def learn_steps_from_keyframes(
 
     while group_index < len(segment_images):
         images = segment_images[group_index]
-        history_text = "\n".join(f"{i}. {action}" for i, action in enumerate(history, 1)) or "none"
+        history_text = (
+            "\n".join(f"{i}. {action}" for i, action in enumerate(history, 1)) or "none"
+        )
 
         retry_hint = retry_hints.get(group_index)
-        mode = "feedback" if retry_hint else "initial"
-        selected = prompt_components[mode]
-        feedback_context = ""
-        if retry_hint:
-            feedback_context = selected["feedback_context"].format(
-                error_action=retry_hint["error_action"],
-                feedback=retry_hint["feedback"],
-            )
+        prompt_path = prompt_dir / (
+            "plan_learning_with_feedback.txt" if retry_hint else "plan_learning.txt"
+        )
 
-        prompt = get_prompt_from_template(
-            prompt_path,
+        prompt = prompt_path.read_text(encoding="utf-8").format(
             instruction=instruction,
             history=history_text,
             group_idx=group_index,
             num_groups=len(segment_images),
-            task_description=selected["task_description"],
-            feedback_context=feedback_context,
-            inference_workflow=selected["inference_workflow"],
-            feedback_note=selected.get("feedback_note", ""),
-            action_reasoning_schema=selected["action_reasoning_schema"],
+            error_action=retry_hint["error_action"] if retry_hint else "",
+            feedback=retry_hint["feedback"] if retry_hint else "",
         )
 
         data = call_gpt_json(model_name, prompt, images)
@@ -98,8 +85,12 @@ def learn_steps_from_keyframes(
                 for index, hint in retry_hints.items()
                 if index <= rollback_index
             }
-            del plan_lines[-sum(group["plan_count"] for group in group_meta[rollback_index:]):]
-            history_count = sum(group["history_count"] for group in group_meta[rollback_index:])
+            del plan_lines[
+                -sum(group["plan_count"] for group in group_meta[rollback_index:]) :
+            ]
+            history_count = sum(
+                group["history_count"] for group in group_meta[rollback_index:]
+            )
             if history_count:
                 del history[-history_count:]
             del group_meta[rollback_index:]
@@ -112,7 +103,11 @@ def learn_steps_from_keyframes(
             continue
 
         raw_action = data["action"]
-        action_text = "\n".join(str(action) for action in raw_action) if isinstance(raw_action, list) else str(raw_action)
+        action_text = (
+            "\n".join(str(action) for action in raw_action)
+            if isinstance(raw_action, list)
+            else str(raw_action)
+        )
         action_text = action_text.replace("\\n", "\n")
         actions = []
         for line in action_text.splitlines():
@@ -143,29 +138,24 @@ def learn_steps_from_keyframes(
         group_index += 1
 
     cleaned_plan = []
-    previous = ""
-    for action in plan_lines:
-        key = action.lower().strip().strip(".")
-        if key == "none":
-            continue
-        if key != previous:
-            cleaned_plan.append(action)
-        previous = key
-    plan_path.write_text(
-        "\n".join(cleaned_plan) + ("\n" if cleaned_plan else ""),
-        encoding="utf-8",
-    )
-
     group_lines = []
+    previous = ""
     for index, group in enumerate(group_meta):
-        previous = ""
+        group_previous = ""
         for action in group["actions"]:
             key = action.lower().strip().strip(".")
             if key == "none":
                 continue
             if key != previous:
+                cleaned_plan.append(action)
+            if key != group_previous:
                 group_lines.append(f"[G{index}] {action}")
             previous = key
+            group_previous = key
+    plan_path.write_text(
+        "\n".join(cleaned_plan) + ("\n" if cleaned_plan else ""),
+        encoding="utf-8",
+    )
     group_plan_path.write_text(
         "\n".join(group_lines) + ("\n" if group_lines else ""),
         encoding="utf-8",

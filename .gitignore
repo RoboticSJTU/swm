@@ -52,6 +52,8 @@ Thumbs.db
 /runs/
 /logs/
 /cache/
+/archive/eb_alfred/cache/
+/archive/eb_alfred/runs/
 /tmp/
 /domain/
 /test_pddl/
@@ -98,7 +100,7 @@ Thumbs.db
 /mergy.py
 /merged_domain.pddl
 /.sii/
-/docs/
+/docs/*
 /experiments/
 /paper/
 s/solver_temp/

@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 from pathlib import Path
 
-from swm.utils.plan_learning import get_prompt_from_template
-from swm.utils.apis import call_gpt_json
-from swm.utils.pddl.init_state_precheck import (
+from swm.llm import call_gpt_json
+from swm.pddl.init_state_precheck import (
     PrecheckResult,
     compare_initial_states,
     read_problem_source,
@@ -30,9 +31,7 @@ def _validated_vlm_result(result: dict) -> dict:
         raise ValueError("Judge response is missing stage_1 or stage_2")
 
     stage_1_pass = stage_1.get("pass") is True
-    stage_1_reasoning = str(
-        stage_1.get("reason", stage_1.get("reasoning", ""))
-    ).strip()
+    stage_1_reasoning = str(stage_1.get("reason", stage_1.get("reasoning", ""))).strip()
     stage_2_raw_pass = stage_2.get("pass")
     stage_2_evaluated = (
         stage_2.get("evaluated") is True
@@ -40,9 +39,7 @@ def _validated_vlm_result(result: dict) -> dict:
         else stage_2_raw_pass is not None
     )
     stage_2_pass = stage_2_raw_pass is True
-    stage_2_reasoning = str(
-        stage_2.get("reason", stage_2.get("reasoning", ""))
-    ).strip()
+    stage_2_reasoning = str(stage_2.get("reason", stage_2.get("reasoning", ""))).strip()
     if not stage_1_pass:
         stage_2_evaluated = False
         stage_2_pass = False
@@ -54,8 +51,8 @@ def _validated_vlm_result(result: dict) -> dict:
         raise ValueError("Judge response has empty Stage 2 reason")
 
     reasoning = f"Stage 1: {stage_1_reasoning} Stage 2: {stage_2_reasoning}"
-    feedback = "" if passed else (
-        stage_1_reasoning if not stage_1_pass else stage_2_reasoning
+    feedback = (
+        "" if passed else (stage_1_reasoning if not stage_1_pass else stage_2_reasoning)
     )
 
     return {
@@ -70,7 +67,7 @@ def _validated_vlm_result(result: dict) -> dict:
             "reasoning": stage_2_reasoning,
         },
         "reasoning": reasoning,
-        "feedback": "" if passed else feedback,
+        "feedback": feedback,
     }
 
 
@@ -78,10 +75,9 @@ def _call_validated_judge(
     model: str,
     prompt: str,
     first_img: Path,
-    max_schema_attempts: int = 3,
 ) -> dict:
     last_error: ValueError | None = None
-    for _ in range(max_schema_attempts):
+    for _ in range(3):
         try:
             return _validated_vlm_result(
                 call_gpt_json(model, prompt, [first_img], temperature=0.0)
@@ -90,7 +86,7 @@ def _call_validated_judge(
             last_error = error
     raise ValueError(
         f"Judge did not return the required two-stage schema after "
-        f"{max_schema_attempts} attempts: {last_error}"
+        f"3 attempts: {last_error}"
     )
 
 
@@ -121,7 +117,7 @@ def judge_pddl(
                 reason=f"Auxiliary problem input could not be read: {error}",
             )
 
-        if precheck is not None and precheck.should_reject:
+        if precheck.should_reject:
             first_error = precheck.contradictions[0]
             return {
                 "pass": False,
@@ -158,9 +154,8 @@ def judge_pddl(
             for match in precheck.mapping_details
         )
 
-    prompt_path = Path(__file__).parent.parent.parent / "prompt_templates" / "pddl_judge.txt"
-    prompt = get_prompt_from_template(
-        prompt_path,
+    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
+    prompt = prompt_path.read_text(encoding="utf-8").format(
         instruction=instruction,
         kf_plan=kf_plan,
         nl_plan=nl_plan,

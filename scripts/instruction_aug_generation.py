@@ -10,7 +10,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from swm.utils.apis import call_gpt_json
+from swm.llm import call_gpt_json
 
 
 # 修改这些配置后直接运行本文件，无需传入命令行参数。
@@ -18,7 +18,7 @@ SOURCE_TASK_DOMAIN = "human"
 AUG_TASK_DOMAIN = f"{SOURCE_TASK_DOMAIN}_aug"
 PLAN_MODEL_NAME = "gpt-5.6-sol"
 CALL_GPT_MODEL = "gpt-5.6-sol"
-AUG_TASK_IDS = [299, 300]  # "ALL" 表示全部，或填写 [1, 5] 仅增强 task_1 和 task_5
+AUG_TASK_IDS = [276]  # "ALL" 表示全部，或填写 [1, 5] 仅增强 task_1 和 task_5
 
 AUG_FACTOR = 1
 MAX_WORKERS = 50

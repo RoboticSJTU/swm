@@ -1,0 +1,36 @@
+## 1. Syntax and grounding
+
+- Use a simple STRIPS-style PDDL subset. Do not use `:types` or advanced constructs such as `or`, `when`, `forall`, `exists`, or derived predicates. Negative preconditions and parameter inequality are allowed.
+- List every task-relevant instance in Problem `:objects` using unambiguous names, represent object categories with unary predicates in `:init`, and keep all Domain/Problem symbols consistent.
+
+## 2. Operators
+
+### (1) Causal modeling
+
+- Model each action as a minimal causal transition, not as a scene snapshot.
+- Include only direct participants, necessary preconditions, and immediate effects; remove anything that does not affect applicability or the direct transition.
+- For finite transfers, delete the source relation when adding the target relation; model unlimited sources with static `dispenses`.
+- Add a process result only to the action that completes the process.
+- For every object category, an oriented placement must require the visually supported source pose and change only that pose: delete the source pose and add the target pose. Do not emit unrelated pose negations. Picking preserves pose; when the source and target pose are identical, placement has no pose effect.
+- Treat arms as interchangeable, unit-capacity hand resources. Instantiate one hand object for single-arm tasks and two for dual-arm tasks.
+- Use hand identity only for resource accounting. Do not introduce unsupported left/right-hand preferences, reachability, or capability differences.
+
+### (2) Naming
+
+`VERB_OBJECT[_from_SOURCE][_PREP_TARGET][_with_TOOL]`
+
+- Name actions from their PDDL transition and semantic roles, using the shortest form that still distinguishes planning-relevant transitions.
+- `VERB` denotes one atomic transition; `OBJECT` is mandatory.
+- Use concrete functional categories for `OBJECT`, `SOURCE`, and `TARGET`, not generic labels or non-operational attributes such as color, material, size, or appearance.
+- Include `SOURCE`, `TARGET`, and `PREP` only when they distinguish the transition.
+- `TOOL` must be a detachable hand-held auxiliary object; hands, buttons, handles, and built-in parts are not tools.
+- Use `*_top` only in action names to distinguish a container's top surface from its interior; do not create separate `*_top` objects or predicates.
+
+## 3. Predicates
+
+- Use the smallest predicate vocabulary that preserves all planning-relevant distinctions; omit irrelevant attributes, scene details, and unnecessary intermediate states.
+- Reuse general predicates with consistent meaning and arity across compatible objects and roles; avoid synonymous or object-specific schemas.
+
+## 4. Validation
+
+- Before output, verify that the full `:goal` is reachable from `:init` and that every action is valid whenever its stated preconditions hold, without unintended shortcuts.

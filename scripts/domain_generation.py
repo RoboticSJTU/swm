@@ -3,10 +3,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from swm.keyframe.extraction import extract_frames, extract_keyframes
-from swm.utils.construct_prompt import construct_instruction_with_steps, get_prompt_component
-from swm.utils.pddl.generation import RetryState, generate_pddl
-from swm.utils.pddl.judge import judge_pddl
-from swm.utils.plan_learning import learn_steps_from_keyframes
+from swm.prompts import construct_instruction_with_steps, read_prompt
+from swm.pddl.generation import RetryState, generate_pddl
+from swm.pddl.judge import judge_pddl, latest_round_problem
+from swm.plan_learning import learn_steps_from_keyframes
 
 """
 video 输入 原始视频/已有关键帧/kf_plan.txt”，
@@ -17,22 +17,23 @@ prepared 输入 steps_json + 首帧图像”。
 # Configuration
 # =========================
 ROOT_DIR = Path(__file__).resolve().parent.parent
-INPUT_MODE = "video"  # "video" or "prepared"
-TASK_DOMAIN = "agibot"
+INPUT_MODE = "prepared"  # "video" or "prepared"
+TASK_DOMAIN = "human_aug"
 
 PDDL_MODEL = "gpt-5.6-sol"
 LEARN_STEPS_MODEL = PDDL_MODEL
 JUDGE_MODEL = PDDL_MODEL
 
+ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
+ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
+ACTION_TEMPLATE_DOMAIN = "human"
+ACTION_TEMPLATE_MODEL = PDDL_MODEL
+
+
 TASK_WORKERS = 30 # 主线程并发数
 MAX_STEP_BACKTRACKS = 10
 MAX_PLAN_ATTEMPTS = 3
 PREPROCESS_WORKERS = 16 # 关键帧提取并发
-
-ROBOT_CONFIGURATION = "dual-arm"  # "single-arm" or "dual-arm"
-ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
-ACTION_TEMPLATE_DOMAIN = "agibot"
-ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
 
 def load_tasks(root_dir: Path, task_domain: str, input_mode: str) -> list[dict]:
     instructions_path = root_dir / "tasks" / "instructions" / f"instructions_{task_domain}.json"
@@ -217,6 +218,14 @@ def run_task(task: dict, input_mode: str, action_template: str) -> tuple[bool, b
             task["instruction"],
             numbered_steps,
             numbered_plan,
+            predicted_problem=round_result["round_dir"] / "problem.pddl",
+            ground_truth_problem=latest_round_problem(
+                ROOT_DIR
+                / "eval_results"
+                / "gt"
+                / task["task_domain"]
+                / task["task_id"]
+            ),
         )
         (round_result["round_dir"] / "judge.json").write_text(
             json.dumps(judge_out, ensure_ascii=False, indent=2),
@@ -250,9 +259,7 @@ def main() -> None:
 
     task_ids = {task["task_id"] for task in tasks}
     if ACTION_TEMPLATE_MODE == "fixed":
-        fixed_template = get_prompt_component(
-            "pddl_generation.txt", "common", "action_template"
-        )
+        fixed_template = read_prompt("ACTION_TEMPLATE.txt")
         action_templates = dict.fromkeys(task_ids, fixed_template)
     elif ACTION_TEMPLATE_MODE == "retrieved":
         action_templates = {

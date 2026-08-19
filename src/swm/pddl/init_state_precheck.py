@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
-
 
 Literal = tuple[str, ...]
 
@@ -28,7 +27,6 @@ TOKEN_ALIASES = {
     "gripper": "hand",
     "countertop": "surface",
     "counter": "surface",
-    "cup": "cup",
     "desk": "surface",
     "mug": "cup",
     "table": "surface",
@@ -107,9 +105,7 @@ class PrecheckResult:
         return self.decision == "reject"
 
     def to_dict(self) -> dict[str, object]:
-        data = asdict(self)
-        data["mapping_details"] = [asdict(match) for match in self.mapping_details]
-        return data
+        return asdict(self)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -127,9 +123,7 @@ def _canonical_type(value: str) -> str:
 
 def _name_tokens(value: str) -> frozenset[str]:
     return frozenset(
-        TOKEN_ALIASES.get(token, token)
-        for token in _tokenize(value)
-        if token != "of"
+        TOKEN_ALIASES.get(token, token) for token in _tokenize(value) if token != "of"
     )
 
 
@@ -218,7 +212,9 @@ def parse_problem_text(text: str) -> ParsedProblem:
         if isinstance(item, list) and item and item[0] == ":init"
     ]
     if len(object_sections) > 1 or len(init_sections) != 1:
-        raise ValueError("problem must contain one :init and at most one :objects section")
+        raise ValueError(
+            "problem must contain one :init and at most one :objects section"
+        )
 
     objects = _typed_symbols(object_sections[0][1:]) if object_sections else set()
     positive: set[Literal] = set()
@@ -232,9 +228,7 @@ def parse_problem_text(text: str) -> ParsedProblem:
             positive.add(_literal(expression))
 
     referenced = {
-        argument
-        for literal in positive | negative
-        for argument in literal[1:]
+        argument for literal in positive | negative for argument in literal[1:]
     }
     objects.update(referenced)
     return ParsedProblem(frozenset(objects), frozenset(positive), frozenset(negative))
@@ -249,7 +243,7 @@ def _relation_neighborhood(
     for literal in problem.positive_init:
         if len(literal) != 3 or literal[0] not in SPATIAL_PREDICATES:
             continue
-        predicate, subject, target = literal
+        _, subject, target = literal
         if subject == obj:
             neighbor = mapping.get(target, target) if mapping else target
             neighbors.add(("direct_area", "out", neighbor))
@@ -275,7 +269,9 @@ def _candidate_score(
     pred_tokens = _name_tokens(pred)
     gt_tokens = _name_tokens(gt)
     token_union = pred_tokens | gt_tokens
-    token_score = len(pred_tokens & gt_tokens) / len(token_union) if token_union else 0.0
+    token_score = (
+        len(pred_tokens & gt_tokens) / len(token_union) if token_union else 0.0
+    )
 
     mapped_neighbors = _relation_neighborhood(pred_problem, pred, mapping)
     gt_neighbors = _relation_neighborhood(gt_problem, gt)
@@ -424,9 +420,7 @@ def _spatial_contradictions(
         gt_subject = mapping.get(pred_subject)
         if gt_subject is None or gt_subject not in gt_locations:
             continue
-        mapped_pred_areas = {
-            mapping[area] for area in pred_areas if area in mapping
-        }
+        mapped_pred_areas = {mapping[area] for area in pred_areas if area in mapping}
         if not mapped_pred_areas:
             continue
         gt_areas = gt_locations[gt_subject]
@@ -467,7 +461,9 @@ def compare_initial_states(
         reason = "no proven contradiction; some predicted objects remain unmapped"
         decision = "defer"
     else:
-        reason = "no proven contradiction; programmatic checks cannot establish equivalence"
+        reason = (
+            "no proven contradiction; programmatic checks cannot establish equivalence"
+        )
         decision = "defer"
 
     return PrecheckResult(

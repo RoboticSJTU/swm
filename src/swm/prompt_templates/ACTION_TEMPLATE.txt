@@ -1,0 +1,282 @@
+## 1. Spatial Change.
+
+### (1) Source only.
+
+; Pick up apple ?a from table ?t with hand ?h.
+(:action pick_apple_from_table
+:parameters (?h ?a ?t)
+:precondition (and (hand ?h) (apple ?a) (table ?t) (hand_free ?h) (on ?a ?t))
+:effect (and (not (hand_free ?h)) (holding ?h ?a) (not (on ?a ?t)))
+)
+
+; Pick up apple ?a from cabinet top ?c with hand ?h.
+(:action pick_apple_from_cabinet_top
+:parameters (?h ?a ?c)
+:precondition (and (hand ?h) (apple ?a) (cabinet ?c) (hand_free ?h) (on ?a ?c))
+:effect (and (not (hand_free ?h)) (holding ?h ?a) (not (on ?a ?c)))
+)
+
+; Pick up apple ?a from pot ?p with hand ?h.
+(:action pick_apple_from_pot
+:parameters (?h ?a ?p)
+:precondition (and (hand ?h) (apple ?a) (pot ?p) (hand_free ?h) (open ?p) (in ?a ?p))
+:effect (and (not (hand_free ?h)) (holding ?h ?a) (not (in ?a ?p)))
+)
+
+; Pick up block ?b1 from block ?b2 with hand ?h.
+(:action pick_block_from_block
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (block ?b1) (block ?b2) (hand_free ?h) (clear ?b1) (on ?b1 ?b2))
+:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)))
+)
+
+; Pick nested bowl ?b1 from bowl ?b2 with hand ?h.
+(:action pick_nested_bowl_from_bowl
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (hand_free ?h) (in ?b1 ?b2))
+:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (in ?b1 ?b2)))
+)
+
+; Pick up cup ?c from laptop ?l with hand ?h.
+(:action pick_cup_from_laptop
+:parameters (?h ?c ?l)
+:precondition (and (hand ?h) (cup ?c) (laptop ?l) (hand_free ?h) (on ?c ?l))
+:effect (and (not (hand_free ?h)) (holding ?h ?c) (clear ?l) (not (on ?c ?l)))
+)
+
+; Fill kettle ?k with water ?w from faucet ?f while holding it with hand ?h.
+(:action fill_kettle_from_faucet
+:parameters (?h ?k ?w ?f)
+:precondition (and (hand ?h) (kettle ?k) (water ?w) (faucet ?f) (holding ?h ?k) (open ?k) (is_on ?f) (dispenses ?f ?w))
+:effect (and (in ?w ?k))
+)
+
+; Scoop soup ?sp from pot ?p with spoon ?s held by hand ?h.
+(:action scoop_soup_from_pot_with_spoon
+:parameters (?h ?sp ?p ?s)
+:precondition (and (hand ?h) (soup ?sp) (pot ?p) (spoon ?s) (holding ?h ?s) (open ?p) (in ?sp ?p))
+:effect (and (not (in ?sp ?p)) (in ?sp ?s))
+)
+
+; Insert key ?k into drawer ?d with hand ?h.
+(:action insert_key_into_drawer
+:parameters (?h ?k ?d)
+:precondition (and (hand ?h) (key ?k) (drawer ?d) (holding ?h ?k))
+:effect (and (not (holding ?h ?k)) (hand_free ?h) (inserted ?k ?d))
+)
+
+; Remove lid ?l from pot ?p to open the pot with hand ?h.
+(:action remove_lid_from_pot
+:parameters (?h ?l ?p)
+:precondition (and (hand ?h) (lid ?l) (pot ?p) (hand_free ?h) (closed ?p) (on ?l ?p))
+:effect (and (not (hand_free ?h)) (holding ?h ?l) (not (closed ?p)) (open ?p) (not (on ?l ?p)))
+)
+
+; Unscrew cap ?cp from bottle ?b to open the bottle with hand ?h.
+(:action unscrew_cap_from_bottle
+:parameters (?h ?cp ?b)
+:precondition (and (hand ?h) (cap ?cp) (bottle ?b) (hand_free ?h) (closed ?b) (on ?cp ?b))
+:effect (and (not (hand_free ?h)) (holding ?h ?cp) (not (closed ?b)) (open ?b) (not (on ?cp ?b)))
+)
+
+### (2) Target only.
+
+; Place apple ?a in bowl ?b with hand ?h.
+(:action place_apple_in_bowl
+:parameters (?h ?a ?b)
+:precondition (and (hand ?h) (apple ?a) (bowl ?b) (holding ?h ?a))
+:effect (and (not (holding ?h ?a)) (hand_free ?h) (in ?a ?b))
+)
+
+; Place plate ?p flat on counter ?c with hand ?h.
+(:action place_plate_flat_on_counter
+:parameters (?h ?p ?c)
+:precondition (and (hand ?h) (plate ?p) (counter ?c) (holding ?h ?p) (vertical ?p))
+:effect (and (not (holding ?h ?p)) (hand_free ?h) (not (vertical ?p)) (flat ?p) (on ?p ?c))
+)
+
+; Place bowl ?b upright on table ?t with hand ?h.
+(:action place_bowl_upright_on_table
+:parameters (?h ?b ?t)
+:precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b) (upside_down ?b))
+:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (upright ?b) (on ?b ?t))
+)
+
+; Screw cap ?cp onto bottle ?b to close the bottle with hand ?h.
+(:action screw_cap_onto_bottle
+:parameters (?h ?cp ?b)
+:precondition (and (hand ?h) (cap ?cp) (bottle ?b) (holding ?h ?cp) (open ?b))
+:effect (and (not (holding ?h ?cp)) (hand_free ?h) (not (open ?b)) (closed ?b) (on ?cp ?b))
+)
+
+; Place lid ?l on pot ?p to close the pot with hand ?h.
+(:action place_lid_on_pot
+:parameters (?h ?l ?p)
+:precondition (and (hand ?h) (lid ?l) (pot ?p) (holding ?h ?l) (open ?p))
+:effect (and (not (holding ?h ?l)) (hand_free ?h) (not (open ?p)) (closed ?p) (on ?l ?p))
+)
+
+; Place trash can ?tc on floor ?f to unblock drawer ?d with hand ?h.
+(:action place_trash_can_on_floor_away_from_drawer
+:parameters (?h ?tc ?f ?d)
+:precondition (and (hand ?h) (trash_can ?tc) (floor ?f) (drawer ?d) (holding ?h ?tc) (blocking ?tc ?d))
+:effect (and (not (holding ?h ?tc)) (hand_free ?h) (not (blocking ?tc ?d)) (unblocked ?d) (on ?tc ?f))
+)
+
+### (3) From source to target.
+
+; Pour milk ?m from milk carton ?mc into cup ?c with hand ?h.
+(:action pour_milk_from_milk_carton_into_cup
+:parameters (?h ?m ?mc ?c ?t)
+:precondition (and (hand ?h) (milk ?m) (milk_carton ?mc) (cup ?c) (table ?t) (holding ?h ?mc) (open ?mc) (in ?m ?mc) (on ?c ?t))
+:effect (and (not (in ?m ?mc)) (in ?m ?c))
+)
+
+; Pour contents ?ct from cup ?c into bowl ?b on table ?t with hand ?h.
+(:action pour_contents_from_cup_into_bowl
+:parameters (?h ?ct ?c ?b ?t)
+:precondition (and (hand ?h) (contents ?ct) (cup ?c) (bowl ?b) (table ?t) (holding ?h ?c) (in ?ct ?c) (on ?b ?t))
+:effect (and (not (in ?ct ?c)) (in ?ct ?b))
+)
+
+## 2. State Change.
+
+; Open drawer ?d with hand ?h.
+(:action open_drawer
+:parameters (?h ?d)
+:precondition (and (hand ?h) (drawer ?d) (hand_free ?h) (closed ?d))
+:effect (and (not (closed ?d)) (open ?d))
+)
+
+; Open detergent drawer ?d with hand ?h.
+(:action open_detergent_drawer
+:parameters (?h ?d)
+:precondition (and (hand ?h) (detergent_drawer ?d) (hand_free ?h) (closed ?d))
+:effect (and (not (closed ?d)) (open ?d))
+)
+
+; Open washing machine ?wm with hand ?h.
+(:action open_washing_machine
+:parameters (?h ?wm)
+:precondition (and (hand ?h) (washing_machine ?wm) (hand_free ?h) (closed ?wm))
+:effect (and (not (closed ?wm)) (open ?wm))
+)
+
+; Open microwave ?m with hand ?h.
+(:action open_microwave
+:parameters (?h ?m)
+:precondition (and (hand ?h) (microwave ?m) (hand_free ?h) (closed ?m) (is_off ?m))
+:effect (and (not (closed ?m)) (open ?m))
+)
+
+; Open kettle ?k with an attached lid using hand ?h.
+(:action open_kettle
+:parameters (?h ?k)
+:precondition (and (hand ?h) (kettle ?k) (hand_free ?h) (closed ?k))
+:effect (and (not (closed ?k)) (open ?k))
+)
+
+; Lock drawer ?d with key ?k using hand ?h.
+(:action lock_drawer_with_key
+:parameters (?h ?d ?k)
+:precondition (and (hand ?h) (drawer ?d) (key ?k) (hand_free ?h) (closed ?d) (unlocked ?d) (inserted ?k ?d))
+:effect (and (not (unlocked ?d)) (locked ?d))
+)
+
+; Turn on microwave ?m to heat apple ?a inside with hand ?h.
+(:action turn_on_microwave
+:parameters (?h ?m ?a)
+:precondition (and (hand ?h) (microwave ?m) (apple ?a) (hand_free ?h) (closed ?m) (is_off ?m) (in ?a ?m))
+:effect (and (not (is_off ?m)) (is_on ?m))
+)
+
+; Turn off microwave ?m after heating apple ?a inside with hand ?h.
+(:action turn_off_microwave
+:parameters (?h ?m ?a)
+:precondition (and (hand ?h) (microwave ?m) (apple ?a) (hand_free ?h) (closed ?m) (is_on ?m) (in ?a ?m))
+:effect (and (not (is_on ?m)) (is_off ?m) (heated ?a))
+)
+
+; Turn on faucet ?f with hand ?h.
+(:action turn_on_faucet
+:parameters (?h ?f)
+:precondition (and (hand ?h) (faucet ?f) (hand_free ?h) (is_off ?f))
+:effect (and (not (is_off ?f)) (is_on ?f))
+)
+
+; Turn off faucet ?f with hand ?h.
+(:action turn_off_faucet
+:parameters (?h ?f)
+:precondition (and (hand ?h) (faucet ?f) (hand_free ?h) (is_on ?f))
+:effect (and (not (is_on ?f)) (is_off ?f))
+)
+
+; Turn off faucet ?f after rinsing bowl ?b in sink ?s with hand ?h.
+(:action turn_off_faucet_after_rinsing_bowl
+:parameters (?h ?f ?b ?s)
+:precondition (and (hand ?h) (faucet ?f) (bowl ?b) (sink ?s) (hand_free ?h) (is_on ?f) (in ?b ?s))
+:effect (and (not (is_on ?f)) (is_off ?f) (rinsed ?b) (has_water ?b))
+)
+
+; Hold bowl ?b under running faucet ?f with hand ?h until rinsed.
+(:action hold_bowl_under_running_faucet_until_rinsed
+:parameters (?h ?b ?f)
+:precondition (and (hand ?h) (bowl ?b) (faucet ?f) (holding ?h ?b) (is_on ?f))
+:effect (and (rinsed ?b) (has_water ?b))
+)
+
+; Hold sponge ?s under running faucet ?f with hand ?h until wet.
+(:action hold_sponge_under_running_faucet_until_wet
+:parameters (?h ?s ?f)
+:precondition (and (hand ?h) (sponge ?s) (faucet ?f) (holding ?h ?s) (is_on ?f))
+:effect (and (wet ?s))
+)
+
+; Pick up rinsed bowl ?b from sink ?s after faucet ?f is off with hand ?h.
+(:action pick_bowl_from_sink
+:parameters (?h ?b ?s ?f)
+:precondition (and (hand ?h) (faucet ?f) (bowl ?b) (sink ?s) (hand_free ?h) (is_off ?f) (rinsed ?b) (in ?b ?s))
+:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (in ?b ?s)))
+)
+
+; Wipe counter ?c with cloth ?cl with hand ?h.
+(:action wipe_counter_with_cloth
+:parameters (?h ?c ?cl)
+:precondition (and (hand ?h) (counter ?c) (cloth ?cl) (holding ?h ?cl))
+:effect (and (wiped ?c))
+)
+
+; Fold towel ?tw on table ?t with hand ?h.
+(:action fold_towel_on_table
+:parameters (?h ?tw ?t)
+:precondition (and (hand ?h) (towel ?tw) (table ?t) (hand_free ?h) (unfolded ?tw) (on ?tw ?t))
+:effect (and (not (unfolded ?tw)) (folded ?tw))
+)
+
+; Unfold cloth ?cl on counter ?c with hand ?h.
+(:action unfold_cloth_on_counter
+:parameters (?h ?cl ?c)
+:precondition (and (hand ?h) (cloth ?cl) (counter ?c) (hand_free ?h) (on ?cl ?c) (folded ?cl))
+:effect (and (not (folded ?cl)) (unfolded ?cl))
+)
+
+; Align rope ?r with black object ?o.
+( align_rope_with_black_object
+(?h ?r ?o)
+(and (hand ?h) (rope ?r) (black_object ?o) (holding ?h ?r))
+(and (aligned ?r ?o))
+)
+
+; Wash cup ?c with faucet ?f while holding it with hand ?h.
+(:action wash_cup_with_faucet
+:parameters (?h ?c ?f)
+:precondition (and (hand ?h) (cup ?c) (faucet ?f) (holding ?h ?c) (is_on ?f))
+:effect (and (washed ?c))
+)
+
+; Stir pot ?p with spoon ?s held by hand ?h.
+(:action stir_pot_with_spoon
+:parameters (?h ?s ?p)
+:precondition (and (hand ?h) (spoon ?s) (pot ?p) (holding ?h ?s) (open ?p))
+:effect (and (stirred ?p))
+)

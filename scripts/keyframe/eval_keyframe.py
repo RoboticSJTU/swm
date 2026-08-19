@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from swm.utils.apis import call_gpt_json
+from swm.llm import call_gpt_json
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]

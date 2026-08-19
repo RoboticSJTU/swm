@@ -1,13 +1,16 @@
-from pathlib import Path
 import os
+import re
 import signal
 import subprocess
 import sys
-from swm.utils.pddl.plan_reorder import plan_reorder
-import re
-fast_downward_path = Path(__file__).parent.parent.parent.parent.parent / "downward" / "fast-downward.py"
+from pathlib import Path
+
+from swm.pddl.reorder import plan_reorder
+
+fast_downward_path = Path(__file__).parents[3] / "downward" / "fast-downward.py"
 _FAST_DOWNWARD_TIME_LIMIT_SECONDS = 60
 _SOLVER_WALL_TIMEOUT_SECONDS = 60
+
 
 def summarize_solver_error(log: str) -> str:
     """Compress a Fast Downward failure log into one short message."""
@@ -20,11 +23,21 @@ def summarize_solver_error(log: str) -> str:
     prefix = f"Fast Downward {stage.lower()} failed (exit {code})"
     action = re.findall(r"Parsing action '([^']+)'", log)
     location = f" in action '{action[-1]}'" if action else ""
-    match = re.search(r"(?:Undefined|Undeclared)\s+(predicate|object|variable)\s*\nGot:\s*([^\n]+)", log, re.I)
+    match = re.search(
+        r"(?:Undefined|Undeclared)\s+(predicate|object|variable)\s*\nGot:\s*([^\n]+)",
+        log,
+        re.IGNORECASE,
+    )
 
     if match:
-        detail = f"undefined {match.group(1).lower()} '{match.group(2).strip()}'{location}"
-    elif match := re.search(r"Predicate '([^']+)' of arity (\d+) used\s+with (\d+) arguments", log, re.I):
+        detail = (
+            f"undefined {match.group(1).lower()} '{match.group(2).strip()}'{location}"
+        )
+    elif match := re.search(
+        r"Predicate '([^']+)' of arity (\d+) used\s+with (\d+) arguments",
+        log,
+        re.IGNORECASE,
+    ):
         detail = f"predicate '{match.group(1)}' expects {match.group(2)} arguments but got {match.group(3)}{location}"
     elif re.search(r"Expected .*words:\s*:domain", log, re.IGNORECASE):
         detail = "the problem is missing the required (:domain NAME) block"
@@ -32,17 +45,37 @@ def summarize_solver_error(log: str) -> str:
         detail = match.group(1).strip()
     elif "No relaxed solution" in log or re.search(r"no solution", log, re.IGNORECASE):
         operators = re.search(r"Translator operators:\s*(\d+)", log)
-        detail = "no plan was found" + (" and the translator produced no grounded operators" if operators and operators.group(1) == "0" else "")
+        detail = "no plan was found" + (
+            " and the translator produced no grounded operators"
+            if operators and operators.group(1) == "0"
+            else ""
+        )
     elif code == "30":
         detail = "the translator crashed while compiling the PDDL task"
     elif code == "31":
-        lines = re.split(r"translate exit code", log, flags=re.I)[0].splitlines()
-        detail = next((line.strip() for line in reversed(lines) if line.strip() and not re.match(r"(?:INFO|Parsing|->)", line.strip())), "invalid PDDL input")
+        lines = re.split(r"translate exit code", log, flags=re.IGNORECASE)[
+            0
+        ].splitlines()
+        detail = next(
+            (
+                line.strip()
+                for line in reversed(lines)
+                if line.strip() and not re.match(r"(?:INFO|Parsing|->)", line.strip())
+            ),
+            "invalid PDDL input",
+        )
     elif code == "34":
         detail = "the requested search configuration is unsupported"
     else:
-        diagnostics = re.findall(r"(?im)^\s*((?:\w*(?:Error|Exception):|Reason:|Critical error:|Expected |Missing |Unsupported |Invalid ).+)$", log)
-        detail = diagnostics[-1].strip() if diagnostics else "the planner failed without a diagnostic message"
+        diagnostics = re.findall(
+            r"(?im)^\s*((?:\w*(?:Error|Exception):|Reason:|Critical error:|Expected |Missing |Unsupported |Invalid ).+)$",
+            log,
+        )
+        detail = (
+            diagnostics[-1].strip()
+            if diagnostics
+            else "the planner failed without a diagnostic message"
+        )
 
     detail = re.sub(r"\s+", " ", detail).strip().rstrip(".")[:240]
     return f"{prefix}: {detail}."
@@ -125,7 +158,7 @@ def solve_pddl(domain_file, problem_file, *, reorder_plan=True):
         domain_file,
         problem_file,
         "--search",
-        "astar(lmcut())"
+        "astar(lmcut())",
     ]
     try:
         _run_fast_downward(cmd, domain_file.parent)

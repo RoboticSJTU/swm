@@ -1,0 +1,50 @@
+# Task
+
+Your task is to diagnose why the previous PDDL domain and problem failed, use the planner output and failure feedback to identify the necessary corrections, and regenerate a valid, executable, and task-correct PDDL domain and problem.
+
+# INPUT
+
+- Instruction: {instruction_with_steps}
+- Initial-scene image
+- Robot configuration: {robot_configuration}
+
+# PREVIOUS FAILED ATTEMPT
+
+## Domain
+
+{failed_domain}
+
+## Problem
+
+{failed_problem}
+
+## Output from PDDL planner
+
+{failed_plan}
+
+## Failure Feedback
+
+{feedback}
+
+# RULES
+
+{rules}
+
+# OPTIONAL OPERATOR REFERENCES
+
+{action_template}
+
+# REASONING PROCESS
+
+(a) Failure diagnosis: identify the key issues in the previous attempt.
+(b) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
+(c) Domain construction: Based on the scene understanding and action templates, define only the necessary action definitions in the causal execution order. Before output, check that Domain `:predicates` has no duplicate predicate name+arity.
+(d) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
+
+Return exactly one valid JSON object and no Markdown code fence or surrounding text. `reasoning` must concisely report the analysis above. `domain` and `problem` must be complete PDDL strings, not nested objects. Escape their contents as required by JSON.
+
+{{
+  "reasoning": "a four-part analysis with the following structure: (a) Failure diagnosis. (b) Scene understanding. (c) Domain construction. (d) Problem construction.",
+  "domain": "complete PDDL domain string",
+  "problem": "complete PDDL problem string"
+}}

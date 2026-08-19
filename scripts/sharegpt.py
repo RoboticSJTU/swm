@@ -4,15 +4,20 @@
 主要流程：
 1. 读取 instruction，规范唯一对象编号和 on 堆叠顺序；
 2. 删除缺少文件、评测未通过或不在 instruction 中的 episode；
-3. 删除未使用谓词，统一 domain/problem 的 PDDL 格式，并查找对应图片；
-4. 组装 user/assistant 消息，合并各数据集后写入 JSON。
+3. 检查 :init 中冲突状态，冲突 episode 保留但不写入训练集；
+4. 仅保留 plan 使用的 action/predicate；
+5. 回写清洗后的 domain/problem，并生成 ShareGPT JSON。
 
-注意：运行时会改写 problem.pddl，并直接删除无效 episode 目录。
+注意：无效 episode 会直接删除；需要人工复核的 :init 冲突只在终端汇报并跳过训练输出。
 """
 
 import json
+import os
 import re
 import shutil
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -20,6 +25,10 @@ from pathlib import Path
 # 配置：只需要修改这里
 # ============================================================
 ROOT_DIR = Path(__file__).resolve().parent.parent
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 MODEL_NAME = "gpt-5.6-sol"
 PDDL_DOMAIN_NAME = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
@@ -32,9 +41,8 @@ OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/{'_'.join(TASK_DOMAINS)}.
 ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+MAX_WORKERS = 1000
 
-# block1 和 wooden_block1 表示真实的多个实例，不删除编号。
-KEEP_NUMBERED_PREFIXES = ("block", "wooden_block")
 
 
 # ============================================================
@@ -48,23 +56,20 @@ def remove_comments(text):
 
 def parse_pddl(text):
     tokens = re.findall(r"\(|\)|[^\s()]+", remove_comments(text))
-    stack = []
-    root = None
+    root = []
+    stack = [root]
 
     for token in tokens:
         if token == "(":
             expression = []
-            if stack:
-                stack[-1].append(expression)
+            stack[-1].append(expression)
             stack.append(expression)
         elif token == ")":
-            root = stack.pop()
+            stack.pop()
         else:
             stack[-1].append(token)
 
-    if stack:
-        raise ValueError("PDDL 括号不完整")
-    return root
+    return root[0]
 
 
 def pddl_line(expression):
@@ -101,16 +106,55 @@ def predicate_name(expression):
     return expression_head(expression)
 
 
-def referenced_predicates(domain_text, problem_text):
-    """返回 operator 和 problem 实际使用的已声明谓词名。"""
-    domain = parse_pddl(domain_text)
-    problem = parse_pddl(problem_text)
-    declared = {
+def action_sections(domain):
+    """按大小写无关的 action 名建立映射。"""
+    return {
+        section[1].lower(): section
+        for section in domain[2:]
+        if expression_head(section) == ":action"
+    }
+
+
+def plan_action_names(plan_text):
+    """读取 plan 中 action 的首次出现顺序。"""
+    actions = []
+    seen = set()
+    for raw_line in plan_text.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if not line or raw_line.lstrip().startswith((";", "#")):
+            continue
+        line = re.sub(r"^[\d.]+\s*:\s*", "", line)
+        line = re.sub(r"\s*\[\s*[\d.]+\s*\]\s*$", "", line).strip()
+        match = re.fullmatch(r"\(\s*([^\s()]+)(?:\s+[^()]*)?\)", line)
+        if match is None:
+            continue
+        name = match.group(1).lower()
+        if name not in seen:
+            actions.append(name)
+            seen.add(name)
+    return actions
+
+
+def ordered_actions(domain, plan_actions):
+    actions = action_sections(domain)
+    return [actions[name] for name in plan_actions]
+
+
+def predicate_declarations(domain):
+    return {
         predicate_name(predicate)
         for section in domain[2:]
         if expression_head(section) == ":predicates"
         for predicate in section[1:]
     }
+
+
+def referenced_predicates(domain_text, problem_text, plan_actions):
+    """返回保留 operator 和 problem 实际使用的已声明谓词名。"""
+    domain = parse_pddl(domain_text)
+    problem = parse_pddl(problem_text)
+    declared = predicate_declarations(domain)
+    selected_actions = set(plan_actions)
     referenced = set()
 
     def collect(expression):
@@ -123,78 +167,93 @@ def referenced_predicates(domain_text, problem_text):
             collect(item)
 
     for section in domain[2:]:
-        if expression_head(section) == ":action":
-            collect(section)
+        section_name = expression_head(section)
+        if section_name == ":predicates":
+            continue
+        if section_name == ":action" and section[1].lower() not in selected_actions:
+            continue
+        collect(section)
     collect(problem)
     return referenced
 
 
-def predicate_order(domain_text):
-    """
-    按 :predicates 中的空行分组和定义顺序，记录每个谓词的排序位置。
-    """
-    text = remove_comments(domain_text)
-    span = section_span(text, ":predicates")
-    if span is None:
-        return {}
+def action_comments(domain_text):
+    comments = {}
+    lines = domain_text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.search(r"\(\s*:action\s+([^\s()]+)", line, re.IGNORECASE)
+        if match is None or ";" in line[:match.start()]:
+            continue
+        previous = index - 1
+        while previous >= 0 and not lines[previous].strip():
+            previous -= 1
+        if previous >= 0 and lines[previous].lstrip().startswith(";"):
+            comments[match.group(1).lower()] = lines[previous].strip()
+    return comments
 
-    section = text[span[0]:span[1]]
-    body_start = re.match(r"\(\s*:predicates\b", section, re.I).end()
-    order = {}
-    group = 0
-    predicate_index = 0
-    previous_end = body_start
+
+def expression_end(text, start):
+    """找到从 start 处左括号开始的 PDDL 表达式末尾，忽略行注释。"""
     depth = 0
-    start = 0
-
-    for index in range(body_start, len(section) - 1):
-        if section[index] == "(":
-            if depth == 0:
-                start = index
+    in_comment = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if in_comment:
+            if character == "\n":
+                in_comment = False
+            continue
+        if character == ";":
+            in_comment = True
+        elif character == "(":
             depth += 1
-        elif section[index] == ")":
+        elif character == ")":
             depth -= 1
             if depth == 0:
-                if predicate_index and re.search(r"\n[ \t]*\n", section[previous_end:start]):
-                    group += 1
-                expression = parse_pddl(section[start:index + 1])
-                order[predicate_name(expression)] = (group, predicate_index)
-                predicate_index += 1
-                previous_end = index + 1
-
-    return order
+                return index + 1
+    return len(text)
 
 
-def sort_facts(facts, order, keep_order_inside_group=False):
-    def rank(item):
-        index, fact = item
-        name = predicate_name(fact)
-        if name in order:
-            group, position = order[name]
-        else:
-            group, position = 10_000, 100_000 + index
-        if keep_order_inside_group:
-            position = index
-        return group, position, index
+def raw_action_blocks(domain_text):
+    """按 action 名提取原始文本，避免改写 LLM 给出的 pre/eff 排版。"""
+    blocks = {}
+    pattern = re.compile(r"\(\s*:action\s+([^\s()]+)", re.IGNORECASE)
+    for match in pattern.finditer(domain_text):
+        line_start = domain_text.rfind("\n", 0, match.start()) + 1
+        if ";" in domain_text[line_start:match.start()]:
+            continue
+        name = match.group(1).lower()
+        end = expression_end(domain_text, match.start())
+        blocks[name] = domain_text[match.start():end].rstrip()
+    return blocks
 
-    return [fact for _, fact in sorted(enumerate(facts), key=rank)]
+
+def append_action(lines, action, blocks, comments=None):
+    name = action[1]
+    if comments is not None and name.lower() in comments:
+        lines.append("  " + comments[name.lower()])
+    lines.append("  " + blocks[name.lower()])
 
 
-def format_domain(domain_text, order, referenced):
+def domain_name(domain):
+    return domain[1][1]
+
+
+def render_domain(domain_text, referenced, plan_actions, source=False):
+    """渲染同一份 action 子集，并原样保留每个 action 的内部文本。"""
     domain = parse_pddl(domain_text)
-    if expression_head(domain) != "define":
-        raise ValueError("domain.pddl 缺少 define")
-    lines = [f"(define (domain {PDDL_DOMAIN_NAME})"]
+    selected_actions = ordered_actions(domain, plan_actions)
+    blocks = raw_action_blocks(domain_text)
+    comments = action_comments(domain_text) if source else None
+    name = domain_name(domain) if source else PDDL_DOMAIN_NAME
+    lines = [f"(define (domain {name})"]
 
     for section in domain[2:]:
-        name = expression_head(section)
-        if name in (":requirements", ":types"):
+        section_name = expression_head(section)
+        if section_name == ":action":
             continue
-
         if len(lines) > 1:
             lines.append("")
-
-        if name == ":predicates":
+        if section_name == ":predicates":
             lines.append("  (:predicates")
             lines.extend(
                 "    " + pddl_line(predicate)
@@ -202,22 +261,66 @@ def format_domain(domain_text, order, referenced):
                 if predicate_name(predicate) in referenced
             )
             lines.append("  )")
-        elif name == ":action":
-            lines.append(f"  (:action {section[1]}")
-            for key in (":parameters", ":precondition", ":effect"):
-                if key not in section:
-                    continue
-                value = section[section.index(key) + 1]
-                if key != ":parameters" and expression_head(value) == "and":
-                    facts = sort_facts(value[1:], order, keep_order_inside_group=True)
-                    value = ["and", *facts]
-                lines.append(f"    {key} {pddl_line(value)}")
-            lines.append("  )")
         else:
             lines.append("  " + pddl_line(section))
 
+    for action in selected_actions:
+        if len(lines) > 1:
+            lines.append("")
+        append_action(lines, action, blocks, comments)
+
     lines.append(")")
-    return "\n".join(lines)
+    return "\n".join(lines) + ("\n" if source else "")
+
+
+def format_domain(domain_text, referenced, plan_actions):
+    """ShareGPT 使用的简化 domain；action 结构与源文件保持同一顺序。"""
+    return render_domain(
+        domain_text,
+        referenced,
+        plan_actions,
+        source=False,
+    )
+
+
+def format_source_domain(domain_text, problem_text, plan_actions):
+    """用于回写的 domain，保留原 domain 名、requirements 与 action 注释。"""
+    referenced = referenced_predicates(domain_text, problem_text, plan_actions)
+    return render_domain(
+        domain_text,
+        referenced,
+        plan_actions,
+        source=True,
+    )
+
+
+def init_conflicts(problem_text):
+    """返回 :init 中需要人工复核的冲突状态。"""
+    problem = parse_pddl(problem_text)
+    for section in problem[2:]:
+        if expression_head(section) != ":init":
+            continue
+
+        conflicts = []
+        supports = {}
+        held = set()
+        clear = set()
+
+        for atom in section[1:]:
+            name = expression_head(atom)
+            if name == "on" and len(atom) == 3:
+                supports.setdefault(atom[1], []).append(atom[2])
+            elif name == "holding" and len(atom) == 3:
+                held.add(atom[2])
+            elif name == "clear" and len(atom) == 2:
+                clear.add(atom[1])
+
+        for above, belows in supports.items():
+            if len(set(belows)) > 1:
+                conflicts.extend(f"(on {above} {below})" for below in belows)
+        conflicts.extend(f"(holding * {obj}) + (clear {obj})" for obj in sorted(held & clear))
+        return conflicts
+    return []
 
 
 def reorder_stacks(atoms, goal=False):
@@ -236,7 +339,7 @@ def reorder_stacks(atoms, goal=False):
             same_above[atom[1]] = []
         same_above[atom[1]].append((index, atom))
 
-    # 如果同一物体同时在多个物体上，该关系有歧义，不加入链。
+    # 冲突关系已在 episode 处理阶段拦截；这里仍不对歧义关系做自动猜测。
     links = {
         above: records[0]
         for above, records in same_above.items()
@@ -283,10 +386,8 @@ def reorder_stacks(atoms, goal=False):
     return result
 
 
-def format_problem(problem_text, order):
+def format_problem(problem_text):
     problem = parse_pddl(problem_text)
-    if expression_head(problem) != "define":
-        raise ValueError("problem.pddl 缺少 define")
     objects = None
     init = None
     goal = None
@@ -317,7 +418,7 @@ def format_problem(problem_text, order):
         lines.append("  (:objects " + " ".join(object_names) + ")")
 
     if init is not None:
-        atoms = reorder_stacks(sort_facts(init[1:], order))
+        atoms = reorder_stacks(init[1:])
         lines.append("  (:init")
         lines.extend("    " + pddl_line(atom) for atom in atoms)
         lines.append("  )")
@@ -326,7 +427,7 @@ def format_problem(problem_text, order):
         lines.append("  (:goal")
         condition = goal[1]
         if expression_head(condition) == "and":
-            atoms = reorder_stacks(sort_facts(condition[1:], order), goal=True)
+            atoms = reorder_stacks(condition[1:], goal=True)
             lines.append("    (and")
             lines.extend("      " + pddl_line(atom) for atom in atoms)
             lines.append("    )")
@@ -339,9 +440,8 @@ def format_problem(problem_text, order):
     return "\n".join(lines)
 
 
-def reorder_problem_file(problem_path):
-    """只在原 problem.pddl 的 :init/:goal 中写回堆叠顺序。"""
-    text = problem_path.read_text(encoding="utf-8")
+def reorder_problem_text(text):
+    """只重排 :init/:goal 中已存在的堆叠关系，不直接写文件。"""
     replacements = []
 
     for section_name in (":init", ":goal"):
@@ -369,8 +469,7 @@ def reorder_problem_file(problem_path):
 
     for start, end, section in reversed(replacements):
         text = text[:start] + section + text[end:]
-    if replacements:
-        problem_path.write_text(text, encoding="utf-8")
+    return text
 
 
 # ============================================================
@@ -390,13 +489,6 @@ def episode_dirs(eval_root):
     return sorted(path for path in paths if path.is_dir())
 
 
-def problem_path(episode_dir):
-    round_dir = latest_round(episode_dir)
-    if round_dir is None or not (round_dir / "problem.pddl").is_file():
-        return None
-    return round_dir / "problem.pddl"
-
-
 def init_hand_states(problem_text):
     problem = parse_pddl(problem_text)
     for section in problem[2:]:
@@ -408,9 +500,8 @@ def init_hand_states(problem_text):
     return []
 
 
-def rename_numbered_objects(path):
+def rename_numbered_objects_text(text):
     """仅将唯一的 object1 改为 object；存在多实例歧义时不改名。"""
-    text = path.read_text(encoding="utf-8")
     objects = []
     for section in parse_pddl(text)[2:]:
         if expression_head(section) != ":objects":
@@ -427,7 +518,7 @@ def rename_numbered_objects(path):
     groups = {}
     for name in objects:
         match = re.fullmatch(r"(.+?)(?:_)?(\d+)", name)
-        if match is None or name.lower().startswith(KEEP_NUMBERED_PREFIXES):
+        if match is None:
             continue
         base, number = match.group(1), int(match.group(2))
         if base not in groups:
@@ -447,25 +538,35 @@ def rename_numbered_objects(path):
             rename_map[names_ending_in_one[0]] = base
 
     if needs_review or not rename_map:
-        return
+        return text
 
     names = sorted(rename_map, key=len, reverse=True)
     pattern = re.compile(
         r"(?<![A-Za-z0-9_\-])(" + "|".join(re.escape(name) for name in names) + r")(?![A-Za-z0-9_\-])"
     )
-    text = pattern.sub(lambda match: rename_map[match.group(1)], text)
-    path.write_text(text, encoding="utf-8")
+    return pattern.sub(lambda match: rename_map[match.group(1)], text)
 
 
-def preprocess_problems(eval_root):
-    for episode in episode_dirs(eval_root):
-        path = problem_path(episode)
-        if path is not None:
-            try:
-                rename_numbered_objects(path)
-                reorder_problem_file(path)
-            except Exception as error:
-                print(f"[PDDL ERROR] {path}: {error}")
+def preprocess_problem_text(text):
+    """把 problem 的局部规范化纳入同一次事务式回写。"""
+    return reorder_problem_text(rename_numbered_objects_text(text))
+
+
+def atomic_write(path, text):
+    """避免求解或格式化异常时留下半写入的单个 PDDL 文件。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary:
+        temporary.write(text)
+        temporary_path = Path(temporary.name)
+    temporary_path.replace(path)
+
+
 
 
 # ============================================================
@@ -516,13 +617,9 @@ def find_image(task_domain, task_id, episode_id):
 
 
 def process_domain(task_domain, prompt_template):
-    print(f"\n========== {task_domain} ==========")
     eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
     records = read_instructions(task_domain)
     allowed = {(task_id, episode_id) for task_id, episode_id, _ in records}
-
-    # 先预处理 problem.pddl，再删除无效 episode。
-    preprocess_problems(eval_root)
 
     valid_rounds = {}
     removed = 0
@@ -540,7 +637,7 @@ def process_domain(task_domain, prompt_template):
         if valid:
             try:
                 judge = json.loads(judge_path.read_text(encoding="utf-8"))
-                valid = "pass" in judge and judge["pass"] is True
+                valid = judge.get("pass") is True
             except json.JSONDecodeError:
                 valid = False
 
@@ -550,18 +647,80 @@ def process_domain(task_domain, prompt_template):
             shutil.rmtree(episode)
             removed += 1
 
-    # 删除 episode 清理后产生的空 task 目录。
     for path in eval_root.iterdir():
         if path.is_dir() and not path.name.startswith("episode") and not any(path.iterdir()):
             path.rmdir()
 
-    errors = []
-    if ROBOT_CONFIGURATION == "single-arm":
-        for round_dir in valid_rounds.values():
-            path = round_dir / "problem.pddl"
-            hand_states = init_hand_states(path.read_text(encoding="utf-8"))
-            if len(hand_states) > 1:
-                errors.append(f"{path.relative_to(ROOT_DIR)}: {' | '.join(hand_states)}")
+    review_messages = []
+    init_reviews = []
+    prepared_rounds = {}
+    pddl_errors = []
+
+    def prepare_round(key, round_dir):
+        try:
+            domain_raw = (round_dir / "domain.pddl").read_text(encoding="utf-8")
+            problem_raw = (round_dir / "problem.pddl").read_text(encoding="utf-8")
+            plan_raw = (round_dir / "plan.txt").read_text(encoding="utf-8")
+
+            conflicts = init_conflicts(problem_raw)
+            if conflicts:
+                problem_path = (round_dir / "problem.pddl").relative_to(ROOT_DIR)
+                message = f"{problem_path}: " + " | ".join(conflicts)
+                return key, None, "[INIT CONFLICT] " + message, message, None
+
+            source_problem = preprocess_problem_text(problem_raw)
+            plan_actions = plan_action_names(plan_raw)
+            source_domain = format_source_domain(domain_raw, source_problem, plan_actions)
+
+            if source_domain != domain_raw:
+                atomic_write(round_dir / "domain.pddl", source_domain)
+            if source_problem != problem_raw:
+                atomic_write(round_dir / "problem.pddl", source_problem)
+
+            referenced = referenced_predicates(domain_raw, source_problem, plan_actions)
+            prepared = (
+                format_domain(domain_raw, referenced, plan_actions),
+                format_problem(source_problem),
+            )
+
+            review = None
+            if ROBOT_CONFIGURATION == "single-arm":
+                hand_states = init_hand_states(source_problem)
+                if len(hand_states) > 1:
+                    message = (
+                        f"{(round_dir / 'problem.pddl').relative_to(ROOT_DIR)}: "
+                        + " | ".join(hand_states)
+                    )
+                    review = "[HAND STATE] " + message
+
+            return key, prepared, review, None, None
+        except Exception as error:
+            message = f"{round_dir.relative_to(ROOT_DIR)}: {error}"
+            return key, None, "[PDDL SKIP] " + message, None, message
+
+    results = {}
+    workers = min(MAX_WORKERS, len(valid_rounds)) if valid_rounds else 1
+    print(f"[{task_domain}] preparing {len(valid_rounds)} episode(s) with {workers} threads")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(prepare_round, key, round_dir)
+            for key, round_dir in valid_rounds.items()
+        ]
+        for future in as_completed(futures):
+            key, prepared, review, init_review, pddl_error = future.result()
+            results[key] = (prepared, review, init_review, pddl_error)
+
+    # 按原 episode 顺序汇总，保证输出顺序不因并发而变化。
+    for key in valid_rounds:
+        prepared, review, init_review, pddl_error = results[key]
+        if prepared is not None:
+            prepared_rounds[key] = prepared
+        if review is not None:
+            review_messages.append(review)
+        if init_review is not None:
+            init_reviews.append(init_review)
+        if pddl_error is not None:
+            pddl_errors.append(pddl_error)
 
     samples = []
     missing_episode = 0
@@ -571,24 +730,15 @@ def process_domain(task_domain, prompt_template):
         if key not in valid_rounds:
             missing_episode += 1
             continue
+        if key not in prepared_rounds:
+            continue
 
         image_path = find_image(task_domain, task_id, episode_id)
         if image_path is None:
             missing_image += 1
             continue
 
-        round_dir = valid_rounds[key]
-        try:
-            domain_raw = (round_dir / "domain.pddl").read_text(encoding="utf-8")
-            problem_raw = (round_dir / "problem.pddl").read_text(encoding="utf-8")
-            order = predicate_order(domain_raw)
-            referenced = referenced_predicates(domain_raw, problem_raw)
-            domain_text = format_domain(domain_raw, order, referenced)
-            problem_text = format_problem(problem_raw, order)
-        except Exception as error:
-            print(f"[PDDL ERROR] {task_id}/{episode_id}: {error}")
-            continue
-
+        domain_text, problem_text = prepared_rounds[key]
         samples.append({
             "messages": [
                 {
@@ -605,36 +755,42 @@ def process_domain(task_domain, prompt_template):
             "images": [image_path],
         })
 
-    print(f"instructions    : {len(records)}")
-    print(f"removed episode: {removed}")
-    print(f"missing episode: {missing_episode}")
-    print(f"missing image  : {missing_image}")
-    print(f"saved samples  : {len(samples)}")
-    return samples, errors
+    print(
+        f"[{task_domain}] saved={len(samples)}/{len(records)}  "
+        f"removed={removed}  missing_episode={missing_episode}  "
+        f"missing_image={missing_image}  init_review={len(init_reviews)}  "
+        f"pddl_skip={len(pddl_errors)}"
+    )
+    if init_reviews:
+        print("  [REVIEW init] :init 中发现冲突状态，以下 episode 已保留但未写入训练集：")
+        for message in init_reviews:
+            print("   - " + message)
+
+    return samples, review_messages
 
 
 def main():
     prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
     samples = []
-    errors = []
+    review_messages = []
     for task_domain in TASK_DOMAINS:
-        domain_samples, domain_errors = process_domain(task_domain, prompt_template)
+        domain_samples, domain_reviews = process_domain(task_domain, prompt_template)
         samples.extend(domain_samples)
-        errors.extend(domain_errors)
+        review_messages.extend(domain_reviews)
 
     OUT_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_JSON_PATH.write_text(
         json.dumps(samples, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    if errors:
-        ERROR_LOG_PATH.write_text("\n".join(errors) + "\n", encoding="utf-8")
-        print(f"single-arm errors: {len(errors)}")
-        print(f"error log       : {ERROR_LOG_PATH}")
+
+    if review_messages:
+        ERROR_LOG_PATH.write_text("\n".join(review_messages) + "\n", encoding="utf-8")
+        print(f"[review] {len(review_messages)} issue(s) -> {ERROR_LOG_PATH}")
     else:
         ERROR_LOG_PATH.unlink(missing_ok=True)
-    print(f"\ntotal samples: {len(samples)}")
-    print(f"output       : {OUT_JSON_PATH}")
+
+    print(f"[done] samples={len(samples)} -> {OUT_JSON_PATH}")
 
 
 if __name__ == "__main__":

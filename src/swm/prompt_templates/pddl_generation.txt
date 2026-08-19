@@ -1,34 +1,31 @@
-# TASK
+# Task
 
-{task_description}
+You are an expert in writing a PDDL domain and problem grounded in the given image and instruction for robot task planning.
 
-# INPUTS
+# INPUT
 
 - Instruction: {instruction_with_steps}
-- Image of the initial scene
+- Initial-scene image
 - Robot configuration: {robot_configuration}
 
-{arm_abstraction}
-
-{failure_context}
+# RULES
 
 {rules}
 
-# PDDL ACTION TEMPLATE
-
-Adapt as needed to complete the specific task.
+# OPTIONAL OPERATOR REFERENCES
 
 {action_template}
 
-# Reasoning Process
+# REASONING PROCESS
 
-{reasoning_process}
+(a) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
+(b) Domain construction: Based on the scene understanding and action templates, define only the necessary action definitions in the causal execution order. Before output, check that Domain `:predicates` has no duplicate predicate name+arity.
+(c) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
 
-# Output Format
+Return exactly one valid JSON object and no Markdown code fence or surrounding text.
 
-MUST output valid JSON without any markdown code block (e.g., ```json).
 {{
-  "reasoning": "{reasoning_schema}",
-  "domain": "String format PDDL domain, not dict.",
-  "problem": "String format PDDL problem, not dict."
+  "reasoning": "a three-part analysis with the following structure. (a) Scene understanding. (b) Domain construction. (c) Problem construction.",
+  "domain": "complete PDDL domain string",
+  "problem": "complete PDDL problem string"
 }}

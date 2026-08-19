@@ -6,10 +6,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import traceback
-from swm.utils.plan_learning import get_prompt_from_template
-from swm.utils.apis import call_gpt, call_gpt_json
-from swm.utils.pddl.judge import judge_pddl, latest_round_problem
-from swm.utils.pddl.planer import solve_pddl
+from swm.llm import call_gpt, call_gpt_json
+from swm.pddl.judge import judge_pddl, latest_round_problem
+from swm.pddl.planner import solve_pddl
 
 # =========================
 # 基本配置
@@ -385,8 +384,7 @@ def generate_one(task: dict):
 
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        prompt = get_prompt_from_template(
-            prompt_path,
+        prompt = prompt_path.read_text(encoding="utf-8").format(
             instruction=instruction,
             robot_configuration=ROBOT_CONFIGURATION,
         )

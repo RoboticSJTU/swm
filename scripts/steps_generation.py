@@ -33,7 +33,7 @@ MAX_RETRIES = 3
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from swm.utils.apis import call_gpt_json
+from swm.llm import call_gpt_json
 
 
 LOW_LEVEL_PATTERNS = [
