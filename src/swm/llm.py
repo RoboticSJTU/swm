@@ -27,7 +27,7 @@ def get_client(model: str):
         base_url = "https://apicz.boyuerichdata.com/v1"
 
     elif model.startswith("Qwen3.8-27B"):
-        api_key = os.getenv("QWEN_API_KEY")
+        api_key = "T+Hbc1AGOcqRXEUwL4NtRaLLOP/ElhphB5jhMgHiiiQ="
         base_url = "https://x.openapi-qb.sii.edu.cn/v1"
 
     else:
@@ -40,7 +40,6 @@ def call_gpt(
     model: str,
     prompt: str,
     image_paths: list[Path] | None = None,
-    temperature: float | None = None,
 ) -> str:
     content = [{"type": "text", "text": prompt}]
     if image_paths:
@@ -54,18 +53,16 @@ def call_gpt(
                 }
             )
 
-    if temperature is None:
-        temperature = 0.7 if model.startswith("Qwen3.5") else 0.3
+    client = get_client(model)
 
     kwargs = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
-        "temperature": temperature,
     }
-    if model.startswith("Qwen3.5"):
-        kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
-    client = get_client(model)
+    if str(client.base_url).startswith("http://127.0.0.1") or model.startswith(("gemini", "gpt")):
+        kwargs["temperature"] = 0
+
     try:
         return client.chat.completions.create(**kwargs).choices[0].message.content
     finally:

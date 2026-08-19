@@ -16,7 +16,7 @@ from swm.pddl.planner import solve_pddl
 root_dir = Path(__file__).resolve().parent.parent
 
 eval_model = "9B_3e"
-judge_model = "gpt-5.6-sol"
+judge_model = "gpt-5.6-sol"  # Qwen3.8-27B
 translate_model = "qwen3.7-plus"  
 ROBOT_CONFIGURATION = "single-arm"
 

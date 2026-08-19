@@ -24,7 +24,8 @@ DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol" / "human_aug"
 UNIFIED_DOMAIN = DATASET_ROOT / "unified_domain.pddl"
 CLASSIFICATION_FILE = DATASET_ROOT / "predicate_classification.json"
 MODEL = "gpt-5.6-sol"
-WORKERS = 16
+WORKERS = 100
+OPERATOR_BATCH_SIZE = 50
 CLASSIFICATION_ATTEMPTS = 3
 ROUND_RE = re.compile(r"round[_-]?(\d+)$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")
@@ -200,7 +201,12 @@ def predicate_arity(declaration: list[Node]) -> int:
     return sum(isinstance(item, str) and item.startswith("?") for item in declaration[1:])
 
 
-def validate_labels(data: dict[str, Any], signatures: dict[str, int], digest: str) -> Labels:
+def validate_labels(
+    data: dict[str, Any],
+    signatures: dict[str, int],
+    digest: str,
+    check_mutex_groups: bool = True,
+) -> Labels:
     if data["unified_domain_sha256"] != digest:
         raise ValueError("classification was generated from a different unified domain")
 
@@ -246,7 +252,7 @@ def validate_labels(data: dict[str, Any], signatures: dict[str, int], digest: st
     if missing:
         raise ValueError(f"classification is missing predicates: {', '.join(missing)}")
     singletons = [f"{group}={names[0]}" for group, names in groups.items() if len(names) == 1]
-    if singletons:
+    if check_mutex_groups and singletons:
         raise ValueError("mutex groups must contain at least two predicates: " + ", ".join(singletons))
 
     anchors = {group: min(names) for group, names in groups.items()}
@@ -263,10 +269,63 @@ def validate_labels(data: dict[str, Any], signatures: dict[str, int], digest: st
     return labels
 
 
-def classification_prompt(unified_domain: str) -> str:
+def predicate_occurrences(
+    node: Node, signatures: dict[str, int], counts: dict[str, int]
+) -> None:
+    if isinstance(node, str) or not node:
+        return
+    name = predicate_name(node)
+    if name in signatures:
+        counts[name] += 1
+        return
+    for child in node[1:]:
+        predicate_occurrences(child, signatures, counts)
+
+
+def classification_batches(
+    unified_domain: str, signatures: dict[str, int]
+) -> list[tuple[str, dict[str, int]]]:
+    spans = list(action_spans(unified_domain))
+    if not spans:
+        return [(unified_domain, signatures)]
+
+    actions = [unified_domain[start:end] for start, end in spans]
+    action_batches = [
+        actions[start : start + OPERATOR_BATCH_SIZE]
+        for start in range(0, len(actions), OPERATOR_BATCH_SIZE)
+    ]
+    occurrences: list[dict[str, int]] = [defaultdict(int) for _ in action_batches]
+    for batch_index, batch in enumerate(action_batches):
+        for action in batch:
+            predicate_occurrences(
+                parse_sexp(action), signatures, occurrences[batch_index]
+            )
+
+    targets = [{} for _ in action_batches]
+    for name, arity in signatures.items():
+        owner = max(
+            range(len(action_batches)),
+            key=lambda index: (occurrences[index][name], -index),
+        )
+        targets[owner][name] = arity
+
+    prefix = unified_domain[: form_span(unified_domain, ":predicates")[1]].rstrip()
+    return [
+        (prefix + "\n\n" + "\n\n".join(batch) + "\n)\n", batch_targets)
+        for batch, batch_targets in zip(action_batches, targets)
+        if batch_targets
+    ]
+
+
+def classification_prompt(domain_batch: str, target_signatures: dict[str, int]) -> str:
+    targets = "\n".join(
+        f"- {name} (arity {arity})" for name, arity in target_signatures.items()
+    )
     return f"""
-You are classifying every predicate in one PDDL domain. Return one JSON object
-and nothing else.
+You are classifying the target predicates using one batch of actions from a
+larger PDDL domain. Return one JSON object and nothing else. The :predicates
+section contains the global predicate catalog, but you must return only the
+target predicates listed below.
 
 Classification standard:
 - Type: a unary predicate describing what something is.
@@ -292,8 +351,8 @@ more arguments are Relation; use Spatial only when they directly describe
 where entities are or how they are spatially connected.
 
 Rules:
-1. Include every predicate declared in :predicates exactly once. Copy its exact
-   lowercase name and arity.
+1. Include every target predicate exactly once and no other predicates. Copy
+   its exact lowercase name and arity.
 2. category is one of: type, state, relation.
 3. subcategory must match the category: type -> object/material/role;
    state -> configuration/availability/result; relation -> spatial/non-spatial.
@@ -302,7 +361,9 @@ Rules:
    more predicates are mutually exclusive values of the same state variable,
    for example open/closed, on/off, empty/full, locked/unlocked, or
    upright/inverted/sideways. Every member must use the identical group name.
-   Use null when no mutually exclusive partner exists in this domain.
+   Make that name deterministic by joining all member predicate names in
+   alphabetical order with "__", for example "closed__open". Use null when no
+   mutually exclusive partner exists in the global predicate catalog.
 6. A mutex group is not merely a list of related states: its members must not be
    simultaneously true of the same object in a valid state.
 7. reason is one short sentence based on predicate meaning and action usage.
@@ -317,14 +378,17 @@ Required JSON schema:
       "arity": 1,
       "category": "state",
       "subcategory": "configuration",
-      "mutex_group": "open_closed",
+      "mutex_group": "closed__open",
       "reason": "It describes the current configuration of an object."
     }}
   ]
 }}
 
-[Complete unified PDDL domain]
-{unified_domain.strip()}
+[Target predicates]
+{targets}
+
+[PDDL domain action batch]
+{domain_batch.strip()}
 """.strip()
 
 
@@ -346,26 +410,54 @@ def load_labels() -> Labels:
 
     from swm.llm import call_gpt_json
 
-    prompt = classification_prompt(unified_domain)
-    for attempt in range(CLASSIFICATION_ATTEMPTS):
-        response = call_gpt_json(MODEL, prompt, [], temperature=0.0)
-        data = {
-            "schema_version": 1,
-            "model": MODEL,
-            "unified_domain": str(UNIFIED_DOMAIN),
-            "unified_domain_sha256": digest,
-            "predicates": response["predicates"],
+    batches = classification_batches(unified_domain, signatures)
+
+    def classify(index: int, domain_batch: str, targets: dict[str, int]):
+        prompt = classification_prompt(domain_batch, targets)
+        for attempt in range(CLASSIFICATION_ATTEMPTS):
+            response = call_gpt_json(MODEL, prompt, [], temperature=0.0)
+            try:
+                batch_data = {
+                    "unified_domain_sha256": digest,
+                    "predicates": response["predicates"],
+                }
+                validate_labels(
+                    batch_data,
+                    targets,
+                    digest,
+                    check_mutex_groups=False,
+                )
+                print(
+                    f"[classification] batch {index + 1}/{len(batches)}: "
+                    f"{len(targets)} predicates"
+                )
+                return response["predicates"]
+            except (KeyError, TypeError, ValueError) as error:
+                if attempt + 1 == CLASSIFICATION_ATTEMPTS:
+                    raise
+                prompt += (
+                    f"\n\nPrevious response error: {error}\n"
+                    "Return the complete corrected JSON object, not a patch."
+                )
+
+    results: list[list[dict[str, Any]] | None] = [None] * len(batches)
+    with ThreadPoolExecutor(max_workers=min(WORKERS, len(batches))) as executor:
+        futures = {
+            executor.submit(classify, index, domain_batch, targets): index
+            for index, (domain_batch, targets) in enumerate(batches)
         }
-        try:
-            labels = validate_labels(data, signatures, digest)
-            break
-        except ValueError as error:
-            if attempt + 1 == CLASSIFICATION_ATTEMPTS:
-                raise
-            prompt += (
-                f"\n\nPrevious response error: {error}\n"
-                "Return the complete corrected JSON object, not a patch."
-            )
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+
+    data = {
+        "schema_version": 1,
+        "model": MODEL,
+        "unified_domain": str(UNIFIED_DOMAIN),
+        "unified_domain_sha256": digest,
+        "operator_batch_size": OPERATOR_BATCH_SIZE,
+        "predicates": [predicate for result in results if result for predicate in result],
+    }
+    labels = validate_labels(data, signatures, digest)
     atomic_write(
         CLASSIFICATION_FILE, json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     )
