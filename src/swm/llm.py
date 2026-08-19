@@ -16,8 +16,11 @@ load_dotenv(find_dotenv())
 def get_client(model: str):
     """Return the OpenAI-compatible client for a model name."""
     if model.startswith(("gemini", "gpt")):
-        api_key = os.getenv("das_API_KEY")
-        base_url = "https://dasuapi.com/v1"
+        # api_key = os.getenv("das_API_KEY")
+        # base_url = "https://dasuapi.com/v1"
+        api_key = os.getenv("A6_API_KEY")
+        base_url = "https://api.a6api.com/v1"
+
 
     elif model.startswith(("kimi-k3", "qwen3.7-max", "glm-5.2")):
         api_key = os.getenv("BOYUE_API_KEY")

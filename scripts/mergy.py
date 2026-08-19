@@ -1,13 +1,12 @@
 # Merge latest episode PDDL domains into a deduplicated unified operator library with source tracking.
 
 import argparse
-import re
-import os
 import json
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Union
+import re
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Dict, Tuple, Union
 
 
 # =========================
@@ -17,6 +16,7 @@ from concurrent.futures import ProcessPoolExecutor
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
 DATASET_CHOICES = ("human", "human_aug")
+MAX_WORKERS = 16
 
 VAR_RE = re.compile(r"\?[A-Za-z0-9_\-]+")
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")
@@ -477,12 +477,14 @@ def parse_domain_file(domain_path: Path):
 
 def merge_predicates(predicates: List[PredicateItem]) -> List[PredicateItem]:
     merged: Dict[Tuple[str, int], PredicateItem] = {}
+    source_sets: Dict[Tuple[str, int], set[str]] = {}
 
     for item in predicates:
         key = (item.name.lower(), item.arity)
 
         if key not in merged:
             merged[key] = item
+            source_sets[key] = set(item.sources)
         else:
             old = merged[key]
 
@@ -491,8 +493,10 @@ def merge_predicates(predicates: List[PredicateItem]) -> List[PredicateItem]:
                 old.leading_comments = item.leading_comments
                 old.inline_comment = item.inline_comment
 
+            seen_sources = source_sets[key]
             for src in item.sources:
-                if src not in old.sources:
+                if src not in seen_sources:
+                    seen_sources.add(src)
                     old.sources.append(src)
 
     return sorted(
@@ -593,6 +597,7 @@ def merge_actions(actions: List[ActionItem]) -> List[Tuple[str, ActionItem]]:
     """Merge equivalent schemas and number same-name contract variants."""
     grouped: Dict[str, Dict[str, ActionItem]] = {}
     display_names: Dict[str, str] = {}
+    source_sets: Dict[Tuple[str, str], set[str]] = {}
 
     for item in actions:
         if re.search(r"(?:_|-)\d+$", item.name):
@@ -606,12 +611,15 @@ def merge_actions(actions: List[ActionItem]) -> List[Tuple[str, ActionItem]]:
         old = variants.get(item.signature)
         if old is None:
             variants[item.signature] = item
+            source_sets[(group_key, item.signature)] = set(item.sources)
             continue
         if not old.has_comment() and item.has_comment():
             old.leading_comments = item.leading_comments
             old.block_text = item.block_text
+        seen_sources = source_sets[(group_key, item.signature)]
         for src in item.sources:
-            if src not in old.sources:
+            if src not in seen_sources:
+                seen_sources.add(src)
                 old.sources.append(src)
 
     final_actions: List[Tuple[str, ActionItem]] = []
@@ -748,8 +756,9 @@ def main() -> None:
     parsed_count = 0
     skipped_count = 0
 
-    with ProcessPoolExecutor(max_workers=100) as executor:
-        results = executor.map(parse_domain_file, domain_files)
+    workers = min(MAX_WORKERS, len(domain_files))
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(parse_domain_file, domain_files, chunksize=50)
 
         for ok, path, predicates, actions, error in results:
             if ok:

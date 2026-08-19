@@ -12,12 +12,11 @@
 """
 
 import json
-import os
 import re
 import shutil
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 
@@ -41,7 +40,7 @@ OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/{'_'.join(TASK_DOMAINS)}.
 ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
-MAX_WORKERS = 1000
+MAX_WORKERS = 16
 
 
 
@@ -616,6 +615,50 @@ def find_image(task_domain, task_id, episode_id):
     return None
 
 
+def prepare_round(item):
+    key, round_dir = item
+    try:
+        domain_raw = (round_dir / "domain.pddl").read_text(encoding="utf-8")
+        problem_raw = (round_dir / "problem.pddl").read_text(encoding="utf-8")
+        plan_raw = (round_dir / "plan.txt").read_text(encoding="utf-8")
+
+        conflicts = init_conflicts(problem_raw)
+        if conflicts:
+            problem_path = (round_dir / "problem.pddl").relative_to(ROOT_DIR)
+            message = f"{problem_path}: " + " | ".join(conflicts)
+            return key, None, "[INIT CONFLICT] " + message, message, None
+
+        source_problem = preprocess_problem_text(problem_raw)
+        plan_actions = plan_action_names(plan_raw)
+        source_domain = format_source_domain(domain_raw, source_problem, plan_actions)
+
+        if source_domain != domain_raw:
+            atomic_write(round_dir / "domain.pddl", source_domain)
+        if source_problem != problem_raw:
+            atomic_write(round_dir / "problem.pddl", source_problem)
+
+        referenced = referenced_predicates(domain_raw, source_problem, plan_actions)
+        prepared = (
+            format_domain(domain_raw, referenced, plan_actions),
+            format_problem(source_problem),
+        )
+
+        review = None
+        if ROBOT_CONFIGURATION == "single-arm":
+            hand_states = init_hand_states(source_problem)
+            if len(hand_states) > 1:
+                message = (
+                    f"{(round_dir / 'problem.pddl').relative_to(ROOT_DIR)}: "
+                    + " | ".join(hand_states)
+                )
+                review = "[HAND STATE] " + message
+
+        return key, prepared, review, None, None
+    except Exception as error:
+        message = f"{round_dir.relative_to(ROOT_DIR)}: {error}"
+        return key, None, "[PDDL SKIP] " + message, None, message
+
+
 def process_domain(task_domain, prompt_template):
     eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
     records = read_instructions(task_domain)
@@ -656,71 +699,19 @@ def process_domain(task_domain, prompt_template):
     prepared_rounds = {}
     pddl_errors = []
 
-    def prepare_round(key, round_dir):
-        try:
-            domain_raw = (round_dir / "domain.pddl").read_text(encoding="utf-8")
-            problem_raw = (round_dir / "problem.pddl").read_text(encoding="utf-8")
-            plan_raw = (round_dir / "plan.txt").read_text(encoding="utf-8")
-
-            conflicts = init_conflicts(problem_raw)
-            if conflicts:
-                problem_path = (round_dir / "problem.pddl").relative_to(ROOT_DIR)
-                message = f"{problem_path}: " + " | ".join(conflicts)
-                return key, None, "[INIT CONFLICT] " + message, message, None
-
-            source_problem = preprocess_problem_text(problem_raw)
-            plan_actions = plan_action_names(plan_raw)
-            source_domain = format_source_domain(domain_raw, source_problem, plan_actions)
-
-            if source_domain != domain_raw:
-                atomic_write(round_dir / "domain.pddl", source_domain)
-            if source_problem != problem_raw:
-                atomic_write(round_dir / "problem.pddl", source_problem)
-
-            referenced = referenced_predicates(domain_raw, source_problem, plan_actions)
-            prepared = (
-                format_domain(domain_raw, referenced, plan_actions),
-                format_problem(source_problem),
-            )
-
-            review = None
-            if ROBOT_CONFIGURATION == "single-arm":
-                hand_states = init_hand_states(source_problem)
-                if len(hand_states) > 1:
-                    message = (
-                        f"{(round_dir / 'problem.pddl').relative_to(ROOT_DIR)}: "
-                        + " | ".join(hand_states)
-                    )
-                    review = "[HAND STATE] " + message
-
-            return key, prepared, review, None, None
-        except Exception as error:
-            message = f"{round_dir.relative_to(ROOT_DIR)}: {error}"
-            return key, None, "[PDDL SKIP] " + message, None, message
-
-    results = {}
     workers = min(MAX_WORKERS, len(valid_rounds)) if valid_rounds else 1
-    print(f"[{task_domain}] preparing {len(valid_rounds)} episode(s) with {workers} threads")
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(prepare_round, key, round_dir)
-            for key, round_dir in valid_rounds.items()
-        ]
-        for future in as_completed(futures):
-            key, prepared, review, init_review, pddl_error = future.result()
-            results[key] = (prepared, review, init_review, pddl_error)
-
-    # 按原 episode 顺序汇总，保证输出顺序不因并发而变化。
-    for key in valid_rounds:
-        prepared, review, init_review, pddl_error = results[key]
-        if prepared is not None:
-            prepared_rounds[key] = prepared
-        if review is not None:
-            review_messages.append(review)
-        if init_review is not None:
-            init_reviews.append(init_review)
-        if pddl_error is not None:
-            pddl_errors.append(pddl_error)
+    print(f"[{task_domain}] preparing {len(valid_rounds)} episode(s) with {workers} processes")
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(prepare_round, valid_rounds.items(), chunksize=50)
+        for key, prepared, review, init_review, pddl_error in results:
+            if prepared is not None:
+                prepared_rounds[key] = prepared
+            if review is not None:
+                review_messages.append(review)
+            if init_review is not None:
+                init_reviews.append(init_review)
+            if pddl_error is not None:
+                pddl_errors.append(pddl_error)
 
     samples = []
     missing_episode = 0
