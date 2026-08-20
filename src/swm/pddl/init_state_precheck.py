@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 Literal = tuple[str, ...]
@@ -83,29 +83,16 @@ class ParsedProblem:
         return {obj: frozenset(values) for obj, values in roles.items()}
 
 
-@dataclass(frozen=True)
-class ObjectMatch:
-    predicted: str
-    ground_truth: str
-    method: str
-    score: float
-
-
 @dataclass
 class PrecheckResult:
     decision: str
     reason: str
-    object_mapping: dict[str, str] = field(default_factory=dict)
-    mapping_details: list[ObjectMatch] = field(default_factory=list)
     contradictions: list[str] = field(default_factory=list)
     unmapped_predicted_objects: list[str] = field(default_factory=list)
 
     @property
     def should_reject(self) -> bool:
         return self.decision == "reject"
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -259,7 +246,7 @@ def _candidate_score(
     pred_problem: ParsedProblem,
     gt_problem: ParsedProblem,
     mapping: dict[str, str],
-) -> tuple[float, str] | None:
+) -> float | None:
     if not _identity_compatible(pred, gt):
         return None
 
@@ -278,43 +265,41 @@ def _candidate_score(
     relation_overlap = len(mapped_neighbors & gt_neighbors)
 
     if pred_tokens == gt_tokens:
-        return 1.0, "normalized_name"
+        return 1.0
     if pred_roles and gt_roles and pred_roles == gt_roles and len(pred_roles) == 1:
-        return 0.90 + min(token_score, 0.09), "unique_role"
+        return 0.90 + min(token_score, 0.09)
     if role_overlap and token_score >= 0.5:
-        return 0.75 + min(token_score * 0.2, 0.2), "role_and_name"
+        return 0.75 + min(token_score * 0.2, 0.2)
     if role_overlap and relation_overlap:
-        return 0.75 + min(relation_overlap * 0.05, 0.15), "role_and_relation"
+        return 0.75 + min(relation_overlap * 0.05, 0.15)
     if token_score >= 0.67:
-        return 0.68 + min(token_score * 0.2, 0.2), "name_tokens"
+        return 0.68 + min(token_score * 0.2, 0.2)
     return None
 
 
 def map_objects(
     predicted: ParsedProblem,
     ground_truth: ParsedProblem,
-) -> tuple[dict[str, str], list[ObjectMatch]]:
+) -> dict[str, str]:
     mapping: dict[str, str] = {}
-    matches: list[ObjectMatch] = []
     available_gt = set(ground_truth.objects)
 
     while True:
-        proposals: dict[str, list[tuple[float, str, str]]] = {}
+        proposals: dict[str, list[tuple[float, str]]] = {}
         for pred in sorted(predicted.objects - mapping.keys()):
             candidates = []
             for gt in sorted(available_gt):
                 scored = _candidate_score(pred, gt, predicted, ground_truth, mapping)
                 if scored is not None:
-                    score, method = scored
-                    candidates.append((score, gt, method))
+                    candidates.append((scored, gt))
             candidates.sort(key=lambda item: (-item[0], item[1]))
             proposals[pred] = candidates
 
-        accepted: list[tuple[str, str, str, float]] = []
+        accepted: list[tuple[str, str]] = []
         for pred, candidates in proposals.items():
             if not candidates:
                 continue
-            best_score, best_gt, method = candidates[0]
+            best_score, best_gt = candidates[0]
             if len(candidates) > 1 and best_score - candidates[1][0] < 0.10:
                 continue
             competitors = [
@@ -326,18 +311,17 @@ def map_objects(
             ]
             if competitors and best_score - max(competitors) < 0.10:
                 continue
-            accepted.append((pred, best_gt, method, best_score))
+            accepted.append((pred, best_gt))
 
         if not accepted:
             break
-        for pred, gt, method, score in accepted:
+        for pred, gt in accepted:
             if pred in mapping or gt not in available_gt:
                 continue
             mapping[pred] = gt
             available_gt.remove(gt)
-            matches.append(ObjectMatch(pred, gt, method, round(score, 3)))
 
-    return mapping, matches
+    return mapping
 
 
 def _format_literal(literal: Literal) -> str:
@@ -445,7 +429,7 @@ def compare_initial_states(
     except (TypeError, ValueError) as error:
         return PrecheckResult("defer", f"PDDL parsing failed: {error}")
 
-    mapping, details = map_objects(predicted, ground_truth)
+    mapping = map_objects(predicted, ground_truth)
     contradictions = _state_contradictions(predicted, ground_truth, mapping)
     contradictions.extend(_spatial_contradictions(predicted, ground_truth, mapping))
     contradictions = sorted(set(contradictions))
@@ -469,8 +453,6 @@ def compare_initial_states(
     return PrecheckResult(
         decision=decision,
         reason=reason,
-        object_mapping=mapping,
-        mapping_details=details,
         contradictions=contradictions,
         unmapped_predicted_objects=unmapped,
     )

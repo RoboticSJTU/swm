@@ -26,7 +26,6 @@ def learn_steps_from_keyframes(
     debug_path = save_dir / "pair_debug.log"
     prompt_dir = Path(__file__).parent / "prompt_templates"
 
-    plan_lines = []
     history = []
     group_meta = []
     retry_hints = {}
@@ -85,9 +84,6 @@ def learn_steps_from_keyframes(
                 for index, hint in retry_hints.items()
                 if index <= rollback_index
             }
-            del plan_lines[
-                -sum(group["plan_count"] for group in group_meta[rollback_index:]) :
-            ]
             history_count = sum(
                 group["history_count"] for group in group_meta[rollback_index:]
             )
@@ -95,10 +91,6 @@ def learn_steps_from_keyframes(
                 del history[-history_count:]
             del group_meta[rollback_index:]
 
-            plan_path.write_text(
-                "\n".join(plan_lines) + ("\n" if plan_lines else ""),
-                encoding="utf-8",
-            )
             group_index = rollback_index
             continue
 
@@ -120,21 +112,18 @@ def learn_steps_from_keyframes(
         if not actions:
             actions = ["none"]
 
-        plan_lines.extend(actions)
         history_actions = [action for action in actions if action != "none"]
         history.extend(f"[G{group_index}] {action}" for action in history_actions)
         group_meta.append(
             {
                 "raw_action": raw_action,
                 "actions": actions,
-                "plan_count": len(actions),
                 "history_count": len(history_actions),
             }
         )
         if group_index in retry_hints:
             del retry_hints[group_index]
 
-        plan_path.write_text("\n".join(plan_lines) + "\n", encoding="utf-8")
         group_index += 1
 
     cleaned_plan = []

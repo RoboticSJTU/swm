@@ -24,51 +24,31 @@ def latest_round_problem(task_dir: Path) -> Path | None:
 
 def _validated_vlm_result(result: dict) -> dict:
     if not isinstance(result, dict):
-        raise ValueError("Judge response is not a JSON object")
-    stage_1 = result.get("stage_1")
-    stage_2 = result.get("stage_2")
-    if not isinstance(stage_1, dict) or not isinstance(stage_2, dict):
-        raise ValueError("Judge response is missing stage_1 or stage_2")
+        raise ValueError("Judge response is not a JSON object")  # noqa: TRY004
+    required_keys = {"reasoning", "pass", "feedback"}
+    if set(result) != required_keys:
+        raise ValueError(
+            "Judge response must contain exactly reasoning, pass, and feedback"
+        )
 
-    stage_1_pass = stage_1.get("pass") is True
-    stage_1_reasoning = str(stage_1.get("reason", stage_1.get("reasoning", ""))).strip()
-    stage_2_raw_pass = stage_2.get("pass")
-    stage_2_evaluated = (
-        stage_2.get("evaluated") is True
-        if "evaluated" in stage_2
-        else stage_2_raw_pass is not None
-    )
-    stage_2_pass = stage_2_raw_pass is True
-    stage_2_reasoning = str(stage_2.get("reason", stage_2.get("reasoning", ""))).strip()
-    if not stage_1_pass:
-        stage_2_evaluated = False
-        stage_2_pass = False
-        stage_2_reasoning = "Not evaluated because Stage 1 failed."
-    passed = stage_1_pass and stage_2_evaluated and stage_2_pass
-    if not stage_1_reasoning:
-        raise ValueError("Judge response has empty Stage 1 reason")
-    if stage_2_evaluated and not stage_2_reasoning:
-        raise ValueError("Judge response has empty Stage 2 reason")
+    reasoning = result["reasoning"]
+    passed = result["pass"]
+    feedback = result["feedback"]
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        raise ValueError("Judge response has invalid reasoning")
+    if type(passed) is not bool:
+        raise ValueError("Judge response pass must be a JSON boolean")
+    if not isinstance(feedback, str):
+        raise ValueError("Judge response feedback must be a string")  # noqa: TRY004
 
-    reasoning = f"Stage 1: {stage_1_reasoning} Stage 2: {stage_2_reasoning}"
-    feedback = (
-        "" if passed else (stage_1_reasoning if not stage_1_pass else stage_2_reasoning)
-    )
+    reasoning = reasoning.strip()
+    feedback = feedback.strip()
+    if passed and feedback:
+        raise ValueError("Passing judge response must have empty feedback")
+    if not passed and not feedback:
+        raise ValueError("Failing judge response must have non-empty feedback")
 
-    return {
-        "pass": passed,
-        "stage_1": {
-            "pass": stage_1_pass,
-            "reasoning": stage_1_reasoning,
-        },
-        "stage_2": {
-            "evaluated": stage_2_evaluated,
-            "pass": stage_2_pass,
-            "reasoning": stage_2_reasoning,
-        },
-        "reasoning": reasoning,
-        "feedback": feedback,
-    }
+    return {"reasoning": reasoning, "pass": passed, "feedback": feedback}
 
 
 def _call_validated_judge(
@@ -79,12 +59,13 @@ def _call_validated_judge(
     last_error: ValueError | None = None
     for _ in range(3):
         try:
-            return _validated_vlm_result(
-                call_gpt_json(model, prompt, [first_img])
-            )
+            return _validated_vlm_result(call_gpt_json(model, prompt, [first_img]))
         except ValueError as error:
             last_error = error
-    raise ValueError(f"Judge did not return the required two-stage schema after 3 attempts: {last_error}")
+    raise ValueError(
+        "Judge did not return the required flat judge schema after 3 attempts: "
+        f"{last_error}"
+    )
 
 
 def judge_pddl(
@@ -100,7 +81,6 @@ def judge_pddl(
     if n < 1:
         raise ValueError("n must be at least 1")
 
-    precheck = None
     if predicted_problem is not None and ground_truth_problem is not None:
         try:
             precheck = compare_initial_states(
@@ -117,46 +97,22 @@ def judge_pddl(
         if precheck.should_reject:
             first_error = precheck.contradictions[0]
             return {
-                "pass": False,
-                "judge_source": "programmatic_precheck",
-                "stage_1": {
-                    "pass": False,
-                    "reasoning": (
-                        "The predicted PDDL initial state explicitly contradicts "
-                        f"the ground-truth initial state: {first_error}"
-                    ),
-                },
-                "stage_2": {
-                    "evaluated": False,
-                    "pass": False,
-                    "reasoning": "Not evaluated because the programmatic precheck failed.",
-                },
                 "reasoning": (
-                    "Programmatic initial-state precheck failed before VLM judging. "
-                    + " ".join(precheck.contradictions)
+                    "The predicted PDDL initial state explicitly contradicts the "
+                    "ground-truth initial state: " + " ".join(precheck.contradictions)
                 ),
+                "pass": False,
                 "feedback": (
                     "Correct the predicted PDDL :init facts to match the initial "
                     f"scene. Earliest contradiction: {first_error}"
                 ),
-                "precheck": precheck.to_dict(),
             }
-
-    if precheck is None or not precheck.mapping_details:
-        object_mapping = "No structured correspondences are available."
-    else:
-        object_mapping = "\n".join(
-            f"- {match.predicted} = {match.ground_truth} "
-            f"(method: {match.method}, confidence: {match.score:.3f})"
-            for match in precheck.mapping_details
-        )
 
     prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
     prompt = prompt_path.read_text(encoding="utf-8").format(
         instruction=instruction,
         kf_plan=kf_plan,
         nl_plan=nl_plan,
-        object_mapping=object_mapping,
     )
 
     results = [_call_validated_judge(model, prompt, first_img) for _ in range(n)]
@@ -165,7 +121,4 @@ def judge_pddl(
 
     for r in results:
         if r["pass"] == passed:
-            r["judge_source"] = "vlm"
-            if precheck is not None:
-                r["precheck"] = precheck.to_dict()
             return r

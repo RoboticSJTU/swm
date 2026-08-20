@@ -21,7 +21,7 @@ def save_image_energy_仅用能量(frames_dir, save_path) -> None:
     """
 
     frames_dir = Path(frames_dir)
-    frame_path_list = sorted(list(frames_dir.iterdir()))
+    frame_path_list = sorted(frames_dir.glob("*.png"))
 
     print("Calculating energies in pixel space ...")
     energies = []
@@ -35,7 +35,7 @@ def save_image_energy_仅用能量(frames_dir, save_path) -> None:
 
 def save_image_energy(frames_dir, save_path) -> None:
     frames_dir = Path(frames_dir)
-    frame_path_list = sorted(list(frames_dir.iterdir()))
+    frame_path_list = sorted(frames_dir.glob("*.png"))
 
     print("Calculating frame-diff energies ...")
     energies = []

@@ -1,4 +1,4 @@
-Judge whether an embodied robot plan executably and completely solves an instruction. Evaluate both stages in order; both must pass.
+Judge whether an embodied robot plan is executable and fully satisfies the instruction.
 
 # Inputs
 
@@ -11,51 +11,42 @@ Ground-truth reference plan:
 Evaluated plan:
 {nl_plan}
 
-Trusted object correspondences from structured PDDL analysis:
-{object_mapping}
-
 Initial scene image: attached.
 
-# Evidence
+# Evidence Model
 
-- The Instruction defines the required outcome and scope.
-- The Ground-truth plan is valid. Derive task-critical state transitions and causal constraints without requiring wording, step count, or total order.
-- Treat object correspondences as trusted aliases. Use the image only to ground remaining references and resolve lexical ambiguity. An unclear image must not override a necessary transition demonstrated by the reference plan.
-- Distinguish persistent environmental enablers from operator-specific transient states. A reference transition that changes access, mechanical state, or usable support configuration for a later operation is authoritative and must occur before use; the Evaluated init and image cannot waive it. A transient state used by one reference operator is not automatically a precondition of a differently phrased action that is normally executable from another coherent state.
-- For facts not fixed by the Instruction, a critical reference transition, or trusted grounding, use open-world evidence: unstated means unknown. Do not invent actions, constraints, quantities, or physical facts.
+- The Instruction is authoritative about what must be achieved, including any specified object, scope, method, order, final relation, cleanup, or persistence.
+- The reference plan is one valid witness. Infer necessary state changes and causal dependencies from it, without requiring its wording, incidental details, or total order.
+- The image grounds identities and the initial scene. An unclear image cannot overturn a necessary causal condition established by the reference.
+- Other facts are unknown. Reject only when failure follows from input evidence or unambiguous action semantics; do not invent hidden actions or physical constraints.
 
-# Stage 1: Executable Semantic Equivalence
+# Internal Evaluation
 
-1. Derive task-critical effects and their partial-order dependencies. Dependencies arise from required states or resources, not mere reference adjacency.
-2. Simulate the Evaluated plan from the initial scene. Check each action's access, possession, support/container, device state, and other relevant preconditions; then apply its effect.
-3. PASS only if the plan is executable and preserves every critical effect and dependency.
+Perform these checks in order without exposing a step-by-step chain of thought:
 
-Compare state transitions rather than text. Accept aliases, paraphrases, independent-action reordering, harmless redundant steps, omission of non-critical reference details, and coherent alternative preparation paths. An effect may be explicit or unambiguously established by an action and its coherent downstream use. A later wait or confirmation does not move an earlier action's semantic milestone unless an input requires observed completion before the intervening action or that action can prevent the outcome. Likewise, a location word does not imply an unstated orientation or undo a preparation that coherent downstream use confirms. The reference determines required effects and dependencies, not the only operator sequence or hidden preconditions for differently phrased actions; assess each Evaluated action by its own stated, normal semantics.
+1. Build the complete task contract from the Instruction.
+2. Derive only the effects, prerequisites, and partial-order dependencies needed for execution or that contract.
+3. Simulate the Evaluated plan from the initial scene, tracking relevant access, possession, direct location, and device state. State persists until changed.
+4. At the earliest definitely unsatisfied precondition, fail and do not perform the completeness check. Otherwise, verify the entire contract and report all missing requirements.
 
-A difference matters only if it changes identity, a precondition, critical effect, dependency, or required state. A direct support/container relation may coexist with contact or orientation: if an item is both against a wall and on a table, `pick from wall` and `pick from table` are equivalent when access is unchanged. This does not permit skipping a support/container level: an item in a tray is not directly on the table beneath it. Reject incompatible direct areas and omitted relocations/openings that change access.
+Compare state transitions, not text. Accept supported aliases, paraphrases, independent reordering, harmless redundancy, and alternative paths establishing the same necessary states. An action includes its inherent effects, but not separate acquisition, access, relocation, or release. Direct support and containment are typed and non-transitive. Instruction-required methods, tools, quantities, order, and return conditions cannot be replaced by a similar final state.
 
-Each step must denote a supported object-level robot operation. A handheld pour, place, carry, or tool use normally requires prior acquisition; merely naming the object does not acquire it. Do not add missing acquisition/access or expand a collective expression into repeated object operations unless a batch operation is supported.
-
-Before failing, perform a necessity check: cite an input-supported fact or unambiguous action effect and show that failure follows necessarily. A merely possible physical failure is insufficient. Never assume a capacity is full, overflow or depletion occurs, an exact quantity/duration is reached, or an object is released or reoriented unless an input makes it task-critical. Do not infer one possible hidden side effect when the stated same-object trajectory remains coherent.
-
-If Stage 1 fails, identify the earliest concrete violation and do not evaluate Stage 2.
-
-# Stage 2: Instruction Completeness
-
-After Stage 1 passes, verify every requirement in the Instruction: object instances, quantities or coverage, target relations, state changes, cleanup/return conditions, and persistence. Ignore non-critical reference-only details.
+Before rejecting, verify that the disputed condition is necessary and cite the decisive input evidence in the reasoning.
 
 # Output
 
-Return JSON. `stage_2.pass` is null when Stage 1 fails. `pass` equals `stage_1.pass AND stage_2.pass`.
+Return exactly this JSON object and no additional fields:
 
 {{
-  "stage_1": {{
-    "pass": true or false,
-    "reason": "concise pass justification or earliest concrete violation"
-  }},
-  "stage_2": {{
-    "pass": true, false, or null,
-    "reason": "concise completeness result or not evaluated"
-  }},
-  "pass": true or false
+  "reasoning": "concise, evidence-grounded verdict",
+  "pass": true,
+  "feedback": ""
 }}
+
+`reasoning` must be non-empty and concise, not a detailed chain of thought. For execution failure, identify the earliest definite violation. For completeness failure, name every unmet requirement.
+
+`pass` must be a JSON boolean. For true, `feedback` must be empty. For false, it must be an imperative repair instruction for the next PDDL round:
+
+- For execution failure, classify the minimal correction as initial state, object binding, precondition, effect, or action order, and state what the repaired plan must establish.
+- For completeness failure, require every omission in the goal and a reachable action chain.
+- Preserve correct behavior. Do not copy the reasoning or invent unsupported PDDL details.

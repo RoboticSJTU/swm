@@ -29,9 +29,9 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 MODEL_NAME = "gpt-5.6-sol"
-PDDL_DOMAIN_NAME = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
 ROBOT_CONFIGURATION = "single-arm"
+PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION.replace("-", "_")
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
@@ -226,11 +226,18 @@ def raw_action_blocks(domain_text):
     return blocks
 
 
-def append_action(lines, action, blocks, comments=None):
+def append_action(lines, action, blocks=None, comments=None):
     name = action[1]
     if comments is not None and name.lower() in comments:
         lines.append("  " + comments[name.lower()])
-    lines.append("  " + blocks[name.lower()])
+    if blocks is not None:
+        lines.append("  " + blocks[name.lower()])
+        return
+
+    lines.append(f"  (:action {name}")
+    for key, value in zip(action[2::2], action[3::2]):
+        lines.append(f"    {key} {pddl_line(value)}")
+    lines.append("  )")
 
 
 def domain_name(domain):
@@ -238,10 +245,10 @@ def domain_name(domain):
 
 
 def render_domain(domain_text, referenced, plan_actions, source=False):
-    """渲染同一份 action 子集，并原样保留每个 action 的内部文本。"""
+    """渲染同一份 action 子集；回写源文件时保留 action 原文。"""
     domain = parse_pddl(domain_text)
     selected_actions = ordered_actions(domain, plan_actions)
-    blocks = raw_action_blocks(domain_text)
+    blocks = raw_action_blocks(domain_text) if source else None
     comments = action_comments(domain_text) if source else None
     name = domain_name(domain) if source else PDDL_DOMAIN_NAME
     lines = [f"(define (domain {name})"]
@@ -250,9 +257,9 @@ def render_domain(domain_text, referenced, plan_actions, source=False):
         section_name = expression_head(section)
         if section_name == ":action":
             continue
-        if len(lines) > 1:
-            lines.append("")
-        if section_name == ":predicates":
+        if section_name == ":requirements":
+            lines.append("  (:requirements " + " ".join(section[1:]) + ")")
+        elif section_name == ":predicates":
             lines.append("  (:predicates")
             lines.extend(
                 "    " + pddl_line(predicate)
@@ -425,14 +432,10 @@ def format_problem(problem_text):
     if goal is not None:
         lines.append("  (:goal")
         condition = goal[1]
-        if expression_head(condition) == "and":
-            atoms = reorder_stacks(condition[1:], goal=True)
-            lines.append("    (and")
-            lines.extend("      " + pddl_line(atom) for atom in atoms)
-            lines.append("    )")
-        else:
-            lines.append("    " + pddl_line(condition))
-        lines.append("  )")
+        atoms = condition[1:] if expression_head(condition) == "and" else [condition]
+        lines.append("    (and")
+        lines.extend("      " + pddl_line(atom) for atom in reorder_stacks(atoms, goal=True))
+        lines.extend(["    )", "  )"])
 
     lines.extend("  " + pddl_line(section) for section in extra_sections)
     lines.append(")")

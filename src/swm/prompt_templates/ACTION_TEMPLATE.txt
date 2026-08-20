@@ -274,9 +274,9 @@
 :effect (and (washed ?c))
 )
 
-; Stir pot ?p with spoon ?s held by hand ?h.
-(:action stir_pot_with_spoon
-:parameters (?h ?s ?p)
-:precondition (and (hand ?h) (spoon ?s) (pot ?p) (holding ?h ?s) (open ?p))
-:effect (and (stirred ?p))
+; Stir soup ?sp in pot ?p with spoon ?s held by hand ?h.
+(:action stir_soup_in_pot_with_spoon
+:parameters (?h ?sp ?p ?s)
+:precondition (and (hand ?h) (soup ?sp) (pot ?p) (spoon ?s) (holding ?h ?s) (open ?p) (in ?sp ?p))
+:effect (and (stirred ?sp))
 )

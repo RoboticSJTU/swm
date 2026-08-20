@@ -44,6 +44,10 @@ def extract_keyframes(
         save_image_energy(frames_dir, energy_path)
 
     energy = load_energy(energy_path)
+    if len(energy) != len(images):
+        raise ValueError(
+            f"Energy count {len(energy)} does not match frame count {len(images)}"
+        )
     smooth_k = smooth_k | 1
     pad = smooth_k // 2
     energy = np.convolve(

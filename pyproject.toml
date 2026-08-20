@@ -26,7 +26,8 @@ dependencies = [
     "Pillow",
     "numpy",
     "json-repair",
-    "matplotlib"
+    "matplotlib",
+    "tqdm"
 ]
 
 [tool.setuptools.packages.find]

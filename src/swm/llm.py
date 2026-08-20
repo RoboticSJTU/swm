@@ -27,7 +27,7 @@ def get_client(model: str):
         base_url = "https://apicz.boyuerichdata.com/v1"
 
     elif model.startswith("Qwen3.8-27B"):
-        api_key = "T+Hbc1AGOcqRXEUwL4NtRaLLOP/ElhphB5jhMgHiiiQ="
+        api_key = os.getenv("QWEN_API_KEY")
         base_url = "https://x.openapi-qb.sii.edu.cn/v1"
 
     else:

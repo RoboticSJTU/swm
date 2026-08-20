@@ -57,6 +57,14 @@ def generate_pddl(
     domain_str = data["domain"]
     problem_str = data["problem"]
 
+    for path in (
+        plan_path,
+        nl_plan_path,
+        round_dir / "judge.json",
+        round_dir / "error.log",
+    ):
+        path.unlink(missing_ok=True)
+
     try:
         domain_str, problem_str = postprocess_pddl(domain_str, problem_str)
     except PDDLPostprocessError as error:

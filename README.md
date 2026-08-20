@@ -12,7 +12,6 @@ SWM（Symbolic World Model）用于从机器人操作视频或场景图像中生
 conda create -n swm python=3.11 -y
 conda activate swm
 pip install -e .
-pip install tqdm
 ```
 
 关键帧提取需要 FFmpeg：
@@ -33,13 +32,18 @@ python downward/build.py
 在根目录创建 `.env`：
 
 ```dotenv
-SII_API_KEY=your_api_key_here
-# 使用 Qwen3.5 时需要
-QWEN_API_KEY=your_qwen_api_key_here
+A6_API_KEY=...
+BOYUE_API_KEY=...
+QWEN_API_KEY=...
 ```
 
 ## 数据目录
 
+```text
+dataset/videos/<task_domain>/<episode_id>.mp4
+tasks/images/<task_domain>/<task_id>/<episode_id>.png
+tasks/instructions/instructions_<task_domain>.json
+tasks/steps/steps_<task_domain>.json
 ```
 
 如已获得数据压缩包，可执行：
@@ -52,7 +56,7 @@ tar -xzf dataset/data/swm_data_json.tar.gz -C dataset/data/
 
 ## 运行
 
-先修改 `scripts/domain_generation.py` 文件顶部的输入模式、任务范围、模型和并发数，然后运行：
+先修改 `scripts/domain_generation.py` 文件顶部的配置。`STEP_SOURCE = "video"` 会从视频抽帧、提取关键帧并学习动作步骤；`STEP_SOURCE = "steps_json"` 会直接读取 `tasks/steps` 中的步骤和 `tasks/images` 中的场景图。然后运行：
 
 ```bash
 python scripts/domain_generation.py
