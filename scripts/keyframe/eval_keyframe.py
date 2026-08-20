@@ -145,7 +145,7 @@ def eval_episode(episode):
     pred_text = "\n".join(f"{i + 1}. {x}" for i, x in enumerate(pred_steps)) if pred_steps else "(empty)"
 
     try:
-        resp = call_gpt_json(MODEL, PROMPT.format(gt_text=gt_text, pred_text=pred_text), None)
+        resp = call_gpt_json(MODEL, PROMPT.format(gt_text=gt_text, pred_text=pred_text))
     except Exception as e:
         return {
             "episode": episode,

@@ -73,12 +73,11 @@ def call_gpt_json(
     model: str,
     prompt: str,
     image_paths: list[Path] | None = None,
-    temperature: float | None = None,
 ):
     for _ in range(20):
         output = None
         try:
-            output = call_gpt(model, prompt, image_paths, temperature)
+            output = call_gpt(model, prompt, image_paths)
             output = strip_think_output(output)
             response_json = json.loads(repair_json(output))
             if isinstance(response_json, dict):

@@ -232,7 +232,7 @@ Expected JSON format:
 {plan}
 """.strip()
 
-    result = call_gpt_json(translate_model, prompt, [])
+    result = call_gpt_json(translate_model, prompt)
 
     if isinstance(result, str):
         result = json.loads(strip_code_block(result))

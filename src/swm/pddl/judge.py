@@ -80,14 +80,11 @@ def _call_validated_judge(
     for _ in range(3):
         try:
             return _validated_vlm_result(
-                call_gpt_json(model, prompt, [first_img], temperature=0.0)
+                call_gpt_json(model, prompt, [first_img])
             )
         except ValueError as error:
             last_error = error
-    raise ValueError(
-        f"Judge did not return the required two-stage schema after "
-        f"3 attempts: {last_error}"
-    )
+    raise ValueError(f"Judge did not return the required two-stage schema after 3 attempts: {last_error}")
 
 
 def judge_pddl(

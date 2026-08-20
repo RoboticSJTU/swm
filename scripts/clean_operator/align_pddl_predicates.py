@@ -25,7 +25,7 @@ UNIFIED_DOMAIN = DATASET_ROOT / "unified_domain.pddl"
 CLASSIFICATION_FILE = DATASET_ROOT / "predicate_classification.json"
 MODEL = "gpt-5.6-sol"
 WORKERS = 100
-OPERATOR_BATCH_SIZE = 50
+OPERATOR_BATCH_SIZE = 100
 CLASSIFICATION_ATTEMPTS = 3
 ROUND_RE = re.compile(r"round[_-]?(\d+)$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")
@@ -415,7 +415,7 @@ def load_labels() -> Labels:
     def classify(index: int, domain_batch: str, targets: dict[str, int]):
         prompt = classification_prompt(domain_batch, targets)
         for attempt in range(CLASSIFICATION_ATTEMPTS):
-            response = call_gpt_json(MODEL, prompt, [], temperature=0.0)
+            response = call_gpt_json(MODEL, prompt)
             try:
                 batch_data = {
                     "unified_domain_sha256": digest,
