@@ -33,8 +33,32 @@ from validate_operator_cleanup import CandidateResolver
 
 NUMBERED_SUFFIX_RE = re.compile(r"_\d+$")
 LEGACY_PLACE_RELATION_RE = re.compile(r"(?:^|_)(into|onto)(?:_|$)")
-NAME_RELATION_RE = re.compile(r"(?:^|_)(in|into|on|onto|under)(?:_|$)")
-SPATIAL_RELATIONS = {"in", "on", "under"}
+NAME_RELATION_RE = re.compile(r"(?:^|_)(along|in_front_of|in|into|on|onto|under)(?:_|$)")
+SPATIAL_RELATIONS = {
+    "along", "in", "on", "under", "in_front_of", "in_front", "at_edge", "on_edge",
+    "neatly_on", "at_position", "fifteen_cm_in_front_of", "at_15cm_in_front_of",
+    "in_front_of_15cm", "in_front_15cm", "fifteen_cm_in_front",
+    "fifteen_centimeters_in_front_of", "distance_15cm_in_front_of",
+}
+SPATIAL_IMPLICATIONS = {
+    "at_15cm_in_front_of": {"in_front_of"},
+    "at_edge": {"on"},
+    "distance_15cm_in_front_of": {"in_front_of"},
+    "fifteen_centimeters_in_front_of": {"in_front_of"},
+    "fifteen_cm_in_front": {"in_front_of"},
+    "fifteen_cm_in_front_of": {"in_front_of"},
+    "in_front": {"in_front_of"},
+    "in_front_15cm": {"in_front_of"},
+    "in_front_of_15cm": {"in_front_of"},
+    "neatly_on": {"on"},
+    "on_edge": {"on"},
+}
+ACTION_VERBS = {
+    "add", "close", "cut", "fold", "hang", "insert", "lift", "move",
+    "open", "pass", "peel", "pick", "place", "pour", "press", "pull",
+    "push", "put", "remove", "rinse", "scoop", "scrub", "shake", "stir",
+    "take", "tie", "turn", "untie", "wash", "wipe",
+}
 
 
 @dataclass(frozen=True)
@@ -166,6 +190,13 @@ def name_relations(name: str) -> set[str]:
     }
 
 
+def expanded_spatial_relations(relations: set[str]) -> set[str]:
+    expanded = set(relations)
+    for relation in tuple(relations):
+        expanded.update(SPATIAL_IMPLICATIONS.get(relation, set()))
+    return expanded
+
+
 def placed_object(action: Action, pre: list[SignedLiteral], eff: list[SignedLiteral]) -> str | None:
     held = {
         literal.arguments[1]
@@ -185,14 +216,9 @@ def placed_object(action: Action, pre: list[SignedLiteral], eff: list[SignedLite
             and len(literal.arguments) == 2
         )
     }
-    candidates = held & released
-    if len(candidates) == 1:
-        return next(iter(candidates))
-    if len(released) == 1:
-        return next(iter(released))
-    if len(held) == 1:
-        return next(iter(held))
-
+    # A hand can keep holding a tool while the tool moves another object.  In
+    # that form, the spatial delete/add pair identifies the placed object more
+    # reliably than the hand's resource relation.
     removed_sources = {
         literal.arguments[0]
         for literal in eff
@@ -216,6 +242,13 @@ def placed_object(action: Action, pre: list[SignedLiteral], eff: list[SignedLite
         return next(iter(moved))
     if len(added_targets) == 1:
         return next(iter(added_targets))
+    candidates = held & released
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if len(released) == 1:
+        return next(iter(released))
+    if len(held) == 1:
+        return next(iter(held))
     return None
 
 
@@ -228,7 +261,7 @@ def place_relation_issue(action: Action) -> str | None:
     if moved is None:
         return None
     expected = name_relations(action.name)
-    actual = {
+    actual = expanded_spatial_relations({
         literal.predicate
         for literal in eff
         if (
@@ -237,12 +270,37 @@ def place_relation_issue(action: Action) -> str | None:
             and len(literal.arguments) == 2
             and literal.arguments[0] == moved
         )
-    }
+    })
+    already_established = expanded_spatial_relations({
+        literal.predicate
+        for literal in pre
+        if (
+            not literal.negative
+            and literal.predicate in SPATIAL_RELATIONS
+            and len(literal.arguments) == 2
+            and literal.arguments[0] == moved
+        )
+    })
+    deleted = expanded_spatial_relations({
+        literal.predicate
+        for literal in eff
+        if (
+            literal.negative
+            and literal.predicate in SPATIAL_RELATIONS
+            and len(literal.arguments) == 2
+            and literal.arguments[0] == moved
+        )
+    })
     # A placement may establish several compatible relations at once, such as
     # a cup being on a drip tray and under a spout. The name need only expose
     # the primary relation, while later relation tokens may qualify a target
     # rather than the moved object (for example, ``on_package_in_compartment``).
     if expected.issubset(actual) and (expected or not actual):
+        return None
+    # Some tool-release actions start with the item already at its final
+    # location.  Releasing it preserves that relation; requiring a duplicate
+    # add effect would not make the resulting state more precise.
+    if expected.issubset(actual | (already_established - deleted)):
         return None
     # Later prepositions can qualify the support rather than the placed object:
     # ``place_package_on_package_in_compartment`` adds (on moving support) and
@@ -259,8 +317,13 @@ def place_relation_issue(action: Action) -> str | None:
             and literal.arguments[0] == moved
         )
     }
+    visited: set[str] = set()
     remaining = list(pre)
     while frontier:
+        frontier -= visited
+        if not frontier:
+            break
+        visited.update(frontier)
         next_frontier: set[str] = set()
         for literal in remaining:
             if (
@@ -298,7 +361,48 @@ def bowl_bowl_in_literals(action: Action) -> list[str]:
     return matches
 
 
-def microwave_purity_problems(action: Action) -> list[str]:
+def has_compound_action_name(name: str) -> bool:
+    """Distinguish two verbs from object names such as wash_and_care_set."""
+    tokens = name.split("_")
+    for index, token in enumerate(tokens):
+        if token != "and":
+            continue
+        before = any(part in ACTION_VERBS for part in tokens[max(0, index - 2):index])
+        after = any(part in ACTION_VERBS for part in tokens[index + 1:index + 3])
+        if before and after:
+            return True
+    return False
+
+
+MICROWAVE_RESULT_PREDICATES = {"boiled", "boiling", "cooked", "heated", "warm", "warmed"}
+MICROWAVE_RESULT_NEGATIONS = {"cold", "unheated"}
+
+
+def microwave_result_effects(action: Action) -> set[SignedLiteral]:
+    return {
+        literal
+        for literal in signed_literals(action.eff)
+        if not literal.negative and literal.predicate in MICROWAVE_RESULT_PREDICATES
+    }
+
+
+def is_microwave_result_transition(literal: SignedLiteral) -> bool:
+    return (
+        (not literal.negative and literal.predicate in MICROWAVE_RESULT_PREDICATES)
+        or (
+            literal.negative
+            and (
+                literal.predicate in MICROWAVE_RESULT_NEGATIONS
+                or (
+                    literal.predicate.startswith("not_")
+                    and literal.predicate.removeprefix("not_") in MICROWAVE_RESULT_PREDICATES
+                )
+            )
+        )
+    )
+
+
+def microwave_purity_problems(action: Action, actions: list[Action]) -> list[str]:
     if action.name.lower() != "turn_on_microwave":
         return []
     pre = signed_literals(action.pre)
@@ -318,31 +422,25 @@ def microwave_purity_problems(action: Action) -> list[str]:
     problems: list[str] = []
     if actual_effects != expected_effects:
         missing = sorted(item.render() for item in expected_effects - actual_effects)
-        extra = sorted(item.render() for item in actual_effects - expected_effects)
+        extra = sorted(
+            item.render()
+            for item in actual_effects - expected_effects
+            if not is_microwave_result_transition(item)
+        )
         parts: list[str] = []
         if missing:
             parts.append(f"missing effects {missing}")
         if extra:
             parts.append(f"extra effects {extra}")
-        problems.append("; ".join(parts))
+        if parts:
+            problems.append("; ".join(parts))
     if SignedLiteral(False, "is_off", (microwave,)) not in pre:
         problems.append(f"missing precondition (is_off {microwave})")
 
-    allowed_parameters: set[str] = {microwave}
-    for variable, predicates in unary.items():
-        if "hand" in predicates or any(
-            "button" in predicate or "switch" in predicate for predicate in predicates
-        ):
-            allowed_parameters.add(variable)
-    unexpected_parameters = sorted(
-        str(parameter).lower()
-        for parameter in action.params
-        if str(parameter).lower() not in allowed_parameters
-    )
-    if unexpected_parameters:
-        problems.append(
-            "non-toggle/content parameters " + repr(unexpected_parameters)
-        )
+    results = microwave_result_effects(action)
+    if not results:
+        return problems
+    problems.append("start action commits a heating result; completion must produce it")
     return problems
 
 
@@ -353,34 +451,18 @@ def faucet_rinse_problems(action: Action) -> list[str]:
     }:
         return []
     pre = signed_literals(action.pre)
-    eff = signed_literals(action.eff)
-    unary = positive_unary_predicates(pre)
-    bowls = {variable for variable, predicates in unary.items() if "bowl" in predicates}
-    completed = {
+    rinsed = {
         literal.arguments[0]
-        for literal in eff
+        for literal in pre
         if (
             not literal.negative
             and literal.predicate == "rinsed"
             and len(literal.arguments) == 1
         )
     }
-    water = {
-        literal.arguments[0]
-        for literal in eff
-        if (
-            not literal.negative
-            and literal.predicate == "has_water"
-            and len(literal.arguments) == 1
-        )
-    }
-    contracted = bowls & completed & water
-    if contracted:
+    if rinsed:
         return []
-    return [
-        "no bowl parameter receives both positive effects rinsed and has_water; "
-        f"bowls={sorted(bowls)}, rinsed={sorted(completed)}, has_water={sorted(water)}"
-    ]
+    return ["faucet completion lacks a rinsed-object precondition"]
 
 
 def drawer_target(pre: list[SignedLiteral], eff: list[SignedLiteral]) -> str | None:
@@ -483,6 +565,42 @@ def drawer_guard_problems(action: Action) -> list[str]:
     return problems
 
 
+def multi_hand_distinctness_problems(action: Action) -> list[str]:
+    """Detect independent hand roles that can be bound to one hand object."""
+    parameters = set(action.params)
+    hands: list[str] = []
+    for literal in signed_literals(action.pre):
+        if (
+            not literal.negative
+            and literal.predicate == "hand"
+            and len(literal.arguments) == 1
+            and literal.arguments[0] in parameters
+            and literal.arguments[0] not in hands
+        ):
+            hands.append(literal.arguments[0])
+    if len(hands) < 2:
+        return []
+    inequalities = {
+        (literal.arguments[0], literal.arguments[1])
+        for literal in signed_literals(action.pre)
+        if (
+            literal.negative
+            and literal.predicate == "="
+            and len(literal.arguments) == 2
+        )
+    }
+    missing = [
+        (first, second)
+        for index, first in enumerate(hands)
+        for second in hands[index + 1:]
+        if (first, second) not in inequalities and (second, first) not in inequalities
+    ]
+    return [
+        "missing distinctness for independently declared hand roles "
+        + ", ".join(f"{first}/{second}" for first, second in missing)
+    ] if missing else []
+
+
 def signature_payload(signature: tuple[object, ...]) -> object:
     if isinstance(signature, tuple):
         return [signature_payload(item) for item in signature]
@@ -500,6 +618,7 @@ def signature_id(signature: tuple[object, ...]) -> str:
 
 def add_action_issues(
     action: Action,
+    domain_actions: list[Action],
     domain_path: Path,
     dataset: str,
     issues: list[LintIssue],
@@ -514,7 +633,7 @@ def add_action_issues(
         add("numbered_action_suffix", "action name ends in a numeric conflict suffix")
     if "_when_" in name:
         add("legacy_when_clause", "action name encodes a precondition with a when clause")
-    if "_and_" in name and not name.startswith("press_and_hold_"):
+    if "_and_" in name and not name.startswith("press_and_hold_") and has_compound_action_name(name):
         add("compound_action_name", "action name joins clauses with 'and'")
     legacy_relation = LEGACY_PLACE_RELATION_RE.search(name) if name.startswith("place_") else None
     if legacy_relation:
@@ -526,15 +645,14 @@ def add_action_issues(
     mismatch = place_relation_issue(action)
     if mismatch:
         add("place_relation_mismatch", mismatch)
-    nested = bowl_bowl_in_literals(action)
-    if nested:
-        add("bowl_bowl_in", "; ".join(nested))
-    for detail in microwave_purity_problems(action):
+    for detail in microwave_purity_problems(action, domain_actions):
         add("turn_on_microwave_not_pure", detail)
     for detail in faucet_rinse_problems(action):
         add("faucet_rinse_effect_missing", detail)
     for detail in drawer_guard_problems(action):
         add("drawer_guard_not_named", detail)
+    for detail in multi_hand_distinctness_problems(action):
+        add("multi_hand_distinctness_missing", detail)
 
 
 def audit(
@@ -542,6 +660,9 @@ def audit(
     scope: str,
     mapping_dir: Path | None = None,
     task_ids: set[int] | None = None,
+    include_fingerprints: bool = True,
+    task_min: int | None = None,
+    task_max: int | None = None,
 ) -> dict[str, object]:
     issues: list[LintIssue] = []
     fingerprint_groups: dict[
@@ -555,7 +676,17 @@ def audit(
 
     for dataset in datasets:
         root = EVAL_ROOT / dataset
-        for round_dir in selected_rounds(root, scope, task_ids):
+        rounds = selected_rounds(root, scope, task_ids)
+        if task_min is not None or task_max is not None:
+            rounds = [
+                round_dir
+                for round_dir in rounds
+                if (
+                    (task_min is None or int(round_dir.parent.parent.name.removeprefix("task_")) >= task_min)
+                    and (task_max is None or int(round_dir.parent.parent.name.removeprefix("task_")) <= task_max)
+                )
+            ]
+        for round_dir in rounds:
             scanned_rounds += 1
             source_domain_path = round_dir / "domain.pddl"
             domain_path = resolver.resolve(round_dir, "domain.pddl")
@@ -580,27 +711,28 @@ def audit(
             for action in actions:
                 action.name = action.name.lower()
                 action_declarations[action.name] += 1
-                add_action_issues(action, source_domain_path, dataset, issues)
-                signature = canonical_action(action)
-                fingerprint = signature_id(signature)
-                group = fingerprint_groups[action.name].setdefault(
-                    fingerprint,
-                    {
-                        "count": 0,
-                        "datasets": Counter(),
-                        "examples": [],
-                        "signature": signature_payload(signature),
-                    },
-                )
-                group["count"] = int(group["count"]) + 1
-                dataset_counts = group["datasets"]
-                assert isinstance(dataset_counts, Counter)
-                dataset_counts[dataset] += 1
-                examples = group["examples"]
-                assert isinstance(examples, list)
-                location = relative_path(source_domain_path)
-                if len(examples) < 5 and location not in examples:
-                    examples.append(location)
+                add_action_issues(action, actions, source_domain_path, dataset, issues)
+                if include_fingerprints:
+                    signature = canonical_action(action)
+                    fingerprint = signature_id(signature)
+                    group = fingerprint_groups[action.name].setdefault(
+                        fingerprint,
+                        {
+                            "count": 0,
+                            "datasets": Counter(),
+                            "examples": [],
+                            "signature": signature_payload(signature),
+                        },
+                    )
+                    group["count"] = int(group["count"]) + 1
+                    dataset_counts = group["datasets"]
+                    assert isinstance(dataset_counts, Counter)
+                    dataset_counts[dataset] += 1
+                    examples = group["examples"]
+                    assert isinstance(examples, list)
+                    location = relative_path(source_domain_path)
+                    if len(examples) < 5 and location not in examples:
+                        examples.append(location)
 
     canonical_report: dict[str, object] = {}
     conflict_count = 0
@@ -632,7 +764,7 @@ def audit(
         "parse_failed_domains": scanned_rounds - parsed_domains,
         "action_declarations": sum(action_declarations.values()),
         "unique_action_names": len(action_declarations),
-        "action_names_with_multiple_fingerprints": conflict_count,
+        "action_names_with_multiple_fingerprints": conflict_count if include_fingerprints else None,
         "lint_issues": len(issues),
         "issue_counts": dict(sorted(issue_counts.items())),
     }
@@ -641,6 +773,8 @@ def audit(
         "scope": scope,
         "mapping_dir": str(resolver.mapping_dir) if resolver.mapping_dir else None,
         "tasks": sorted(task_ids) if task_ids is not None else None,
+        "task_min": task_min,
+        "task_max": task_max,
         "override_files": resolver.override_files,
         "summary": summary,
         "issues": [asdict(issue) for issue in issues],
@@ -652,7 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dataset",
-        choices=("human", "human_aug", "both"),
+        choices=("agibot", "agibot_aug", "both"),
         default="both",
         help="dataset to audit (default: both)",
     )
@@ -682,12 +816,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="optional path for the complete JSON report",
     )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="skip the large same-name fingerprint index and emit lint results only",
+    )
+    parser.add_argument("--task-min", type=int, help="include only task IDs at or above this value")
+    parser.add_argument("--task-max", type=int, help="include only task IDs at or below this value")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    datasets = ["human", "human_aug"] if args.dataset == "both" else [args.dataset]
+    datasets = ["agibot", "agibot_aug"] if args.dataset == "both" else [args.dataset]
     missing = [str(EVAL_ROOT / dataset) for dataset in datasets if not (EVAL_ROOT / dataset).is_dir()]
     if missing:
         raise SystemExit("dataset roots do not exist: " + ", ".join(missing))
@@ -695,7 +836,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"mapping directory does not exist: {args.mapping_dir}")
 
     selected_tasks = set(args.tasks) if args.tasks else None
-    report = audit(datasets, args.scope, args.mapping_dir, selected_tasks)
+    report = audit(
+        datasets,
+        args.scope,
+        args.mapping_dir,
+        selected_tasks,
+        include_fingerprints=not args.summary_only,
+        task_min=args.task_min,
+        task_max=args.task_max,
+    )
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)

@@ -192,6 +192,9 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
             task["instruction"],
             numbered_steps,
             numbered_plan,
+            predicted_domain=round_result["round_dir"] / "domain.pddl",
+            predicted_problem=round_result["round_dir"] / "problem.pddl",
+            pddl_plan=round_result["round_dir"] / "plan.txt",
         )
         (round_result["round_dir"] / "judge.json").write_text(
             json.dumps(judge_out, ensure_ascii=False, indent=2),

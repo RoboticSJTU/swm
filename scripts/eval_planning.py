@@ -16,7 +16,7 @@ from swm.pddl.planner import solve_pddl
 root_dir = Path(__file__).resolve().parent.parent
 
 eval_model = "9B_3e"
-judge_model = "gpt-5.6-sol"  # Qwen3.8-27B
+judge_model = "gemini-3.7-flash"  # Qwen3.8-27B
 translate_model = "qwen3.7-plus"  
 ROBOT_CONFIGURATION = "single-arm"
 
@@ -464,6 +464,8 @@ def judge_one(task: dict):
             ground_truth_problem=latest_round_problem(
                 root_dir / "eval_results" / "gt" / task["dataset"] / task["episode"]
             ),
+            predicted_domain=(save_dir / "domain.pddl") if eval_mode == "pddl" else None,
+            pddl_plan=(save_dir / "plan.txt") if eval_mode == "pddl" else None,
         )
 
         judge_file.write_text(

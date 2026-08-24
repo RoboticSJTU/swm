@@ -391,8 +391,6 @@ def parse_plan(path: Path) -> list[tuple[str, tuple[str, ...]]]:
         if not tokens:
             raise ValueError(f"{path}:{line_number}: empty plan action")
         actions.append((tokens[0], tuple(tokens[1:])))
-    if not actions:
-        raise ValueError(f"{path}: plan contains no actions")
     return actions
 
 

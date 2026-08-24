@@ -8,27 +8,38 @@ Judge whether an embodied robot plan is executable and fully satisfies the instr
 - Ground-truth reference plan:
 {kf_plan}
 
-- Evaluated plan:
-{nl_plan}
-
 - Initial scene image: attached.
+
+# Evaluated Symbolic Trace
+
+{pddl_context}
+
+# Auxiliary Initial-State Cross-check
+
+{initial_state_crosscheck}
 
 # Evidence Model
 
 - The Instruction is authoritative about what must be achieved, including any specified object, scope, method, tool, quantity, order, final relation, cleanup, return condition, or persistence.
 - The reference plan is one valid witness. Use it to infer relevant state changes and causal dependencies, but do not require its wording, incidental details, specific actions, or total order unless they are necessary from the Instruction or action semantics.
-- The image grounds object identities and the observable initial scene. An unclear image cannot overturn a necessary causal condition established by stronger evidence.
+- The image is authoritative for clear visible object identity, initial direct relations, and physical affordances. If it conflicts with a reference-plan scene claim, use the image for that scene fact; treat visually compatible color or name aliases as the same object, while an unclear image cannot overturn a necessary causal condition established by stronger evidence.
 - Other facts are unknown. Reject only when failure follows from the provided evidence or unambiguous action semantics. Do not invent hidden actions, hidden states, or unsupported physical constraints.
+- The symbolic trace is mechanically grounded from the evaluated domain and `plan.txt`; its symbols, effects, and goals are claims, not proof. They cannot invent an unsupported affordance or override clear visual evidence. A required state persists unless the trace explicitly removes it or an effect is logically incompatible; an added state alone is not a failure.
+- In the trace, `Before` lists the conditions claimed for that action; `not (...)` means the literal must not hold. `State change` lists only the claimed delta: `+` adds a literal and `-` removes one. It is not a complete observed state.
+- Treat every trace argument and direct relation as an exact binding. A nearby surface, enclosing container, or broad area does not make a different direct source or destination equivalent.
+- The auxiliary initial-state cross-check only highlights a potential discrepancy. Resolve it using the image and reference steps; do not reject a visually supported alias or an auxiliary-reference error solely because it is reported.
 
 # Plan Comparison Rules
 
 - Compare state transitions and task-relevant conditions, not text.
-- Accept supported aliases, paraphrases, independent reordering, harmless redundancy, and alternative paths that establish the same necessary states.
+- Accept supported aliases, paraphrases, independent reordering, and alternative paths that establish the same necessary states. Redundant actions are harmless only when each is physically executable and preserves the task contract.
 - Do not treat an action as necessary merely because it appears in the reference plan.
 - An action includes its inherent direct effects, but not separate acquisition, access, relocation, release, opening, closing, or other independently meaningful actions.
 - State persists until changed by a later action.
 - Direct support, containment, possession, and other typed relations are not interchangeable or transitive unless explicitly supported.
 - Instruction-required methods, tools, quantities, order, cleanup, return conditions, and persistence requirements cannot be replaced merely by reaching a similar final state.
+- For each pickup, verify its stated direct source. For each tool action, verify the tool is currently held. With one hand, an unrelated action cannot occur while a required object remains held.
+- A return-to-original requirement preserves the observed original relation, not merely a broad nearby surface.
 
 # Evaluation
 
