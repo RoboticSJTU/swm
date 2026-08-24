@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 Literal = tuple[str, ...]
@@ -25,6 +25,8 @@ class GroundAction:
     pre_neg: set[Literal]
     add_eff: set[Literal]
     del_eff: set[Literal]
+    equality_preconditions: set[Literal] = field(default_factory=set)
+    inequality_preconditions: set[Literal] = field(default_factory=set)
 
     def to_line(self) -> str:
         return f"({self.name} {' '.join(self.args)})"
@@ -194,29 +196,59 @@ def ground_plan(
                 for literal in literals
             }
 
-        add_effects = substitute(schema.add_eff)
+        pre_pos, equality_preconditions = split_equalities(substitute(schema.pre_pos))
+        pre_neg, inequality_preconditions = split_equalities(substitute(schema.pre_neg))
+        add_effects, equality_effects = split_equalities(substitute(schema.add_eff))
+        del_effects, inequality_effects = split_equalities(substitute(schema.del_eff))
+        if equality_effects or inequality_effects:
+            raise ValueError(f"Equality cannot be used as an effect of {name}")
+
         plan.append(
             GroundAction(
                 name,
                 args,
-                substitute(schema.pre_pos),
-                substitute(schema.pre_neg),
+                pre_pos,
+                pre_neg,
                 add_effects,
-                substitute(schema.del_eff) - add_effects,
+                del_effects - add_effects,
+                equality_preconditions,
+                inequality_preconditions,
             )
         )
     return plan
 
 
+def split_equalities(literals: set[Literal]) -> tuple[set[Literal], set[Literal]]:
+    equalities = {literal for literal in literals if literal[0] == "="}
+    for literal in equalities:
+        if len(literal) != 3:
+            raise ValueError(f"Equality must have exactly two arguments: {literal}")
+    return literals - equalities, equalities
+
+
 def apply_action(state: set[Literal], action: GroundAction) -> set[Literal]:
     missing = action.pre_pos - state
     violated = action.pre_neg & state
-    if missing or violated:
+    unequal = {
+        literal
+        for literal in action.equality_preconditions
+        if literal[1] != literal[2]
+    }
+    equal = {
+        literal
+        for literal in action.inequality_preconditions
+        if literal[1] == literal[2]
+    }
+    if missing or violated or unequal or equal:
         message = [f"Action not applicable: {action.to_line()}"]
         if missing:
             message.append(f"Missing positive preconditions: {sorted(missing)}")
         if violated:
             message.append(f"Violated negative preconditions: {sorted(violated)}")
+        if unequal:
+            message.append(f"Unsatisfied equality preconditions: {sorted(unequal)}")
+        if equal:
+            message.append(f"Violated inequality preconditions: {sorted(equal)}")
         raise ValueError("\n".join(message))
 
     next_state = state - action.del_eff

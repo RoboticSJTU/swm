@@ -1,4 +1,4 @@
-Given an instruction and image, generate complete PDDL files as a symbolic world model for high-level {robot_configuration} robotic planning.
+Given an instruction and image, generate complete PDDL files as a symbolic world model for high-level robotic planning.
 
 Input
 - Instruction: {instruction}

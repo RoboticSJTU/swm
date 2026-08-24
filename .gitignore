@@ -100,7 +100,5 @@ Thumbs.db
 /mergy.py
 /merged_domain.pddl
 /.sii/
-/docs/*
 /experiments/
 /paper/
-s/solver_temp/

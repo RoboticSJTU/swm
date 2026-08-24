@@ -2,13 +2,14 @@
 将 eval_results 中通过评测的 PDDL 数据整理成 ShareGPT 格式，用于多模态 SFT。
 
 主要流程：
-1. 读取 instruction，规范唯一对象编号和 on 堆叠顺序；
-2. 删除缺少文件、评测未通过或不在 instruction 中的 episode；
-3. 检查 :init 中冲突状态，冲突 episode 保留但不写入训练集；
-4. 仅保留 plan 使用的 action/predicate；
-5. 回写清洗后的 domain/problem，并生成 ShareGPT JSON。
+1. 读取 instruction 与只读 unified domain 的谓词标签，删除无效 episode；
+2. 对每个有效最新 round 检查 :init 冲突，安全改名对象并严格校验 plan；
+3. 按 plan 裁剪 action/predicate，并按语义重排 declaration、precondition、effect、init、goal；
+4. 回写清洗后的 source PDDL（保留 operator 注释），同步对象改名涉及的已有计划文本；
+5. 从同一份清洗结果生成无注释的 ShareGPT JSON。
 
-注意：无效 episode 会直接删除；需要人工复核的 :init 冲突只在终端汇报并跳过训练输出。
+注意：无效 episode 会直接删除；:init 冲突的 episode 保留 source 文件但不写入训练集；
+整个流程不调用 LLM、solver 或重规划。
 """
 
 import json
@@ -17,6 +18,7 @@ import shutil
 import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 
@@ -27,6 +29,14 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+
+from swm.pddl.postprocess import (
+    build_predicate_labels,
+    sort_action,
+    sort_facts,
+    sort_logic,
+    sort_predicate_declarations,
+)
 
 MODEL_NAME = "gpt-5.6-sol"
 TASK_DOMAINS = ["human", "human_aug"]
@@ -40,7 +50,7 @@ OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/{'_'.join(TASK_DOMAINS)}.
 ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
-MAX_WORKERS = 16
+MAX_WORKERS = 40
 
 
 
@@ -64,10 +74,14 @@ def parse_pddl(text):
             stack[-1].append(expression)
             stack.append(expression)
         elif token == ")":
+            if len(stack) == 1:
+                raise ValueError("PDDL 括号不匹配")
             stack.pop()
         else:
             stack[-1].append(token)
 
+    if len(stack) != 1 or len(root) != 1 or not isinstance(root[0], list):
+        raise ValueError("PDDL 结构不完整")
     return root[0]
 
 
@@ -75,22 +89,6 @@ def pddl_line(expression):
     if isinstance(expression, str):
         return expression
     return "(" + " ".join(pddl_line(item) for item in expression) + ")"
-
-
-def section_span(text, section_name):
-    """返回 (:init ...)、(:goal ...) 等 section 在原文中的位置。"""
-    match = re.search(r"\(\s*" + re.escape(section_name) + r"(?=\s|\))", text, re.I)
-    if match is None:
-        return None
-
-    depth = 0
-    for index in range(match.start(), len(text)):
-        if text[index] == "(":
-            depth += 1
-        elif text[index] == ")":
-            depth -= 1
-            if depth == 0:
-                return match.start(), index + 1
 
 
 def expression_head(expression):
@@ -114,20 +112,30 @@ def action_sections(domain):
     }
 
 
-def plan_action_names(plan_text):
-    """读取 plan 中 action 的首次出现顺序。"""
+def plan_actions(plan_text):
+    """严格读取 plan 中的 ground action。"""
     actions = []
-    seen = set()
     for raw_line in plan_text.splitlines():
         line = raw_line.split(";", 1)[0].strip()
         if not line or raw_line.lstrip().startswith((";", "#")):
             continue
         line = re.sub(r"^[\d.]+\s*:\s*", "", line)
         line = re.sub(r"\s*\[\s*[\d.]+\s*\]\s*$", "", line).strip()
-        match = re.fullmatch(r"\(\s*([^\s()]+)(?:\s+[^()]*)?\)", line)
+        match = re.fullmatch(r"\(\s*([^\s()]+)(?:\s+([^()]*?))?\s*\)", line)
         if match is None:
-            continue
-        name = match.group(1).lower()
+            raise ValueError(f"无法解析 plan 行: {raw_line.strip()}")
+        arguments = tuple(match.group(2).split()) if match.group(2) else ()
+        actions.append((match.group(1).lower(), arguments))
+    if not actions:
+        raise ValueError("没有可用 action")
+    return actions
+
+
+def plan_action_names(plan_text):
+    """返回 plan 中 action 的首次出现顺序。"""
+    actions = []
+    seen = set()
+    for name, _arguments in plan_actions(plan_text):
         if name not in seen:
             actions.append(name)
             seen.add(name)
@@ -177,6 +185,7 @@ def referenced_predicates(domain_text, problem_text, plan_actions):
 
 
 def action_comments(domain_text):
+    """保留每个 action 前连续的说明注释。"""
     comments = {}
     lines = domain_text.splitlines()
     for index, line in enumerate(lines):
@@ -184,55 +193,23 @@ def action_comments(domain_text):
         if match is None or ";" in line[:match.start()]:
             continue
         previous = index - 1
-        while previous >= 0 and not lines[previous].strip():
+        action_comments = []
+        while previous >= 0:
+            stripped = lines[previous].strip()
+            if stripped.startswith(";"):
+                action_comments.append(lines[previous])
+            elif stripped:
+                break
             previous -= 1
-        if previous >= 0 and lines[previous].lstrip().startswith(";"):
-            comments[match.group(1).lower()] = lines[previous].strip()
+        if action_comments:
+            comments[match.group(1).lower()] = list(reversed(action_comments))
     return comments
 
 
-def expression_end(text, start):
-    """找到从 start 处左括号开始的 PDDL 表达式末尾，忽略行注释。"""
-    depth = 0
-    in_comment = False
-    for index in range(start, len(text)):
-        character = text[index]
-        if in_comment:
-            if character == "\n":
-                in_comment = False
-            continue
-        if character == ";":
-            in_comment = True
-        elif character == "(":
-            depth += 1
-        elif character == ")":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-    return len(text)
-
-
-def raw_action_blocks(domain_text):
-    """按 action 名提取原始文本，避免改写 LLM 给出的 pre/eff 排版。"""
-    blocks = {}
-    pattern = re.compile(r"\(\s*:action\s+([^\s()]+)", re.IGNORECASE)
-    for match in pattern.finditer(domain_text):
-        line_start = domain_text.rfind("\n", 0, match.start()) + 1
-        if ";" in domain_text[line_start:match.start()]:
-            continue
-        name = match.group(1).lower()
-        end = expression_end(domain_text, match.start())
-        blocks[name] = domain_text[match.start():end].rstrip()
-    return blocks
-
-
-def append_action(lines, action, blocks=None, comments=None):
+def append_action(lines, action, comments=None):
     name = action[1]
     if comments is not None and name.lower() in comments:
-        lines.append("  " + comments[name.lower()])
-    if blocks is not None:
-        lines.append("  " + blocks[name.lower()])
-        return
+        lines.extend(comments[name.lower()])
 
     lines.append(f"  (:action {name}")
     for key, value in zip(action[2::2], action[3::2]):
@@ -244,13 +221,26 @@ def domain_name(domain):
     return domain[1][1]
 
 
-def render_domain(domain_text, referenced, plan_actions, source=False):
-    """渲染同一份 action 子集；回写源文件时保留 action 原文。"""
+def render_domain(domain_text, referenced, plan_actions, labels, source=False):
+    """渲染同一份已裁剪、已排序的 action 子集。"""
     domain = parse_pddl(domain_text)
     selected_actions = ordered_actions(domain, plan_actions)
-    blocks = raw_action_blocks(domain_text) if source else None
     comments = action_comments(domain_text) if source else None
     name = domain_name(domain) if source else PDDL_DOMAIN_NAME
+    declarations = [
+        predicate
+        for section in domain[2:]
+        if expression_head(section) == ":predicates"
+        for predicate in section[1:]
+        if predicate_name(predicate) in referenced
+    ]
+    declarations = sort_predicate_declarations(declarations, labels)
+    declaration_order = {
+        predicate_name(predicate): index
+        for index, predicate in enumerate(declarations)
+    }
+    for action in selected_actions:
+        sort_action(action, labels, declaration_order)
     lines = [f"(define (domain {name})"]
 
     for section in domain[2:]:
@@ -261,11 +251,7 @@ def render_domain(domain_text, referenced, plan_actions, source=False):
             lines.append("  (:requirements " + " ".join(section[1:]) + ")")
         elif section_name == ":predicates":
             lines.append("  (:predicates")
-            lines.extend(
-                "    " + pddl_line(predicate)
-                for predicate in section[1:]
-                if predicate_name(predicate) in referenced
-            )
+            lines.extend("    " + pddl_line(predicate) for predicate in declarations)
             lines.append("  )")
         else:
             lines.append("  " + pddl_line(section))
@@ -273,29 +259,31 @@ def render_domain(domain_text, referenced, plan_actions, source=False):
     for action in selected_actions:
         if len(lines) > 1:
             lines.append("")
-        append_action(lines, action, blocks, comments)
+        append_action(lines, action, comments)
 
     lines.append(")")
     return "\n".join(lines) + ("\n" if source else "")
 
 
-def format_domain(domain_text, referenced, plan_actions):
+def format_domain(domain_text, referenced, plan_actions, labels):
     """ShareGPT 使用的简化 domain；action 结构与源文件保持同一顺序。"""
     return render_domain(
         domain_text,
         referenced,
         plan_actions,
+        labels,
         source=False,
     )
 
 
-def format_source_domain(domain_text, problem_text, plan_actions):
+def format_source_domain(domain_text, problem_text, plan_actions, labels):
     """用于回写的 domain，保留原 domain 名、requirements 与 action 注释。"""
     referenced = referenced_predicates(domain_text, problem_text, plan_actions)
     return render_domain(
         domain_text,
         referenced,
         plan_actions,
+        labels,
         source=True,
     )
 
@@ -329,86 +317,43 @@ def init_conflicts(problem_text):
     return []
 
 
-def reorder_stacks(atoms, goal=False):
-    """将相连的 (on A B) 按照从上到下的顺序排列。"""
-    on_atoms = [
-        (index, atom)
-        for index, atom in enumerate(atoms)
-        if len(atom) == 3 and expression_head(atom) == "on"
-    ]
-    if len(on_atoms) < 2:
-        return atoms
-
-    same_above = {}
-    for index, atom in on_atoms:
-        if atom[1] not in same_above:
-            same_above[atom[1]] = []
-        same_above[atom[1]].append((index, atom))
-
-    # 冲突关系已在 episode 处理阶段拦截；这里仍不对歧义关系做自动猜测。
-    links = {
-        above: records[0]
-        for above, records in same_above.items()
-        if len(records) == 1
-    }
-    below = {atom[2] for _, atom in links.values()}
-    tops = sorted(
-        (above for above in links if above not in below),
-        key=lambda above: links[above][0],
-    )
-
-    chains = []
-    used = set()
-    for top in tops:
-        chain = []
-        seen = set()
-        current = top
-        while current in links and current not in seen:
-            seen.add(current)
-            index, atom = links[current]
-            chain.append((index, atom))
-            current = atom[2]
-        if len(chain) >= 2 and current not in seen:
-            chains.append(chain)
-            used.update(index for index, _ in chain)
-
-    if not chains:
-        return atoms
-
-    chains.sort(key=lambda chain: min(index for index, _ in chain))
-    ordered_on = [atom for chain in chains for _, atom in chain]
-    ordered_on.extend(atom for index, atom in on_atoms if index not in used)
-
-    if goal:
-        non_on = [atom for atom in atoms if expression_head(atom) != "on" or len(atom) != 3]
-        return ordered_on + non_on
-
-    result = list(atoms)
-    on_positions = [index for index, atom in enumerate(atoms) if len(atom) == 3 and expression_head(atom) == "on"]
-    if len(on_positions) != len(ordered_on):
-        return atoms
-    for index, atom in zip(on_positions, ordered_on):
-        result[index] = atom
-    return result
+def domain_predicate_order(domain_text):
+    domain = parse_pddl(domain_text)
+    for section in domain[2:]:
+        if expression_head(section) == ":predicates":
+            return {
+                predicate_name(predicate): index
+                for index, predicate in enumerate(section[1:])
+            }
+    raise ValueError("domain 缺少 :predicates")
 
 
-def format_problem(problem_text):
-    problem = parse_pddl(problem_text)
-    objects = None
+def sorted_problem_parts(problem, labels, declaration_order):
     init = None
     goal = None
+    for section in problem[2:]:
+        if expression_head(section) == ":init":
+            init = sort_facts(section[1:], labels, declaration_order)
+        elif expression_head(section) == ":goal":
+            if len(section) != 2:
+                raise ValueError(":goal 格式错误")
+            goal = sort_logic(section[1], labels, declaration_order, {})
+    return init, goal
+
+
+def format_problem(problem_text, labels, declaration_order):
+    problem = parse_pddl(problem_text)
+    objects = None
     extra_sections = []
 
     for section in problem[2:]:
         name = expression_head(section)
         if name == ":objects" and objects is None:
             objects = section
-        elif name == ":init" and init is None:
-            init = section
-        elif name == ":goal" and goal is None:
-            goal = section
-        elif name != ":domain":
+        elif name not in {":domain", ":objects", ":init", ":goal"}:
             extra_sections.append(section)
+
+    init, goal = sorted_problem_parts(problem, labels, declaration_order)
 
     lines = ["(define (problem task)", f"  (:domain {PDDL_DOMAIN_NAME})"]
 
@@ -424,17 +369,16 @@ def format_problem(problem_text):
         lines.append("  (:objects " + " ".join(object_names) + ")")
 
     if init is not None:
-        atoms = reorder_stacks(init[1:])
         lines.append("  (:init")
-        lines.extend("    " + pddl_line(atom) for atom in atoms)
+        lines.extend("    " + pddl_line(atom) for atom in init)
         lines.append("  )")
 
     if goal is not None:
         lines.append("  (:goal")
-        condition = goal[1]
+        condition = goal
         atoms = condition[1:] if expression_head(condition) == "and" else [condition]
         lines.append("    (and")
-        lines.extend("      " + pddl_line(atom) for atom in reorder_stacks(atoms, goal=True))
+        lines.extend("      " + pddl_line(atom) for atom in atoms)
         lines.extend(["    )", "  )"])
 
     lines.extend("  " + pddl_line(section) for section in extra_sections)
@@ -442,40 +386,34 @@ def format_problem(problem_text):
     return "\n".join(lines)
 
 
-def reorder_problem_text(text):
-    """只重排 :init/:goal 中已存在的堆叠关系，不直接写文件。"""
-    replacements = []
-
-    for section_name in (":init", ":goal"):
-        span = section_span(text, section_name)
-        if span is None:
-            continue
-
-        section = parse_pddl(text[span[0]:span[1]])
-        if section_name == ":init":
-            old_atoms = section[1:]
-            new_atoms = reorder_stacks(old_atoms)
-            lines = ["  (:init"]
-            lines.extend("    " + pddl_line(atom) for atom in new_atoms)
+def format_source_problem(problem_text, labels, declaration_order):
+    """保留 source problem 的名称、对象与其他 section，只重排 literal。"""
+    problem = parse_pddl(problem_text)
+    init, goal = sorted_problem_parts(problem, labels, declaration_order)
+    lines = ["(define " + pddl_line(problem[1])]
+    for section in problem[2:]:
+        name = expression_head(section)
+        if name == ":init":
+            lines.append("  (:init")
+            lines.extend("    " + pddl_line(atom) for atom in init)
+            lines.append("  )")
+        elif name == ":goal":
+            lines.append("  (:goal")
+            if expression_head(goal) == "and":
+                lines.append("    (and")
+                lines.extend("      " + pddl_line(atom) for atom in goal[1:])
+                lines.append("    )")
+            else:
+                lines.append("    " + pddl_line(goal))
             lines.append("  )")
         else:
-            condition = section[1]
-            old_atoms = condition[1:] if expression_head(condition) == "and" else [condition]
-            new_atoms = reorder_stacks(old_atoms, goal=True)
-            lines = ["  (:goal", "    (and"]
-            lines.extend("      " + pddl_line(atom) for atom in new_atoms)
-            lines.extend(["    )", "  )"])
-
-        if new_atoms != old_atoms:
-            replacements.append((span[0], span[1], "\n".join(lines)))
-
-    for start, end, section in reversed(replacements):
-        text = text[:start] + section + text[end:]
-    return text
+            lines.append("  " + pddl_line(section))
+    lines.append(")")
+    return "\n".join(lines) + "\n"
 
 
 # ============================================================
-# episode 预处理：对象改名和堆叠重排
+# episode 预处理：对象改名
 # ============================================================
 
 def latest_round(episode_dir):
@@ -502,8 +440,8 @@ def init_hand_states(problem_text):
     return []
 
 
-def rename_numbered_objects_text(text):
-    """仅将唯一的 object1 改为 object；存在多实例歧义时不改名。"""
+def numbered_object_renames(text):
+    """返回可安全改为无编号形式的唯一对象映射。"""
     objects = []
     for section in parse_pddl(text)[2:]:
         if expression_head(section) != ":objects":
@@ -528,30 +466,63 @@ def rename_numbered_objects_text(text):
         groups[base].append((name, number))
 
     rename_map = {}
-    needs_review = False
     for base, items in groups.items():
         numbers = {number for _, number in items}
         if 1 not in numbers:
             continue
         names_ending_in_one = [name for name, number in items if number == 1]
-        if numbers != {1} or len(names_ending_in_one) != 1 or base in objects:
-            needs_review = True
-        else:
+        if numbers == {1} and len(names_ending_in_one) == 1 and base not in objects:
             rename_map[names_ending_in_one[0]] = base
+    return rename_map
 
-    if needs_review or not rename_map:
+
+def replace_object_tokens(text, rename_map):
+    if not rename_map:
         return text
-
+    replacements = {name.lower(): value for name, value in rename_map.items()}
     names = sorted(rename_map, key=len, reverse=True)
     pattern = re.compile(
-        r"(?<![A-Za-z0-9_\-])(" + "|".join(re.escape(name) for name in names) + r")(?![A-Za-z0-9_\-])"
+        r"(?<![A-Za-z0-9_\-])(" + "|".join(re.escape(name) for name in names) + r")(?![A-Za-z0-9_\-])",
+        re.IGNORECASE,
     )
-    return pattern.sub(lambda match: rename_map[match.group(1)], text)
+    return pattern.sub(lambda match: replacements[match.group(1).lower()], text)
 
 
-def preprocess_problem_text(text):
-    """把 problem 的局部规范化纳入同一次事务式回写。"""
-    return reorder_problem_text(rename_numbered_objects_text(text))
+def action_parameters(action):
+    for key, value in zip(action[2::2], action[3::2]):
+        if key.lower() == ":parameters" and isinstance(value, list):
+            return [item for item in value if isinstance(item, str) and item.startswith("?")]
+    raise ValueError(f"action {action[1]} 缺少 :parameters")
+
+
+def problem_objects(problem_text):
+    for section in parse_pddl(problem_text)[2:]:
+        if expression_head(section) == ":objects":
+            objects = set()
+            index = 1
+            while index < len(section):
+                if section[index] == "-":
+                    index += 2
+                else:
+                    objects.add(section[index].lower())
+                    index += 1
+            return objects
+    raise ValueError("problem 缺少 :objects")
+
+
+def validate_plan(domain_text, problem_text, plan_text):
+    actions = action_sections(parse_pddl(domain_text))
+    objects = problem_objects(problem_text)
+    plan = plan_actions(plan_text)
+    for name, arguments in plan:
+        if name not in actions:
+            raise ValueError(f"plan action '{name}' 未在 domain 定义")
+        if len(arguments) != len(action_parameters(actions[name])):
+            raise ValueError(f"plan action '{name}' 参数数量不匹配")
+        unknown = [argument for argument in arguments if argument.lower() not in objects]
+        if unknown:
+            raise ValueError(f"plan action '{name}' 使用未声明对象: {', '.join(unknown)}")
+    return plan
 
 
 def atomic_write(path, text):
@@ -618,7 +589,7 @@ def find_image(task_domain, task_id, episode_id):
     return None
 
 
-def prepare_round(item):
+def prepare_round(item, labels):
     key, round_dir = item
     try:
         domain_raw = (round_dir / "domain.pddl").read_text(encoding="utf-8")
@@ -631,20 +602,48 @@ def prepare_round(item):
             message = f"{problem_path}: " + " | ".join(conflicts)
             return key, None, "[INIT CONFLICT] " + message, message, None
 
-        source_problem = preprocess_problem_text(problem_raw)
-        plan_actions = plan_action_names(plan_raw)
-        source_domain = format_source_domain(domain_raw, source_problem, plan_actions)
+        rename_map = numbered_object_renames(problem_raw)
+        renamed_problem = replace_object_tokens(problem_raw, rename_map)
+        renamed_plan = replace_object_tokens(plan_raw, rename_map)
+        plan = validate_plan(domain_raw, renamed_problem, renamed_plan)
+        plan_names = []
+        for name, _arguments in plan:
+            if name not in plan_names:
+                plan_names.append(name)
 
-        if source_domain != domain_raw:
-            atomic_write(round_dir / "domain.pddl", source_domain)
-        if source_problem != problem_raw:
-            atomic_write(round_dir / "problem.pddl", source_problem)
-
-        referenced = referenced_predicates(domain_raw, source_problem, plan_actions)
-        prepared = (
-            format_domain(domain_raw, referenced, plan_actions),
-            format_problem(source_problem),
+        source_domain = format_source_domain(
+            domain_raw,
+            renamed_problem,
+            plan_names,
+            labels,
         )
+        declaration_order = domain_predicate_order(source_domain)
+        source_problem = format_source_problem(
+            renamed_problem,
+            labels,
+            declaration_order,
+        )
+        referenced = predicate_declarations(parse_pddl(source_domain))
+        prepared = (
+            format_domain(source_domain, referenced, plan_names, labels),
+            format_problem(source_problem, labels, declaration_order),
+        )
+
+        updates = [
+            (round_dir / "domain.pddl", source_domain),
+            (round_dir / "problem.pddl", source_problem),
+            (round_dir / "plan.txt", renamed_plan),
+        ]
+        for name in ("plan_nl.txt",):
+            path = round_dir / name
+            if path.is_file():
+                updates.append((path, replace_object_tokens(path.read_text(encoding="utf-8"), rename_map)))
+        kf_plan = round_dir.parent / "kf_plan.txt"
+        if kf_plan.is_file():
+            updates.append((kf_plan, replace_object_tokens(kf_plan.read_text(encoding="utf-8"), rename_map)))
+        for path, text in updates:
+            if path.read_text(encoding="utf-8") != text:
+                atomic_write(path, text)
 
         review = None
         if ROBOT_CONFIGURATION == "single-arm":
@@ -666,6 +665,9 @@ def process_domain(task_domain, prompt_template):
     eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
     records = read_instructions(task_domain)
     allowed = {(task_id, episode_id) for task_id, episode_id, _ in records}
+    labels = build_predicate_labels(
+        parse_pddl((eval_root / "unified_domain.pddl").read_text(encoding="utf-8"))
+    )
 
     valid_rounds = {}
     removed = 0
@@ -704,8 +706,13 @@ def process_domain(task_domain, prompt_template):
 
     workers = min(MAX_WORKERS, len(valid_rounds)) if valid_rounds else 1
     print(f"[{task_domain}] preparing {len(valid_rounds)} episode(s) with {workers} processes")
+    invalid_keys = []
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        results = executor.map(prepare_round, valid_rounds.items(), chunksize=50)
+        results = executor.map(
+            partial(prepare_round, labels=labels),
+            list(valid_rounds.items()),
+            chunksize=50,
+        )
         for key, prepared, review, init_review, pddl_error in results:
             if prepared is not None:
                 prepared_rounds[key] = prepared
@@ -715,6 +722,11 @@ def process_domain(task_domain, prompt_template):
                 init_reviews.append(init_review)
             if pddl_error is not None:
                 pddl_errors.append(pddl_error)
+                invalid_keys.append(key)
+
+    for key in invalid_keys:
+        shutil.rmtree(valid_rounds.pop(key).parent)
+        removed += 1
 
     samples = []
     missing_episode = 0

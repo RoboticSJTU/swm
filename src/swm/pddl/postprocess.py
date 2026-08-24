@@ -5,9 +5,174 @@ from typing import Union
 
 PDDL = Union[str, list["PDDL"]]
 
+CATEGORY_ORDER = {"type": 0, "state": 1, "relation": 2}
+
 
 class PDDLPostprocessError(ValueError):
     pass
+
+
+def _head(node: PDDL) -> str:
+    return node[0].lower() if isinstance(node, list) and node and isinstance(node[0], str) else ""
+
+
+def _predicate_name(node: PDDL) -> str:
+    if _head(node) == "not" and isinstance(node, list) and len(node) == 2:
+        node = node[1]
+    name = _head(node)
+    return "" if name in {"", "and", "or", "when", "forall", "exists", "imply"} else name
+
+
+def _predicate_arity(declaration: PDDL) -> int:
+    if not isinstance(declaration, list):
+        raise ValueError("invalid predicate declaration")
+    return sum(isinstance(value, str) and value.startswith("?") for value in declaration[1:])
+
+
+def _action_field(action: PDDL, field: str) -> PDDL:
+    if not isinstance(action, list) or _head(action) != ":action":
+        raise ValueError("expected an action")
+    for index in range(2, len(action) - 1, 2):
+        if action[index] == field:
+            return action[index + 1]
+    raise ValueError(f"action is missing {field}")
+
+
+def _effect_predicates(node: PDDL, signatures: dict[str, int]) -> set[str]:
+    """Return predicate names added or deleted by a STRIPS effect."""
+    if isinstance(node, str) or not node:
+        return set()
+    operator = _head(node)
+    if operator == "not":
+        return _effect_predicates(node[1], signatures) if len(node) == 2 else set()
+    if operator in signatures:
+        arguments = node[1:]
+        return {
+            operator
+        } if len(arguments) == signatures[operator] and all(
+            isinstance(value, str) for value in arguments
+        ) else set()
+    if operator == "and":
+        return set().union(
+            *(_effect_predicates(child, signatures) for child in node[1:])
+        )
+    return set()
+
+
+def build_predicate_labels(domain: PDDL) -> dict[str, dict[str, object]]:
+    """Classify declarations using only the domain's action syntax."""
+    if not isinstance(domain, list) or _head(domain) != "define":
+        raise ValueError("invalid domain")
+
+    declarations = next(
+        (
+            section[1:]
+            for section in domain[2:]
+            if isinstance(section, list) and _head(section) == ":predicates"
+        ),
+        None,
+    )
+    if declarations is None:
+        raise ValueError("domain has no :predicates")
+
+    signatures: dict[str, int] = {}
+    for declaration in declarations:
+        name = _predicate_name(declaration)
+        arity = _predicate_arity(declaration)
+        if not name or (name in signatures and signatures[name] != arity):
+            raise ValueError(f"invalid predicate declaration: {declaration!r}")
+        signatures.setdefault(name, arity)
+
+    changed: set[str] = set()
+    for action in (
+        section
+        for section in domain[2:]
+        if isinstance(section, list) and _head(section) == ":action"
+    ):
+        effect = _action_field(action, ":effect")
+        changed.update(_effect_predicates(effect, signatures))
+
+    return {
+        name: {
+            "arity": arity,
+            # holding is the binary state of a hand, not a generic relation.
+            "category": "type" if arity == 1 and name not in changed else "state" if arity <= 1 or name == "holding" else "relation",
+            "rank": index,
+        }
+        for index, (name, arity) in enumerate(signatures.items())
+    }
+
+
+def sort_predicate_declarations(declarations: list[PDDL], labels: dict[str, dict[str, object]]) -> list[PDDL]:
+    for declaration in declarations:
+        name = _predicate_name(declaration)
+        label = labels.get(name)
+        if label is None or _predicate_arity(declaration) != label["arity"]:
+            raise ValueError(f"unclassified predicate '{name}'")
+    return sorted(
+        declarations,
+        key=lambda declaration: (
+            CATEGORY_ORDER[labels[_predicate_name(declaration)]["category"]],
+            labels[_predicate_name(declaration)]["rank"],
+        ),
+    )
+
+
+def literal_sort_key(
+    item: PDDL,
+    labels: dict[str, dict[str, object]],
+    declaration_order: dict[str, int],
+    parameter_order: dict[str, int],
+) -> tuple[int, bool, int, int]:
+    name = _predicate_name(item)
+    literal = item[1] if _head(item) == "not" and isinstance(item, list) and len(item) == 2 else item
+    first_argument = (
+        literal[1].lower()
+        if isinstance(literal, list) and len(literal) > 1 and isinstance(literal[1], str)
+        else ""
+    )
+    label = labels.get(name)
+    return (
+        CATEGORY_ORDER[label["category"]] if label else len(CATEGORY_ORDER),
+        _head(item) != "not",
+        parameter_order.get(first_argument, len(parameter_order)),
+        declaration_order.get(name, len(declaration_order)),
+    )
+
+
+def sort_logic(
+    node: PDDL,
+    labels: dict[str, dict[str, object]],
+    declaration_order: dict[str, int],
+    parameter_order: dict[str, int],
+) -> PDDL:
+    if isinstance(node, str) or not node:
+        return node
+    operator = _head(node)
+    children = [sort_logic(child, labels, declaration_order, parameter_order) for child in node[1:]]
+    if operator == "and":
+        children.sort(key=lambda child: literal_sort_key(child, labels, declaration_order, parameter_order))
+    return [node[0], *children]
+
+
+def sort_action(
+    action: list[PDDL], labels: dict[str, dict[str, object]], declaration_order: dict[str, int]
+) -> None:
+    parameters = _action_field(action, ":parameters")
+    parameter_order = {
+        value.lower(): index
+        for index, value in enumerate(parameters if isinstance(parameters, list) else [])
+        if isinstance(value, str) and value.startswith("?")
+    }
+    for index in range(2, len(action) - 1, 2):
+        if action[index] in {":precondition", ":effect"}:
+            action[index + 1] = sort_logic(action[index + 1], labels, declaration_order, parameter_order)
+
+
+def sort_facts(
+    facts: list[PDDL], labels: dict[str, dict[str, object]], declaration_order: dict[str, int]
+) -> list[PDDL]:
+    return sorted(facts, key=lambda fact: literal_sort_key(fact, labels, declaration_order, {}))
 
 
 def _name(token: str) -> str:
@@ -65,8 +230,10 @@ def _parse(text: str) -> PDDL:
             return node
         values = [normalize(value) for value in node]
         if values and values[0] == "and":
-            unique = {repr(value): value for value in values[1:]}
-            return ["and"] + [unique[key] for key in sorted(unique)]
+            unique = {}
+            for value in values[1:]:
+                unique.setdefault(repr(value), value)
+            return ["and", *unique.values()]
         return values
 
     return normalize(root[0])
@@ -126,6 +293,15 @@ def _action_comments(text: str) -> dict[str, str]:
             )
             comments[_name(match.group(1))] = comment
     return comments
+
+
+def _unordered_signature(node: PDDL):
+    if isinstance(node, str):
+        return node
+    values = [_unordered_signature(value) for value in node]
+    if _head(node) in {"and", "or"}:
+        values[1:] = sorted(values[1:], key=repr)
+    return tuple(values)
 
 
 def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
@@ -220,7 +396,7 @@ def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
             fields[":effect"],
         ]
         if action[1] in action_names:
-            if action_names[action[1]] != canonical:
+            if _unordered_signature(action_names[action[1]]) != _unordered_signature(canonical):
                 raise PDDLPostprocessError(
                     f"different contracts share action name: {action[1]}"
                 )
@@ -327,16 +503,21 @@ def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
         raise PDDLPostprocessError("empty goal")
     validate(init, None, "init", False)
     validate(goal, None, "goal", False)
-    predicates = sorted(
-        (predicate for predicate in predicates if predicate[0] in used_predicates),
-        key=lambda value: (value[0], len(value), repr(value)),
+    labels = build_predicate_labels(domain)
+    predicates = sort_predicate_declarations(
+        [predicate for predicate in predicates if predicate[0] in used_predicates],
+        labels,
     )
+    declaration_order = {predicate[0]: index for index, predicate in enumerate(predicates)}
     clean_actions.sort(key=lambda value: value[1])
+    for action in clean_actions:
+        sort_action(action, labels, declaration_order)
     init_facts = [fact for _, fact in _facts(init)]
-    init_facts = [
-        value
-        for _, value in sorted({repr(value): value for value in init_facts}.items())
-    ]
+    unique_init = {}
+    for fact in init_facts:
+        unique_init.setdefault(repr(fact), fact)
+    init_facts = sort_facts(list(unique_init.values()), labels, declaration_order)
+    goal = sort_logic(goal, labels, declaration_order, {})
 
     domain_lines = [f"(define (domain {domain[1][1]})"]
     if requirements_section is not None:

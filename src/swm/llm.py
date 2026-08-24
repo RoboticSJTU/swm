@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -21,7 +22,6 @@ def get_client(model: str):
         api_key = os.getenv("A6_API_KEY")
         base_url = "https://api.a6api.com/v1"
 
-
     elif model.startswith(("kimi-k3", "qwen3.7-max", "glm-5.2")):
         api_key = os.getenv("BOYUE_API_KEY")
         base_url = "https://apicz.boyuerichdata.com/v1"
@@ -33,13 +33,17 @@ def get_client(model: str):
     else:
         api_key = "0"
         base_url = "http://127.0.0.1:8001/v1"
-    return OpenAI(api_key=api_key, base_url=base_url, http_client=httpx.Client(trust_env=False))
+
+    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def call_gpt(
     model: str,
     prompt: str,
     image_paths: list[Path] | None = None,
+    *,
+    response_format: dict | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     content = [{"type": "text", "text": prompt}]
     if image_paths:
@@ -59,12 +63,23 @@ def call_gpt(
         "model": model,
         "messages": [{"role": "user", "content": content}],
     }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
 
     if str(client.base_url).startswith("http://127.0.0.1") or model.startswith(("gemini", "gpt")):
         kwargs["temperature"] = 0
 
     try:
-        return client.chat.completions.create(**kwargs).choices[0].message.content
+        completion = client.chat.completions.create(**kwargs)
+        choice = completion.choices[0]
+        if response_format is not None and choice.finish_reason != "stop":
+            raise ValueError(
+                "structured model response did not finish normally: "
+                f"{choice.finish_reason!r}"
+            )
+        return choice.message.content
     finally:
         client.close()
 
@@ -73,21 +88,50 @@ def call_gpt_json(
     model: str,
     prompt: str,
     image_paths: list[Path] | None = None,
+    *,
+    response_format: dict | None = None,
+    attempts: int = 3,
+    max_tokens: int | None = None,
 ):
-    for _ in range(20):
+    if type(attempts) is not int or not 1 <= attempts <= 5:
+        raise ValueError("attempts must be an integer from 1 to 5")
+    last_error: Exception | None = None
+    for attempt in range(attempts):
         output = None
         try:
-            output = call_gpt(model, prompt, image_paths)
-            output = strip_think_output(output)
-            response_json = json.loads(repair_json(output))
-            if isinstance(response_json, dict):
-                return response_json
+            call_kwargs = {}
+            if max_tokens is not None:
+                call_kwargs["max_tokens"] = max_tokens
+            if response_format is None:
+                output = call_gpt(model, prompt, image_paths, **call_kwargs)
+            else:
+                output = call_gpt(
+                    model,
+                    prompt,
+                    image_paths,
+                    response_format=response_format,
+                    **call_kwargs,
+                )
+            if response_format is None:
+                output = strip_think_output(output)
+                json_text = repair_json(output)
+            else:
+                json_text = output
+            response_json = json.loads(json_text)
+            if not isinstance(response_json, dict):
+                raise ValueError("model response is not a JSON object")
+            return response_json
         except Exception as error:
+            last_error = error
             print(f"call gpt error: {error}")
             if output is not None:
-                print(output)
+                print(output[:2000])
+            if attempt + 1 < attempts:
+                time.sleep(2**attempt)
 
-    raise RuntimeError("model did not return a JSON object after 20 attempts")
+    raise RuntimeError(
+        f"model did not return a JSON object after {attempts} attempts"
+    ) from last_error
 
 
 def strip_think_output(text: str) -> str:

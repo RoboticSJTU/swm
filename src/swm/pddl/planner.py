@@ -104,7 +104,7 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
         pass
 
 
-def _run_fast_downward(cmd: list[object], cwd: Path) -> None:
+def _run_fast_downward(cmd: list[object], cwd: Path) -> tuple[str, str]:
     """Run Fast Downward under both an internal and process-tree wall guard."""
 
     process = subprocess.Popen(
@@ -138,9 +138,10 @@ def _run_fast_downward(cmd: list[object], cwd: Path) -> None:
             output=stdout,
             stderr=stderr,
         )
+    return stdout, stderr
 
 
-def solve_pddl(domain_file, problem_file, *, reorder_plan=True):
+def solve_pddl(domain_file, problem_file, *, reorder_plan=True, capture: dict | None = None):
     """求解PDDL，并返回True或False来判断是否求解成功，且支持并行化求解"""
 
     domain_file = Path(domain_file).resolve()
@@ -161,14 +162,32 @@ def solve_pddl(domain_file, problem_file, *, reorder_plan=True):
         "astar(lmcut())",
     ]
     try:
-        _run_fast_downward(cmd, domain_file.parent)
+        stdout, stderr = _run_fast_downward(cmd, domain_file.parent)
         if reorder_plan:
             plan_reorder(domain_file, problem_file, plan_file, plan_file)
+        if capture is not None:
+            capture.update(
+                {
+                    "command": [str(part) for part in cmd],
+                    "exit_status": 0,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }
+            )
         return True
 
     except Exception as e:
         stdout = _output_text(getattr(e, "stdout", None))
         stderr = _output_text(getattr(e, "stderr", None))
+        if capture is not None:
+            capture.update(
+                {
+                    "command": [str(part) for part in cmd],
+                    "exit_status": getattr(e, "returncode", None),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }
+            )
         details = [f"{type(e).__name__}: {e}"]
         if stdout:
             details.append(f"stdout:\n{stdout}")

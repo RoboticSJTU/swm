@@ -9,6 +9,7 @@
 
 - Model each action as a minimal causal transition, not as a scene snapshot.
 - Include only direct participants, necessary preconditions, and immediate effects; remove anything that does not affect applicability or the direct transition.
+- Include a schema for every supplied manipulation step that changes holding, support, containment, or device state, even when the initial scene lets a shortest plan omit it.
 - For finite transfers, delete the source relation when adding the target relation; model unlimited sources with static `dispenses`.
 - Add a process result only to the action that completes the process.
 - For every object category, an oriented placement must require the visually supported source pose and change only that pose: delete the source pose and add the target pose. Do not emit unrelated pose negations. Picking preserves pose; when the source and target pose are identical, placement has no pose effect.

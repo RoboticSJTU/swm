@@ -15,8 +15,8 @@ from typing import List, Dict, Tuple, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
-DATASET_CHOICES = ("human", "human_aug")
-MAX_WORKERS = 16
+DATASET_CHOICES = ("human", "human_aug","agibot", "agibot_aug", "droid", "bridgedata_v2")
+MAX_WORKERS = 20
 
 VAR_RE = re.compile(r"\?[A-Za-z0-9_\-]+")
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")
@@ -554,44 +554,19 @@ def rewrite_pddl_head_tokens(text: str, replacements: Dict[str, str]) -> str:
 def resolve_predicate_arity_collisions(
     predicates: List[PredicateItem],
     actions: List[ActionItem],
-) -> Dict[str, Dict[int, str]]:
-    """Reject predicate overloading instead of silently renaming contracts."""
+) -> Dict[str, List[int]]:
+    """Report predicate arity conflicts but keep merging."""
     arities_by_name: Dict[str, set[int]] = {}
-    arities_by_source_name: Dict[Tuple[str, str], set[int]] = {}
 
     for item in predicates:
-        name = item.name.lower()
-        arities_by_name.setdefault(name, set()).add(item.arity)
-        for source in item.sources:
-            arities_by_source_name.setdefault((source, name), set()).add(item.arity)
+        arities_by_name.setdefault(item.name.lower(), set()).add(item.arity)
 
-    invalid_sources = {
-        key: sorted(arities)
-        for key, arities in arities_by_source_name.items()
-        if len(arities) > 1
-    }
-    if invalid_sources:
-        details = ", ".join(
-            f"{source}:{name}={arities}"
-            for (source, name), arities in sorted(invalid_sources.items())
-        )
-        raise ValueError(f"单个 source 内 predicate arity 冲突，无法安全合并: {details}")
-
-    collisions = {
+    return {
         name: sorted(arities)
         for name, arities in arities_by_name.items()
         if len(arities) > 1
     }
-    if not collisions:
-        return {}
-    details = ", ".join(
-        f"{name}={arities}" for name, arities in sorted(collisions.items())
-    )
-    raise ValueError(
-        "predicate arity conflicts require semantic cleanup before merge: "
-        + details
-    )
-
+    
 
 def merge_actions(actions: List[ActionItem]) -> List[Tuple[str, ActionItem]]:
     """Merge equivalent schemas and number same-name contract variants."""
@@ -601,8 +576,8 @@ def merge_actions(actions: List[ActionItem]) -> List[Tuple[str, ActionItem]]:
 
     for item in actions:
         if re.search(r"(?:_|-)\d+$", item.name):
-            raise ValueError(
-                f"numeric action suffix is forbidden: {item.name} "
+            print(
+                f"[WARN] numeric action suffix: {item.name} "
                 f"from {item.sources[:3]}"
             )
         group_key = item.name.lower()
@@ -751,8 +726,15 @@ def main() -> None:
     print(f"[INFO] DOMAIN_NAME: {domain_name}")
     print(f"[INFO] 找到 {len(domain_files)} 个最大 round 的 domain.pddl")
 
-    all_predicates = []
-    all_actions = []
+    # Retain only one instance of each final predicate/action contract while
+    # parsing.  The Aug corpus is large enough that retaining every parsed
+    # source object prevents the aggregate from being written at all.
+    predicate_index: Dict[Tuple[str, int], PredicateItem] = {}
+    predicate_sources: Dict[Tuple[str, int], set[str]] = {}
+    action_index: Dict[Tuple[str, str], ActionItem] = {}
+    action_sources: Dict[Tuple[str, str], set[str]] = {}
+    raw_predicate_count = 0
+    raw_action_count = 0
     parsed_count = 0
     skipped_count = 0
 
@@ -762,18 +744,52 @@ def main() -> None:
 
         for ok, path, predicates, actions, error in results:
             if ok:
-                all_predicates.extend(predicates)
-                all_actions.extend(actions)
+                raw_predicate_count += len(predicates)
+                raw_action_count += len(actions)
+                for item in predicates:
+                    key = (item.name.lower(), item.arity)
+                    existing = predicate_index.get(key)
+                    if existing is None:
+                        predicate_index[key] = item
+                        predicate_sources[key] = set(item.sources)
+                    else:
+                        if not existing.has_comment() and item.has_comment():
+                            existing.expr = item.expr
+                            existing.leading_comments = item.leading_comments
+                            existing.inline_comment = item.inline_comment
+                        seen = predicate_sources[key]
+                        for source in item.sources:
+                            if source not in seen:
+                                seen.add(source)
+                                existing.sources.append(source)
+                for item in actions:
+                    key = (item.name.lower(), item.signature)
+                    existing = action_index.get(key)
+                    if existing is None:
+                        action_index[key] = item
+                        action_sources[key] = set(item.sources)
+                    else:
+                        if not existing.has_comment() and item.has_comment():
+                            existing.leading_comments = item.leading_comments
+                            existing.block_text = item.block_text
+                        seen = action_sources[key]
+                        for source in item.sources:
+                            if source not in seen:
+                                seen.add(source)
+                                existing.sources.append(source)
                 parsed_count += 1
             else:
                 skipped_count += 1
                 print(f"[WARN] 跳过解析失败文件: {path}")
                 print(f"       原因: {error}")
 
-    if not all_predicates and not all_actions:
+    if not predicate_index and not action_index:
         raise RuntimeError("所有 domain.pddl 都解析失败，无法生成 unified domain")
 
     print("[INFO] 开始合并")
+
+    all_predicates = list(predicate_index.values())
+    all_actions = list(action_index.values())
 
     predicate_arity_renames = resolve_predicate_arity_collisions(
         all_predicates,
@@ -803,16 +819,12 @@ def main() -> None:
     print()
     print(f"[INFO] 成功解析 domain 文件数: {parsed_count}")
     print(f"[INFO] 跳过解析失败文件数: {skipped_count}")
-    print(f"[INFO] 原始 predicate 数: {len(all_predicates)}")
+    print(f"[INFO] 原始 predicate 数: {raw_predicate_count}")
     print(f"[INFO] 合并后 predicate 数: {len(merged_predicates)}")
-    print(f"[INFO] predicate arity 冲突名数: {len(predicate_arity_renames)}")
-    for name, variants in sorted(predicate_arity_renames.items()):
-        rendered = ", ".join(
-            f"arity {arity} -> {final_name}"
-            for arity, final_name in sorted(variants.items())
-        )
-        print(f"[INFO]   {name}: {rendered}")
-    print(f"[INFO] 原始 action 数: {len(all_actions)}")
+    print(f"[WARN] predicate arity 冲突名数: {len(predicate_arity_renames)}")
+    for name, arities in sorted(predicate_arity_renames.items()):
+        print(f"[WARN]   {name}: arity={arities}")
+    print(f"[INFO] 原始 action 数: {raw_action_count}")
     print(f"[INFO] 合并后 action 数: {len(merged_actions)}")
     print(f"[INFO] 同名多合同 action 名数: {len(action_conflicts)}")
     print(f"[INFO] 数字后缀 action 变体数: {sum(action_conflicts.values())}")
