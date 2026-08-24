@@ -92,20 +92,23 @@ def call_gpt_json(
     response_format: dict | None = None,
     attempts: int = 3,
     max_tokens: int | None = None,
+    strict_json: bool = False,
+    capture: dict | None = None,
 ):
     if type(attempts) is not int or not 1 <= attempts <= 5:
         raise ValueError("attempts must be an integer from 1 to 5")
     last_error: Exception | None = None
     for attempt in range(attempts):
-        output = None
+        raw_output = None
+        json_text = None
         try:
             call_kwargs = {}
             if max_tokens is not None:
                 call_kwargs["max_tokens"] = max_tokens
             if response_format is None:
-                output = call_gpt(model, prompt, image_paths, **call_kwargs)
+                raw_output = call_gpt(model, prompt, image_paths, **call_kwargs)
             else:
-                output = call_gpt(
+                raw_output = call_gpt(
                     model,
                     prompt,
                     image_paths,
@@ -113,19 +116,40 @@ def call_gpt_json(
                     **call_kwargs,
                 )
             if response_format is None:
-                output = strip_think_output(output)
-                json_text = repair_json(output)
+                json_text = strip_think_output(raw_output)
+                if not strict_json:
+                    json_text = repair_json(json_text)
             else:
-                json_text = output
+                json_text = raw_output
             response_json = json.loads(json_text)
             if not isinstance(response_json, dict):
                 raise ValueError("model response is not a JSON object")
+            if capture is not None:
+                capture.update(
+                    {
+                        "attempt": attempt + 1,
+                        "raw_output": raw_output,
+                        "json_text": json_text,
+                        "strict_json": strict_json,
+                    }
+                )
             return response_json
         except Exception as error:
             last_error = error
+            if capture is not None:
+                capture.update(
+                    {
+                        "attempt": attempt + 1,
+                        "raw_output": raw_output,
+                        "json_text": json_text,
+                        "strict_json": strict_json,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
             print(f"call gpt error: {error}")
-            if output is not None:
-                print(output[:2000])
+            if raw_output is not None:
+                print(raw_output[:2000])
             if attempt + 1 < attempts:
                 time.sleep(2**attempt)
 
