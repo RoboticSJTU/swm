@@ -181,17 +181,12 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
 
         planning_success = True
         retry_state.solver_feedback = ""
-        numbered_plan = "\n".join(
-            f"{i}. {step.strip()}"
-            for i, step in enumerate(round_result["nl_plan"].splitlines(), 1)
-            if step.strip()
-        )
         judge_out = judge_pddl(
-            JUDGE_MODEL,
-            task_img,
-            task["instruction"],
-            numbered_steps,
-            numbered_plan,
+            model=JUDGE_MODEL,
+            first_img=task_img,
+            instruction=task["instruction"],
+            kf_plan=numbered_steps,
+            candidate_plan=round_result["plan"],
             predicted_domain=round_result["round_dir"] / "domain.pddl",
             predicted_problem=round_result["round_dir"] / "problem.pddl",
             pddl_plan=round_result["round_dir"] / "plan.txt",

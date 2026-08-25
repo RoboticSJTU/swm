@@ -12,7 +12,6 @@ from swm.pddl.init_state_precheck import (
 )
 from swm.pddl.strips import ground_plan, parse_domain, parse_plan
 
-
 def latest_round_problem(task_dir: Path) -> Path | None:
     """Return the problem from the highest numeric round that contains one."""
     candidates = []
@@ -158,7 +157,7 @@ def judge_pddl(
     first_img: Path,
     instruction: str,
     kf_plan: str,
-    nl_plan: str,
+    candidate_plan: str,
     n: int = 1,
     predicted_problem: str | Path | None = None,
     ground_truth_problem: str | Path | None = None,
@@ -167,6 +166,9 @@ def judge_pddl(
 ):
     if n < 1:
         raise ValueError("n must be at least 1")
+    candidate_plan = candidate_plan.strip()
+    if not candidate_plan:
+        raise ValueError("candidate_plan must be non-empty")
 
     if all(
         isinstance(source, Path)
@@ -231,7 +233,7 @@ def judge_pddl(
     prompt = prompt_path.read_text(encoding="utf-8").format(
         instruction=instruction,
         kf_plan=kf_plan,
-        nl_plan=nl_plan,
+        candidate_plan=candidate_plan,
         initial_state_crosscheck=_initial_state_crosscheck(
             predicted_problem,
             ground_truth_problem,

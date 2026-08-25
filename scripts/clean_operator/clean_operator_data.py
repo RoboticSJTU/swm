@@ -23,9 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from regenerate_plan_nl import translate_plan_text
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EVAL_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
 ROUND_RE = re.compile(r"roun(?:d)?[_-]?(\d+)$", re.IGNORECASE)
@@ -8680,7 +8677,6 @@ def clean_round(
     domain_path = resolve_input_file(round_dir, "domain.pddl", input_mapping_dir)
     problem_path = resolve_input_file(round_dir, "problem.pddl", input_mapping_dir)
     plan_path = resolve_input_file(round_dir, "plan.txt", input_mapping_dir)
-    plan_nl_path = resolve_input_file(round_dir, "plan_nl.txt", input_mapping_dir)
     domain = domain_path.read_text(encoding="utf-8")
     problem_text = problem_path.read_text(encoding="utf-8")
     plan_text = plan_path.read_text(encoding="utf-8")
@@ -8688,7 +8684,6 @@ def clean_round(
         "domain.pddl": domain,
         "problem.pddl": problem_text,
         "plan.txt": plan_text,
-        "plan_nl.txt": plan_nl_path.read_text(encoding="utf-8") if plan_nl_path.is_file() else "",
     }
     notes: list[str] = []
 
@@ -9032,19 +9027,10 @@ def clean_round(
     )
     notes.extend(pose_notes)
 
-    if (
-        domain != original["domain.pddl"]
-        or plan_text != original["plan.txt"]
-        or not plan_nl_path.is_file()
-    ):
-        plan_nl_text = translate_plan_text(domain, plan_text)
-    else:
-        plan_nl_text = original["plan_nl.txt"]
     result = {
         "domain.pddl": domain,
         "problem.pddl": problem_text,
         "plan.txt": plan_text,
-        "plan_nl.txt": plan_nl_text,
     }
     changed = {name: text for name, text in result.items() if text != original[name]}
     return changed, sorted(set(notes))
@@ -9178,14 +9164,7 @@ def solve_user_approved_changes(
                 })
                 continue
             assert candidate_plan is not None
-            domain_text = changes[round_dir].get(
-                "domain.pddl",
-                (round_dir / "domain.pddl").read_text(encoding="utf-8"),
-            )
             changes[round_dir]["plan.txt"] = candidate_plan
-            changes[round_dir]["plan_nl.txt"] = translate_plan_text(
-                domain_text, candidate_plan
-            )
     return sorted(failures, key=lambda item: item["round"])
 
 

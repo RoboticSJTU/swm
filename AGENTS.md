@@ -12,6 +12,5 @@ The user prefers code that is minimal, direct, and easy to understand.
 
 - After changing any `domain.pddl` or `problem.pddl`, solve the modified PDDL again and overwrite the corresponding `plan.txt` with the newly generated plan.
 - The new `plan.txt` must be logically equivalent to the episode's `kf_plan.txt`, i.e., it must accomplish the same task. Otherwise, the PDDL modification is invalid.
-- Translate the new symbolic plan against the modified domain and overwrite the corresponding `plan_nl.txt`.
-- A PDDL change is complete only after solving succeeds, task equivalence is verified, and both plan files are current. Never manually rename actions in a stale plan.
+- A PDDL change is complete only after solving succeeds and task equivalence is verified. Never manually rename actions in a stale plan.
 - Preserve the requested round scope when regenerating plans; do not update older rounds when only the maximum round is in scope.

@@ -10,6 +10,10 @@ Judge whether an embodied robot plan is executable and fully satisfies the instr
 
 - Initial scene image: attached.
 
+# Candidate Plan
+
+{candidate_plan}
+
 # Evaluated Symbolic Trace
 
 {pddl_context}
@@ -24,7 +28,8 @@ Judge whether an embodied robot plan is executable and fully satisfies the instr
 - The reference plan is one valid witness. Use it to infer relevant state changes and causal dependencies, but do not require its wording, incidental details, specific actions, or total order unless they are necessary from the Instruction or action semantics.
 - The image is authoritative for clear visible object identity, initial direct relations, and physical affordances. If it conflicts with a reference-plan scene claim, use the image for that scene fact; treat visually compatible color or name aliases as the same object, while an unclear image cannot overturn a necessary causal condition established by stronger evidence.
 - Other facts are unknown. Reject only when failure follows from the provided evidence or unambiguous action semantics. Do not invent hidden actions, hidden states, or unsupported physical constraints.
-- The symbolic trace is mechanically grounded from the evaluated domain and `plan.txt`; its symbols, effects, and goals are claims, not proof. They cannot invent an unsupported affordance or override clear visual evidence. A required state persists unless the trace explicitly removes it or an effect is logically incompatible; an added state alone is not a failure.
+- The Candidate Plan is the sequence under evaluation. When a symbolic trace is supplied, use it to resolve exact action bindings and state changes. When no symbolic trace is supplied, interpret the Candidate Plan as a natural-language action sequence.
+- The symbolic trace, when supplied, is mechanically grounded from the evaluated domain and `plan.txt`; its symbols, effects, and goals are claims, not proof. They cannot invent an unsupported affordance or override clear visual evidence. A required state persists unless the trace explicitly removes it or an effect is logically incompatible; an added state alone is not a failure.
 - In the trace, `Before` lists the conditions claimed for that action; `not (...)` means the literal must not hold. `State change` lists only the claimed delta: `+` adds a literal and `-` removes one. It is not a complete observed state.
 - Treat every trace argument and direct relation as an exact binding. A nearby surface, enclosing container, or broad area does not make a different direct source or destination equivalent.
 - The auxiliary initial-state cross-check only highlights a potential discrepancy. Resolve it using the image and reference steps; do not reject a visually supported alias or an auxiliary-reference error solely because it is reported.
@@ -46,7 +51,7 @@ Judge whether an embodied robot plan is executable and fully satisfies the instr
 Perform the following checks in order:
 1. Build the complete task contract from the Instruction.
 2. Derive only the prerequisites, effects, and partial-order dependencies that are necessary for execution or for satisfying that contract, using the Instruction, reference plan, image, and unambiguous action semantics.
-3. Simulate the Evaluated plan from the initial scene in order, tracking all task-relevant state, including access, possession, direct location, object relations, and device state.
+3. Simulate the Candidate Plan from the initial scene in order, tracking all task-relevant state, including access, possession, direct location, object relations, and device state.
 4. At each action, check whether its necessary preconditions are satisfied by the accumulated state.
    - If a precondition is definitely unsatisfied, stop at the earliest such action and classify the plan as an execution failure.
    - Do not reject merely because a condition is unknown or unclear.

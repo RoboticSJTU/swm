@@ -4,7 +4,6 @@ from pathlib import Path
 from swm.llm import call_gpt_json
 from swm.pddl.planner import solve_pddl, summarize_solver_error
 from swm.pddl.postprocess import PDDLPostprocessError, postprocess_pddl
-from swm.pddl.translate import translate_pddl_plan
 from swm.prompts import construct_prompt_with_feedback
 
 
@@ -32,7 +31,6 @@ def generate_pddl(
     domain_path = round_dir / "domain.pddl"
     problem_path = round_dir / "problem.pddl"
     plan_path = round_dir / "plan.txt"
-    nl_plan_path = round_dir / "plan_nl.txt"
 
     feedback_parts = []
     if retry_state.solver_feedback:
@@ -59,7 +57,6 @@ def generate_pddl(
 
     for path in (
         plan_path,
-        nl_plan_path,
         round_dir / "judge.json",
         round_dir / "error.log",
     ):
@@ -76,7 +73,6 @@ def generate_pddl(
             "domain": domain_str,
             "problem": problem_str,
             "plan": "",
-            "nl_plan": "",
             "solver_feedback": f"PDDL post-processing failed: {error}",
         }
 
@@ -92,13 +88,10 @@ def generate_pddl(
             "domain": domain_str,
             "problem": problem_str,
             "plan": "",
-            "nl_plan": "",
             "solver_feedback": solver_feedback,
         }
 
     plan_text = plan_path.read_text(encoding="utf-8")
-    translate_pddl_plan(domain_path, plan_path)
-    nl_plan_text = nl_plan_path.read_text(encoding="utf-8")
 
     return {
         "ok": True,
@@ -106,6 +99,5 @@ def generate_pddl(
         "domain": domain_str,
         "problem": problem_str,
         "plan": plan_text,
-        "nl_plan": nl_plan_text,
         "solver_feedback": "",
     }

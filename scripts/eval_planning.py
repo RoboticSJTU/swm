@@ -6,7 +6,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import traceback
-from swm.llm import call_gpt, call_gpt_json
+from swm.llm import call_gpt
 from swm.pddl.judge import judge_pddl, latest_round_problem
 from swm.pddl.planner import solve_pddl
 
@@ -17,12 +17,10 @@ root_dir = Path(__file__).resolve().parent.parent
 
 eval_model = "9B_3e"
 judge_model = "gemini-3.7-flash"  # Qwen3.8-27B
-translate_model = "qwen3.7-plus"  
 ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_2 unidomain
 datasets = ["swm", "unidomain"]
-
 N = 1
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
@@ -52,13 +50,6 @@ def strip_code_block(text: str) -> str:
     text = text.strip()
     m = re.match(r"^```(?:\w+)?\s*\n?(.*?)\n?```$", text, flags=re.S)
     return m.group(1).strip() if m else text
-
-
-def has_pddl_actions(plan: str) -> bool:
-    return any(
-        line.strip() and not line.lstrip().startswith((";", "#"))
-        for line in plan.splitlines()
-    )
 
 
 def steps_to_text(raw_steps) -> str:
@@ -134,14 +125,12 @@ def get_save_dir(task: dict) -> Path:
 def generation_complete(task: dict) -> bool:
     save_dir = get_save_dir(task)
 
+    output_files = [save_dir / "plan.txt"]
     if eval_mode == "pddl":
-        output_files = [
+        output_files[:0] = [
             save_dir / "domain.pddl",
             save_dir / "problem.pddl",
-            save_dir / "plan.txt",
         ]
-    else:
-        output_files = [save_dir / "plan_nl.txt"]
 
     return all(
         path.is_file() and path.read_text(encoding="utf-8").strip()
@@ -175,77 +164,6 @@ def load_cached_status(task: dict):
         return "error", False
 
     return None, False
-
-
-# =========================
-# PDDL plan 翻译为自然语言 plan
-# =========================
-def translate_pddl_plan_to_nl(save_dir: Path) -> None:
-    domain_file = save_dir / "domain.pddl"
-    problem_file = save_dir / "problem.pddl"
-    plan_file = save_dir / "plan.txt"
-    nl_plan_file = save_dir / "plan_nl.txt"
-
-    domain = domain_file.read_text(encoding="utf-8").strip()
-    problem = problem_file.read_text(encoding="utf-8").strip()
-    plan = plan_file.read_text(encoding="utf-8").strip()
-
-    if not has_pddl_actions(plan):
-        nl_plan_file.write_text("", encoding="utf-8")
-        return
-
-    prompt = f"""
-You are a robot task-planning expert.
-
-Your task is to translate a PDDL plan into a clear natural-language action plan.
-
-You are given:
-1. The PDDL domain, which defines action meanings.
-2. The PDDL problem, which defines objects, initial state, and goal.
-3. The PDDL plan, which contains the executable action sequence.
-
-Requirements:
-- Translate each PDDL action in the plan into one concise natural-language step.
-- Keep the same action order.
-- Do not add new actions.
-- Do not remove actions.
-- Do not explain PDDL syntax.
-- Do not include reasoning.
-- Use object names from the problem as much as possible.
-- Return JSON only.
-
-Expected JSON format:
-{{
-  "plan_sequence": [
-    "First natural-language action.",
-    "Second natural-language action."
-  ]
-}}
-
-[PDDL Domain]
-{domain}
-
-[PDDL Problem]
-{problem}
-
-[PDDL Plan]
-{plan}
-""".strip()
-
-    result = call_gpt_json(translate_model, prompt)
-
-    if isinstance(result, str):
-        result = json.loads(strip_code_block(result))
-
-    if isinstance(result, list):
-        plan_lines = [str(x).strip() for x in result if str(x).strip()]
-    else:
-        plan_lines = [str(x).strip() for x in result["plan_sequence"] if str(x).strip()]
-
-    if not plan_lines:
-        raise ValueError("empty translated natural-language plan")
-
-    nl_plan_file.write_text("\n".join(plan_lines), encoding="utf-8")
 
 
 # =========================
@@ -371,8 +289,7 @@ def generate_one(task: dict):
     save_dir = get_save_dir(task)
     domain_file = save_dir / "domain.pddl"
     problem_file = save_dir / "problem.pddl"
-    pddl_plan_file = save_dir / "plan.txt"
-    nl_plan_file = save_dir / "plan_nl.txt"
+    plan_file = save_dir / "plan.txt"
     reasoning_file = save_dir / "reasoning.txt"
 
     try:
@@ -399,17 +316,17 @@ def generate_one(task: dict):
             if not solve_pddl(domain_file, problem_file):
                 return task, False, "pddl_unsolvable"
 
-            if not pddl_plan_file.exists() or not pddl_plan_file.read_text(encoding="utf-8").strip():
+            if not plan_file.exists() or not plan_file.read_text(encoding="utf-8").strip():
                 return task, False, "missing_pddl_plan"
 
             return task, True, "pddl"
 
-        reasoning, nl_plan = parse_nl_output(output)
+        reasoning, candidate_plan = parse_nl_output(output)
 
         if reasoning:
             reasoning_file.write_text(reasoning, encoding="utf-8")
 
-        nl_plan_file.write_text(nl_plan, encoding="utf-8")
+        plan_file.write_text(candidate_plan, encoding="utf-8")
         return task, True, "nl"
 
     except Exception as e:
@@ -426,7 +343,7 @@ def judge_one(task: dict):
     kf_plan = task["kf_plan"]
 
     save_dir = get_save_dir(task)
-    plan_file = save_dir / "plan_nl.txt"
+    plan_file = save_dir / "plan.txt"
     judge_file = save_dir / "judge.json"
 
     try:
@@ -438,31 +355,27 @@ def judge_one(task: dict):
         if image_path is None or not image_path.exists():
             return task, False, False, "missing_image"
 
-        if not plan_file.exists():
-            if eval_mode == "pddl":
-                translate_pddl_plan_to_nl(save_dir)
-            else:
-                return task, False, False, "missing_plan_nl"
+        if not plan_file.is_file():
+            return task, False, False, "missing_plan"
 
-        pred_plan = plan_file.read_text(encoding="utf-8").strip()
-        if not pred_plan:
-            if eval_mode != "pddl":
-                return task, False, False, "empty_plan_nl"
-
-            pddl_plan = (save_dir / "plan.txt").read_text(encoding="utf-8")
-            if has_pddl_actions(pddl_plan):
-                return task, False, False, "empty_plan_nl"
+        candidate_plan = plan_file.read_text(encoding="utf-8").strip()
+        if not candidate_plan:
+            return task, False, False, "empty_plan"
 
         result = judge_pddl(
             model=judge_model,
             first_img=image_path,
             instruction=instruction,
             kf_plan=kf_plan,
-            nl_plan=pred_plan,
+            candidate_plan=candidate_plan,
             n=N,
             predicted_problem=(save_dir / "problem.pddl") if eval_mode == "pddl" else None,
-            ground_truth_problem=latest_round_problem(
-                root_dir / "eval_results" / "gt" / task["dataset"] / task["episode"]
+            ground_truth_problem=(
+                latest_round_problem(
+                    root_dir / "eval_results" / "gt" / task["dataset"] / task["episode"]
+                )
+                if eval_mode == "pddl"
+                else None
             ),
             predicted_domain=(save_dir / "domain.pddl") if eval_mode == "pddl" else None,
             pddl_plan=(save_dir / "plan.txt") if eval_mode == "pddl" else None,

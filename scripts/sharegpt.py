@@ -634,10 +634,6 @@ def prepare_round(item, labels):
             (round_dir / "problem.pddl", source_problem),
             (round_dir / "plan.txt", renamed_plan),
         ]
-        for name in ("plan_nl.txt",):
-            path = round_dir / name
-            if path.is_file():
-                updates.append((path, replace_object_tokens(path.read_text(encoding="utf-8"), rename_map)))
         kf_plan = round_dir.parent / "kf_plan.txt"
         if kf_plan.is_file():
             updates.append((kf_plan, replace_object_tokens(kf_plan.read_text(encoding="utf-8"), rename_map)))
