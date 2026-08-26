@@ -15,8 +15,8 @@ from swm.pddl.planner import solve_pddl
 # =========================
 root_dir = Path(__file__).resolve().parent.parent
 
-eval_model = "9B_3e"
-judge_model = "gemini-3.7-flash"  # Qwen3.8-27B
+eval_model = "actor_hf"
+judge_model = "Qwen3.8-27B"  # Qwen3.8-27B
 ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_2 unidomain

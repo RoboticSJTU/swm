@@ -17,10 +17,10 @@ load_dotenv(find_dotenv())
 def get_client(model: str):
     """Return the OpenAI-compatible client for a model name."""
     if model.startswith(("gemini", "gpt")):
+        api_key = os.getenv("A6_API_KEY")
+        base_url = "https://api.a6api.com/v1"        
         # api_key = os.getenv("das_API_KEY")
         # base_url = "https://dasuapi.com/v1"
-        api_key = os.getenv("A6_API_KEY")
-        base_url = "https://api.a6api.com/v1"
 
     elif model.startswith(("kimi-k3", "qwen3.7-max", "glm-5.2")):
         api_key = os.getenv("BOYUE_API_KEY")
@@ -28,14 +28,17 @@ def get_client(model: str):
 
     elif model.startswith("Qwen3.8-27B"):
         api_key = os.getenv("QWEN_API_KEY")
-        base_url = "https://x.openapi-qb.sii.edu.cn/v1"
+        base_url = "https://cqhbod8bjjjbcoakk8pmeebgkaq9akcq.openapi-sj.sii.edu.cn/v1"
 
     else:
         api_key = "0"
         base_url = "http://127.0.0.1:8001/v1"
 
-    return OpenAI(api_key=api_key, base_url=base_url)
+    kwargs = {}
+    if not model.startswith(("gemini", "gpt")):
+        kwargs["http_client"] = httpx.Client(trust_env=False)
 
+    return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
 
 def call_gpt(
     model: str,
@@ -83,14 +86,13 @@ def call_gpt(
     finally:
         client.close()
 
-
 def call_gpt_json(
     model: str,
     prompt: str,
     image_paths: list[Path] | None = None,
     *,
     response_format: dict | None = None,
-    attempts: int = 3,
+    attempts: int = 5,
     max_tokens: int | None = None,
     strict_json: bool = False,
     capture: dict | None = None,
