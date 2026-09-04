@@ -1,0 +1,90 @@
+Your goal is to convert visible transitions in the current keyframe group into an evidence-grounded sequence of completed, task-relevant atomic actions.
+Analyze only the current group.
+
+# Inputs
+
+- Instruction: {instruction}
+- Previously accepted actions (context only; do not repeat or revise):
+{previous_history}
+- Current group: G{group}. Ordered keyframes: {frame_order}
+
+{retry_block}
+
+# Required Procedure
+
+Produce `changes` first, then derive `actions` from the visible changes.
+
+## 1. Record Visible Changes
+
+### (1) Coverage and chronology
+
+- For every adjacent pair K0->K1, K1->K2, and so on, describe the exact visible before-to-after change.
+- Separate independent changes and report them in their visible order.
+
+### (2) Transition details
+
+- For each change, identify the affected object and hand.
+- State whether the object remains supported, becomes held, leaves or enters a support/container, is released, changes a task-relevant pose, or changes a device/flow state.
+- Name the immediate source or target when visible.
+- For a direct control, report the exact control and motion direction.
+
+### (3) Grounding and uncertainty
+
+- Use `into` only when the target rim or sides visibly surround the moved object's lower part; otherwise use `on`.
+- When similar material names are visually ambiguous, use their first-use order in the instruction and keep each identity consistent.
+- If a relation or identity is not visible, say it is uncertain. Use the instruction to resolve names and goals, never to invent an unseen change.
+
+## 2. Extract Completed Actions
+
+### (1) Selection and wording
+
+- List only atomic, task-relevant actions visibly completed in this group.
+- Do not output reaching, contact alone, carrying, withdrawal, or unfinished motion.
+- Preserve a causal pose change or obstruction-clearing move only when it enables a later task effect.
+- Use concise task-level wording.
+- Name a direct control and its visible motion rather than only the resulting device state.
+
+### (2) Action decomposition
+
+- Keep a completed pickup separate from later use.
+- When a pickup lifts an already filled tool, list pickup and material collection separately.
+- Keep material collection separate from transfer, placement separate from later control, and distinct control-state changes separate.
+
+### (3) Pickup and placement evidence
+
+- If a free hand grasps a task object and the object visibly leaves its previous support before or during a required pose change, list pickup before that pose change. A visible gap from the prior support counts as leaving it.
+- At G0, if a task object starts between closed grippers and ends supported after the grippers open, list its placement even when its motion is small.
+
+## 3. Encode Hand-State Changes
+
+### (1) Representation
+
+- For each action, `state_change` records only `holding(hand,obj)` and `hand_free(hand)` transitions.
+- Use an empty list when no hand state changes.
+- Predicate arguments use lowercase snake_case.
+- Do not output world-state predicates.
+
+### (2) Acquisition
+
+- `holding` requires the object to leave its support and remain carried after the action.
+- Supported sliding, pulling, pushing, or transient contact is not holding.
+
+### (3) Release
+
+- A completed placement or insertion releases the object.
+
+# Output Contract
+
+Return exactly this JSON object and no extra fields:
+{{
+  "changes": "K0->K1: ... K1->K2: ...",
+  "actions": [
+    {{
+      "action": "Pick up cup from table.",
+      "state_change": [
+        "+ holding(right_hand,cup)",
+        "- hand_free(right_hand)"
+      ]
+    }}
+  ]
+}}

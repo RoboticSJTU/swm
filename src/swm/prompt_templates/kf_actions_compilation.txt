@@ -1,0 +1,92 @@
+Your objective is to transform chronological transition evidence and provisional Draft actions into a minimal, task-complete, and chronologically valid action sequence.
+Audit the evidence and Drafts before editing, then return only the evidence-supported edits needed to correct the sequence.
+
+# Inputs
+
+- Instruction: {instruction}
+- Evidence and Draft Ledger (`changes` are chronological transition evidence; `[D#]` actions are provisional Drafts.)
+{evidence_ledger}
+- Scene image: attached. Use it to identify objects and distinguish initially held, supported, and contained states; it cannot prove an action before G0.
+
+# Compilation Workflow
+
+## 1. Ground Claims
+
+- Treat explicit objects, goals, and spatial relations in the instruction as constraints. Resolve an ambiguous label by tracking the object through later use and return, then use the instruction for any remaining name or goal ambiguity; never invent an unobserved transition.
+- Preserve instructed `on`, `onto`, or `stacked on` versus `into` or `inside`. When the instruction is unspecified, use the attached image only for initial relations and visible geometry in `changes` for later relations: `into` requires the target rim or sides to surround the moved object's lower part; use `on` when the object is supported from below. If the relation is not visible in the applicable evidence, do not guess it.
+- Preserve the immediate source, target, tool, and relation supported by `changes`. A direct support or container in `changes` overrides a broader Draft workspace; replace the broad source, or omit it if no direct source is clear.
+
+## 2. Compile the Causal Sequence
+
+Track each manipulated object across groups from acquisition through pose or use to release, preserving its identity and state.
+
+### 2.1 Completed, Atomic Effects
+
+- Keep only completed, task-relevant effects. Ignore reaching, contact alone, continuation, carrying, withdrawal, unfinished motion, and bare grasp or release descriptions.
+- Remove a temporary set-down and re-grasp or a contact/settling press unless it enables a distinct use or establishes a required final state.
+- Each Draft covers one completed effect. If distinct effects complete in separate visible transitions, split the Draft with a replacement and an insert.
+- Do not add a second placement when the next group only releases the same object without changing its support or target.
+
+### 2.2 Acquisition, Pose, and Functional Positioning
+
+- Unless initially held, an action that requires sustained possession must be preceded by pickup supported by `changes` showing the object leave its support and remain carried. After release, any later action requiring sustained possession requires another pickup. Supported sliding, pulling, pushing, direct control, and transient contact do not require pickup.
+- If a free hand grasps an object and it visibly leaves its support before or during a required pose change, preserve or insert pickup before the pose. A visible gap counts as leaving support.
+- Keep a pose change or functional positioning separate when it completes in its own adjacent-pair transition and enables later transfer, use, or placement. If the hand continues holding a recipient at a functional station, describe positioning, moving, or holding it there rather than placement; use placement only when the object is released.
+- Do not split orientation that occurs only in the same transition as pickup or placement.
+
+### 2.3 Restoration and Temporary States
+
+- A close or restoring Draft requires the same part to be open or changed in the initial image or an earlier transition in the ledger. Otherwise delete it; a changed local label does not create a second part or action during continuous motion.
+- When an explicit goal restores a lid, cap, or door to closed, use `screw` for a threaded cap and `close` otherwise, not generic placement.
+- Delete a state change undone before any task effect uses it; keep its restoring transition only when the resulting state enables a later task action or establishes an explicitly required final state.
+
+## 3. Apply Special Evidence Rules
+
+### 3.1 Episode Boundaries
+
+- At the first boundary, coordinated release of a task object completes placement.
+- At the last boundary, opposing grippers closed or positioned against both sides of an object complete pickup when the instruction requires carrying it, even if the lift follows the final frame. Otherwise apply the normal pickup rule: `changes` must show the object leave its support and remain carried; grasping and supported lateral motion alone are insufficient.
+- If a placement-only Draft follows motion without departure evidence, replace it with one move action preserving the observed or instructed goal, not pickup plus placement.
+
+### 3.2 Material Transfer
+
+- When a pickup lifts an already filled tool, keep pickup and material collection separate.
+- Delete material collection if the material is never transferred or used. Treat repeated collection or application to the same target as one effect unless the instruction or ledger distinguishes quantities, materials, or result states.
+
+### 3.3 External Controls
+
+- Each Draft covers at most one external-control transition that maintains a device state or flow. If `changes` show activation, sustained operation, and release or deactivation, keep activation and insert a separate stop action.
+- Copy the exact control and motion direction from `changes`, not only the resulting device state.
+- Ending an ordinary hand-held pour or returning a held object upright is not a second control action.
+
+## 4. Audit, Then Edit
+
+Complete and write both audits before producing edits. `audit` records explicit diagnostic conclusions; `edits` records the corresponding operations.
+
+### 4.1 Coverage Audit
+
+Scan every group and cross-group causal chain for missing, duplicate, unsupported, or task-irrelevant acquisition, use or material transfer, placement or handoff, causal pose change, functional positioning, and control-state transitions. Record every finding in `coverage_issues`.
+
+### 4.2 Draft Accuracy Audit
+
+Check every Draft's object, source, target, support (`on`) versus containment (`into`), and control motion against the full ledger. Record every finding in `draft_issues`.
+
+### 4.3 Edits
+
+- Use empty audit lists when no issue is found. Preserve every supported Draft and make only necessary edits.
+- `insert` adds an action after a Draft ID (`after:0` means before D1); `replace` corrects one Draft; `delete` removes a duplicate, contradicted, unsupported, or task-irrelevant Draft.
+- Fix every reported issue with one or more edits, and ensure every edit addresses a reported issue.
+- Keep groups chronological.
+
+# Output Contract
+
+Return exactly one JSON object:
+{{
+  "audit":{{
+  "coverage_issues":["G0 misses a pickup before D1."],
+  "draft_issues":["D2 has the wrong target."]
+}},
+"edits":[
+  {{"op":"insert","after":0,"group":0,"action":"Pick up cup from table."}},
+  {{"op":"replace","id":2,"action":"Place cup on table."}}]
+}}
