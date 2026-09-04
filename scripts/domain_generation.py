@@ -1,18 +1,20 @@
 import json
+import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
 from swm.pddl.judge import judge_pddl
-from swm.plan_learning import learn_steps_from_keyframes
 from swm.prompts import construct_instruction_with_steps, read_prompt
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-STEP_SOURCE = "steps_json"  # "video" or "steps_json"
+STEP_SOURCE = "video"  # "video" or "steps_json"
 TASK_DOMAIN = "human_aug"
 
 PDDL_MODEL = "gpt-5.6-sol"
-LEARN_STEPS_MODEL = PDDL_MODEL
+ACTION_EXTRACTION_MODEL = "gemini-3.7-flash"
 JUDGE_MODEL = PDDL_MODEL
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
@@ -20,9 +22,7 @@ ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
 ACTION_TEMPLATE_DOMAIN = "human"
 ACTION_TEMPLATE_MODEL = PDDL_MODEL
 
-
 TASK_WORKERS = 30  # 主线程并发数
-MAX_STEP_BACKTRACKS = 10
 MAX_PLAN_ATTEMPTS = 3
 PREPROCESS_WORKERS = 16  # 关键帧提取并发
 
@@ -39,6 +39,7 @@ def load_tasks() -> list[dict]:
     for task_id, episodes in sorted(instructions.items()):
         for episode_id, instruction in sorted(episodes.items()):
             task = {
+                "dataset": TASK_DOMAIN,
                 "task_id": task_id,
                 "episode_id": episode_id,
                 "instruction": str(instruction).strip(),
@@ -58,20 +59,92 @@ def load_tasks() -> list[dict]:
     return tasks
 
 
-def prepare_keyframes(task: dict) -> None:
-    if any(task["keyframe_dir"].glob("seg_*/*.png")):
-        return
+def temporal_gradient_radius(frame_count: int, dataset: str = "human") -> int:
+    if frame_count < 1:
+        raise ValueError("frame_count must be positive")
+    is_human = dataset == "human" or dataset.startswith("human_")
+    base, step = (10, 10) if is_human else (20, 20)
+    return min(90, base + step * max(0, (frame_count - 1) // 500))
 
-    from swm.keyframe.extraction import extract_frames, extract_keyframes
+
+def _keyframe_segments(keyframe_dir: Path) -> list[dict]:
+    segments = []
+    for segment_dir in sorted(keyframe_dir.glob("seg_*")):
+        files = sorted(segment_dir.glob("*.png"), key=lambda path: int(path.stem))
+        if files:
+            segments.append(
+                {
+                    "segment": segment_dir.name,
+                    "keyframe_indices": [int(path.stem) - 1 for path in files],
+                    "keyframe_files": [str(path.resolve()) for path in files],
+                }
+            )
+    return segments
+
+
+def prepare_temporal_gradient_keyframes(task: dict) -> dict:
+    from swm.keyframe.kf_extraction import (
+        extract_frames,
+        extract_temporal_gradient_keyframes,
+    )
+
+    dataset = task.get("dataset", TASK_DOMAIN)
+    metadata_path = task.get(
+        "keyframe_metadata_path", task["keyframe_dir"] / "metadata.json"
+    )
 
     extract_frames(task["video_path"], task["frames_dir"])
-    extract_keyframes(
-        task["frames_dir"],
-        task["keyframe_dir"],
-        smooth_k=5,
-        merge_pct=0.5,
-        plot_energy=True,
+
+    frame_count = len(list(task["frames_dir"].glob("*.png")))
+    radius = temporal_gradient_radius(frame_count, dataset)
+
+    cached_metadata = {}
+    if metadata_path.is_file():
+        cached_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    keyframes_exist = any(task["keyframe_dir"].glob("seg_*/*.png"))
+    cache_matches = (
+        cached_metadata.get("dataset") == dataset
+        and cached_metadata.get("frame_count") == frame_count
+        and cached_metadata.get("radius") == radius
     )
+
+    if keyframes_exist and not cache_matches:
+        for segment_dir in task["keyframe_dir"].glob("seg_*"):
+            if segment_dir.is_dir():
+                shutil.rmtree(segment_dir)
+        (task["keyframe_dir"] / "energy_curve.png").unlink(missing_ok=True)
+        keyframes_exist = False
+
+    if not keyframes_exist:
+        extract_temporal_gradient_keyframes(
+            task["frames_dir"],
+            task["keyframe_dir"],
+            radius=radius,
+            smooth_k=5,
+            merge_pct=0.5,
+            plot_energy=True,
+        )
+
+    segments = _keyframe_segments(task["keyframe_dir"])
+    if not segments:
+        raise ValueError(f"No keyframes found in {task['keyframe_dir']}")
+    metadata = {
+        "dataset": dataset,
+        "task": task["task_id"],
+        "episode": task["episode_id"],
+        "frame_count": frame_count,
+        "radius": radius,
+        "keyframe_indices": sorted(
+            {index for segment in segments for index in segment["keyframe_indices"]}
+        ),
+        "segments": segments,
+    }
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return metadata
 
 
 def find_task_action_template(task_id: str) -> str:
@@ -119,16 +192,20 @@ def find_task_action_template(task_id: str) -> str:
 def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
     save_dir = task["save_dir"]
     save_dir.mkdir(parents=True, exist_ok=True)
-    kf_plan_path = save_dir / "kf_plan.txt"
+    kf_actions_path = save_dir / "kf_actions.txt"
 
     if STEP_SOURCE == "video":
-        cached_plan = (
-            kf_plan_path.read_text(encoding="utf-8")
-            if kf_plan_path.is_file()
+        cached_actions = (
+            kf_actions_path.read_text(encoding="utf-8")
+            if kf_actions_path.is_file()
             else ""
         )
-        if cached_plan.strip():
-            steps = [line.strip() for line in cached_plan.splitlines() if line.strip()]
+        if cached_actions.strip():
+            steps = [
+                re.sub(r"^(?:\[G\d+\]|\d+[.)])\s*", "", line.strip())
+                for line in cached_actions.splitlines()
+                if line.strip()
+            ]
             images = sorted(
                 task["keyframe_dir"].glob("seg_*/*.png"),
                 key=lambda path: (path.parent.name, int(path.stem)),
@@ -137,17 +214,16 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
                 raise ValueError(f"No keyframes found in {task['keyframe_dir']}")
             task_img = images[0]
         else:
-            task_img, steps = learn_steps_from_keyframes(
-                model_name=LEARN_STEPS_MODEL,
+            task_img, steps = extract_keyframe_actions(
+                model_name=ACTION_EXTRACTION_MODEL,
                 keyframe_dir=task["keyframe_dir"],
                 instruction=task["instruction"],
                 save_dir=save_dir,
-                max_backtracks=MAX_STEP_BACKTRACKS,
             )
     else:
         task_img = task["image_path"]
         steps = task["steps"]
-        kf_plan_path.write_text("\n".join(steps) + "\n", encoding="utf-8")
+        kf_actions_path.write_text("\n".join(steps) + "\n", encoding="utf-8")
 
     instruction_with_steps = construct_instruction_with_steps(task["instruction"], steps)
     numbered_steps = "\n".join(
@@ -185,7 +261,7 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
             model=JUDGE_MODEL,
             first_img=task_img,
             instruction=task["instruction"],
-            kf_plan=numbered_steps,
+            kf_actions=numbered_steps,
             candidate_plan=round_result["plan"],
             predicted_domain=round_result["round_dir"] / "domain.pddl",
             predicted_problem=round_result["round_dir"] / "problem.pddl",
@@ -236,7 +312,10 @@ def main() -> None:
     if STEP_SOURCE == "video":
         ready_tasks = []
         with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
-            futures = {executor.submit(prepare_keyframes, task): task for task in tasks}
+            futures = {
+                executor.submit(prepare_temporal_gradient_keyframes, task): task
+                for task in tasks
+            }
             for future in as_completed(futures):
                 task = futures[future]
                 try:

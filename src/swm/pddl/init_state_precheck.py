@@ -6,11 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from swm.pddl.strips import (
+    goals_satisfied,
     ground_plan,
     parse_domain,
     parse_plan,
-    parse_problem as parse_strips_problem,
 )
+from swm.pddl.strips import parse_problem as parse_strips_problem
 
 Literal = tuple[str, ...]
 
@@ -288,8 +289,8 @@ def map_objects(
     predicted: ParsedProblem,
     ground_truth: ParsedProblem,
 ) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    available_gt = set(ground_truth.objects)
+    mapping = {obj: obj for obj in predicted.objects & ground_truth.objects}
+    available_gt = set(ground_truth.objects) - set(mapping.values())
 
     while True:
         proposals: dict[str, list[tuple[float, str]]] = {}
@@ -411,6 +412,48 @@ def _state_contradictions(
                 f"state mismatch: predicted (not {_format_literal(literal)}) maps to "
                 f"(not {_format_literal(mapped)}), but GT asserts {_format_literal(mapped)}"
             )
+
+    gt_holding = {
+        (literal[1], literal[2])
+        for literal in gt_positive
+        if len(literal) == 3 and literal[0] == "holding"
+    }
+    gt_held_objects = {obj for _, obj in gt_holding}
+    gt_located_objects = {
+        literal[1]
+        for literal in gt_positive
+        if len(literal) == 3 and literal[0] in SPATIAL_PREDICATES
+    }
+    for literal in predicted.positive_init:
+        if literal[0] == "hand_free" and len(literal) == 2:
+            mapped_hand = mapping.get(literal[1])
+            if mapped_hand is not None and any(
+                hand == mapped_hand for hand, _ in gt_holding
+            ):
+                contradictions.add(
+                    f"possession mismatch: predicted {_format_literal(literal)}, "
+                    f"but GT asserts that {mapped_hand} is holding an object"
+                )
+        elif literal[0] == "holding" and len(literal) == 3:
+            mapped_hand = mapping.get(literal[1])
+            mapped_object = mapping.get(literal[2])
+            if mapped_hand is not None and ("hand_free", mapped_hand) in gt_positive:
+                contradictions.add(
+                    f"possession mismatch: predicted {_format_literal(literal)}, "
+                    f"but GT asserts (hand_free {mapped_hand})"
+                )
+            if mapped_object is not None and mapped_object in gt_located_objects:
+                contradictions.add(
+                    f"location mismatch: predicted {_format_literal(literal)}, "
+                    f"but GT places {mapped_object} at a direct location"
+                )
+        elif literal[0] in SPATIAL_PREDICATES and len(literal) == 3:
+            mapped_object = mapping.get(literal[1])
+            if mapped_object is not None and mapped_object in gt_held_objects:
+                contradictions.add(
+                    f"location mismatch: predicted {_format_literal(literal)}, "
+                    f"but GT asserts that {mapped_object} is held"
+                )
     return sorted(contradictions)
 
 
@@ -593,6 +636,40 @@ def implicit_running_device_start_conflicts(
     return conflicts
 
 
+def unfinished_started_process_conflicts(
+    predicted_domain: Path,
+    predicted_problem: Path,
+    predicted_plan: Path,
+) -> list[str]:
+    """Find a process started by the plan but left active outside the goal."""
+    try:
+        actions = ground_plan(
+            parse_plan(predicted_plan)[0],
+            parse_domain(predicted_domain),
+        )
+        initial_state, goal, _ = parse_strips_problem(predicted_problem)
+    except (OSError, KeyError, NotImplementedError, ValueError):
+        return []
+
+    state = set(initial_state)
+    started = set()
+    for action in actions:
+        started.update(
+            literal
+            for literal in action.add_eff
+            if len(literal) == 2
+            and literal[0] == "is_on"
+            and literal not in state
+        )
+        state.difference_update(action.del_eff)
+        state.update(action.add_eff)
+
+    return [
+        f"plan starts {device} but never stops it and the goal does not require it on"
+        for _, device in sorted((started & state) - goal)
+    ]
+
+
 def unambiguous_first_pickup_source_conflicts(
     predicted_domain: Path,
     predicted_problem: Path,
@@ -615,7 +692,7 @@ def unambiguous_first_pickup_source_conflicts(
     )
     if context is None:
         return []
-    _, ground_truth, mapping, candidate_actions, reference_actions = context
+    predicted, ground_truth, mapping, candidate_actions, reference_actions = context
     if not candidate_actions or not reference_actions:
         return []
 
@@ -634,37 +711,58 @@ def unambiguous_first_pickup_source_conflicts(
             len(literal) != 3
             or literal[0] not in SPATIAL_PREDICATES
             or literal[1] not in mapping
-            or literal[2] not in mapping
         ):
-            continue
-        mapped = _mapped_literal(literal, mapping)
-        if mapped is None:
             continue
         reference_sources = {
             requirement
             for requirement in reference.pre_pos
             if len(requirement) == 3
-            and requirement[0] == mapped[0]
-            and requirement[1] == mapped[1]
+            and requirement[0] in SPATIAL_PREDICATES
+            and requirement[1] == mapping[literal[1]]
         }
-        if not reference_sources or mapped in reference_sources:
+        if not reference_sources:
             continue
-        reference_source_targets = {
-            source[2] for source in reference_sources
-        }
-        source_is_reference_qualifier = mapped[2] in reference.args
+        reference_source_targets = {source[2] for source in reference_sources}
+        mapped_source = mapping.get(literal[2])
+        if mapped_source in reference_source_targets:
+            continue
+
+        if mapped_source is None:
+            candidate_roles = predicted.unary_roles.get(literal[2], frozenset())
+            reference_roles = [
+                ground_truth.unary_roles.get(source, frozenset())
+                for source in reference_source_targets
+            ]
+            if (
+                candidate_roles
+                and reference_roles
+                and all(
+                    roles and candidate_roles.isdisjoint(roles)
+                    for roles in reference_roles
+                )
+            ):
+                conflicts.append(
+                    f"candidate first pickup {candidate.to_line()} uses direct "
+                    f"source {_format_literal(literal)} of type "
+                    f"{', '.join(sorted(candidate_roles))}, but reference first "
+                    f"pickup {reference.to_line()} uses "
+                    f"{', '.join(_format_literal(source) for source in sorted(reference_sources))}"
+                )
+            continue
+
+        source_is_reference_qualifier = mapped_source in reference.args
         source_is_top_alias = "top" in _tokenize(candidate.name) and any(
             len(relation) == 3
             and relation[0] in SPATIAL_PREDICATES
             and relation[1] in reference_source_targets
-            and relation[2] == mapped[2]
+            and relation[2] == mapped_source
             for relation in ground_truth.positive_init
         )
         if source_is_reference_qualifier or source_is_top_alias:
             continue
         conflicts.append(
             f"candidate first pickup {candidate.to_line()} requires "
-            f"{_format_literal(literal)} mapping to {_format_literal(mapped)}, "
+            f"{_format_literal(literal)} mapping to direct source {mapped_source}, "
             f"but reference first pickup {reference.to_line()} requires "
             f"{', '.join(_format_literal(source) for source in sorted(reference_sources))}"
         )
@@ -746,13 +844,12 @@ def reference_timeline_conflicts(
     ground_truth_problem: Path,
     ground_truth_plan: Path,
 ) -> list[str]:
-    """Find initial spatial requirements that the reference establishes later.
+    """Find initial requirements that the reference establishes only later.
 
     A raw initial-state mismatch is only advisory because the reference PDDL can
     disagree with the image. This narrower check reports a causal contradiction
-    only when the candidate needs a direct relation before its first use, while
-    the reference starts with a different direct relation and creates the same
-    mapped relation later in its executable plan.
+    only when the candidate requires a mapped fact before establishing it, while
+    the executable reference plan creates that same fact later.
     """
     context = _reference_context(
         predicted_domain, predicted_problem, predicted_plan,
@@ -776,29 +873,115 @@ def reference_timeline_conflicts(
 
     conflicts = []
     for literal in sorted(initial_requirements):
-        if len(literal) != 3 or literal[0] not in SPATIAL_PREDICATES:
-            continue
         mapped = _mapped_literal(literal, mapping)
         if mapped is None or mapped in ground_truth.positive_init:
             continue
-        initial_alternatives = {
-            reference_literal
-            for reference_literal in ground_truth.positive_init
-            if len(reference_literal) == 3
-            and reference_literal[0] == mapped[0]
-            and reference_literal[1] == mapped[1]
-        }
         established_later = later_effects.get(mapped)
-        if not initial_alternatives or established_later is None:
+        if established_later is None:
             continue
         step, action = established_later
         conflicts.append(
             "candidate requires initial "
             f"{_format_literal(literal)} mapping to {_format_literal(mapped)}, "
-            f"but reference starts with {', '.join(_format_literal(item) for item in sorted(initial_alternatives))} "
-            f"and establishes {_format_literal(mapped)} only at reference step {step}: {action}"
+            f"but GT does not assert it initially and establishes it only at "
+            f"reference step {step}: {action}"
         )
     return conflicts
+
+
+def _contract_tokens(text: str) -> frozenset[str]:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return frozenset(
+        TOKEN_ALIASES.get(token, token)
+        for token in re.findall(r"[a-z]+|[0-9]+", text.lower())
+        if token != "of"
+    )
+
+
+def reference_goal_specificity_conflicts(
+    predicted_problem: Path,
+    ground_truth_problem: Path,
+    instruction: str,
+) -> list[str]:
+    """Detect an instruction-named destination collapsed to a generic target."""
+    try:
+        predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
+        ground_truth = parse_problem_text(
+            ground_truth_problem.read_text(encoding="utf-8")
+        )
+        _, predicted_goal, _ = parse_strips_problem(predicted_problem)
+        _, ground_truth_goal, _ = parse_strips_problem(ground_truth_problem)
+    except (OSError, NotImplementedError, ValueError):
+        return []
+
+    mapping = map_objects(predicted, ground_truth)
+    instruction_tokens = _contract_tokens(instruction)
+
+    def same_object(candidate: str, reference: str) -> bool:
+        return (
+            candidate == reference
+            or mapping.get(candidate) == reference
+            or _contract_tokens(candidate) == _contract_tokens(reference)
+        )
+
+    conflicts = []
+    for reference in sorted(ground_truth_goal):
+        if len(reference) != 3 or reference[0] not in SPATIAL_PREDICATES:
+            continue
+        candidates = [
+            literal
+            for literal in predicted_goal
+            if len(literal) == 3
+            and literal[0] in SPATIAL_PREDICATES
+            and same_object(literal[1], reference[1])
+        ]
+        if not candidates:
+            continue
+        required_tokens = _contract_tokens(reference[2]) & instruction_tokens
+        if not required_tokens or any(
+            required_tokens <= _contract_tokens(candidate[2])
+            for candidate in candidates
+        ):
+            continue
+        missing = min(
+            (
+                (
+                    required_tokens - _contract_tokens(candidate[2]),
+                    candidate,
+                )
+                for candidate in candidates
+            ),
+            key=lambda item: len(item[0]),
+        )
+        conflicts.append(
+            f"reference goal {_format_literal(reference)} preserves the "
+            f"instruction-named destination detail "
+            f"{', '.join(sorted(missing[0]))}, but candidate goal "
+            f"{_format_literal(missing[1])} omits it"
+        )
+    return conflicts
+
+
+def empty_candidate_trace_conflicts(
+    predicted_plan: Path,
+    ground_truth_problem: Path,
+) -> list[str]:
+    """Reject doing nothing when the verified initial state is not already a goal."""
+    try:
+        candidate_plan, _ = parse_plan(predicted_plan)
+        initial, goal_positive, goal_negative = parse_strips_problem(
+            ground_truth_problem
+        )
+    except (OSError, NotImplementedError, ValueError):
+        return []
+    if candidate_plan or goals_satisfied(initial, goal_positive, goal_negative):
+        return []
+    return [
+        (
+            "candidate trace has zero actions, but the verified reference initial "
+            "state does not satisfy the task goal"
+        )
+    ]
 
 
 def reference_quantity_conflicts(
@@ -1089,9 +1272,12 @@ def collapsed_closed_locked_entity_conflicts(
         )
         if candidate_count < reference_count:
             return [
-                "reference separately closes "
-                f"{reference_pair[0]} and locks {reference_pair[1]}, but "
-                f"candidate collapses both states onto {', '.join(sorted(collapsed_targets))}"
+                (
+                    "reference separately closes "
+                    f"{reference_pair[0]} and locks {reference_pair[1]}, but "
+                    "candidate collapses both states onto "
+                    f"{', '.join(sorted(collapsed_targets))}"
+                )
             ]
     return []
 
@@ -1106,13 +1292,33 @@ def reference_contract_conflicts(
     instruction: str = "",
 ) -> list[str]:
     """Return narrow reference-backed semantic contradictions for a candidate."""
-    conflicts = reference_timeline_conflicts(
-        predicted_domain,
-        predicted_problem,
+    conflicts = empty_candidate_trace_conflicts(
         predicted_plan,
-        ground_truth_domain,
         ground_truth_problem,
-        ground_truth_plan,
+    )
+    conflicts.extend(
+        unfinished_started_process_conflicts(
+            predicted_domain,
+            predicted_problem,
+            predicted_plan,
+        )
+    )
+    conflicts.extend(
+        reference_goal_specificity_conflicts(
+            predicted_problem,
+            ground_truth_problem,
+            instruction,
+        )
+    )
+    conflicts.extend(
+        reference_timeline_conflicts(
+            predicted_domain,
+            predicted_problem,
+            predicted_plan,
+            ground_truth_domain,
+            ground_truth_problem,
+            ground_truth_plan,
+        )
     )
     conflicts.extend(
         unambiguous_first_pickup_source_conflicts(

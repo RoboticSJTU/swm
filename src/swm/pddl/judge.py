@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from swm.llm import call_gpt_json
@@ -7,10 +8,15 @@ from swm.pddl.init_state_precheck import (
     compare_initial_states,
     explicit_tool_possession_conflicts,
     implicit_running_device_start_conflicts,
+    parse_problem_text,
     read_problem_source,
-    reference_contract_conflicts,
+    unfinished_started_process_conflicts,
 )
 from swm.pddl.strips import ground_plan, parse_domain, parse_plan
+
+JUDGE_REASONING_EFFORT = "xhigh"
+JUDGE_TEMPERATURE = 1
+
 
 def latest_round_problem(task_dir: Path) -> Path | None:
     """Return the problem from the highest numeric round that contains one."""
@@ -58,11 +64,20 @@ def _call_validated_judge(
     prompt: str,
     first_img: Path,
 ) -> dict:
-    last_error: ValueError | None = None
+    last_error: Exception | None = None
     for _ in range(3):
         try:
-            return _validated_vlm_result(call_gpt_json(model, prompt, [first_img]))
-        except ValueError as error:
+            return _validated_vlm_result(
+                call_gpt_json(
+                    model,
+                    prompt,
+                    [first_img],
+                    attempts=1,
+                    reasoning_effort=JUDGE_REASONING_EFFORT,
+                    temperature=JUDGE_TEMPERATURE,
+                )
+            )
+        except (RuntimeError, ValueError) as error:
             last_error = error
     raise ValueError(
         "Judge did not return the required flat judge schema after 3 attempts: "
@@ -70,93 +85,193 @@ def _call_validated_judge(
     )
 
 
-def _pddl_context(
+def _evaluated_symbolic_trace(
+    candidate_plan: str,
     predicted_domain: str | Path | None,
     pddl_plan: str | Path | None,
 ) -> str:
-    if predicted_domain is None or pddl_plan is None:
-        return "No symbolic PDDL artifacts were supplied."
-    try:
-        domain_path = predicted_domain if isinstance(predicted_domain, Path) else None
-        plan_path = pddl_plan if isinstance(pddl_plan, Path) else None
-        if domain_path is None or plan_path is None:
-            plan = (
-                pddl_plan.read_text(encoding="utf-8")
-                if isinstance(pddl_plan, Path)
-                else pddl_plan
-            )
-            return "[Authoritative symbolic plan]\n" + plan
+    if not isinstance(predicted_domain, Path) or not isinstance(pddl_plan, Path):
+        return candidate_plan
 
-        schemas = parse_domain(domain_path)
-        raw_plan, _ = parse_plan(plan_path)
+    try:
+        schemas = parse_domain(predicted_domain)
+        raw_plan, _ = parse_plan(pddl_plan)
+        if not raw_plan:
+            return "Candidate trace contains zero actions."
         actions = ground_plan(raw_plan, schemas)
-        dynamic_predicates = {
-            literal[0]
-            for schema in schemas.values()
-            for literal in schema.add_eff | schema.del_eff
-        }
-
-        def format_literal(literal: tuple[str, ...]) -> str:
-            return f"({' '.join(literal)})"
-
-        def format_literals(literals: set[tuple[str, ...]]) -> list[str]:
-            return sorted(
-                format_literal(literal)
-                for literal in literals
-                if literal[0] in dynamic_predicates
-            )
-
-        def format_action(action) -> str:
-            arguments = f" {' '.join(action.args)}" if action.args else ""
-            return f"({action.name}{arguments})"
-
-        lines = ["[Candidate mechanically grounded symbolic trace]"]
-        for index, action in enumerate(actions, start=1):
-            before = format_literals(action.pre_pos)
-            before.extend(f"not {literal}" for literal in format_literals(action.pre_neg))
-            changes = [f"+{literal}" for literal in format_literals(action.add_eff)]
-            changes.extend(f"-{literal}" for literal in format_literals(action.del_eff))
-
-            lines.append(f"{index}. {format_action(action)}")
-            if before:
-                lines.append(f"   Before: {', '.join(before)}")
-            if changes:
-                lines.append(f"   State change: {', '.join(changes)}")
-        return "\n".join(lines)
     except (OSError, KeyError, ValueError, NotImplementedError) as error:
-        return f"Symbolic PDDL artifacts could not be read: {error}"
+        return f"{candidate_plan}\n\nSymbolic details unavailable: {error}"
 
+    dynamic_predicates = {
+        literal[0]
+        for schema in schemas.values()
+        for literal in schema.add_eff | schema.del_eff
+    }
 
-def _initial_state_crosscheck(
-    predicted_problem: str | Path | None,
-    ground_truth_problem: str | Path | None,
-) -> str:
-    """Report auxiliary PDDL disagreements without deciding the visual verdict."""
-    if predicted_problem is None or ground_truth_problem is None:
-        return "No auxiliary reference PDDL initial-state comparison was supplied."
-    try:
-        result = compare_initial_states(
-            read_problem_source(predicted_problem),
-            read_problem_source(ground_truth_problem),
+    def format_literals(literals: set[tuple[str, ...]]) -> list[str]:
+        return sorted(
+            f"{literal[0]}({', '.join(literal[1:])})"
+            for literal in literals
+            if literal[0] in dynamic_predicates
         )
-    except (OSError, ValueError) as error:
-        return f"Auxiliary initial-state comparison is unavailable: {error}"
-    if not result.contradictions:
-        return "No explicit auxiliary initial-state disagreement was detected."
+
+    lines = []
+    for index, action in enumerate(actions, start=1):
+        manipulators = [
+            argument
+            for argument in action.args
+            if any(part in {"arm", "hand", "gripper"} for part in argument.split("_"))
+        ]
+        objects = [argument for argument in action.args if argument not in manipulators]
+        before = format_literals(action.pre_pos)
+        before.extend(f"not {literal}" for literal in format_literals(action.pre_neg))
+        changes = [f"+{literal}" for literal in format_literals(action.add_eff)]
+        changes.extend(f"-{literal}" for literal in format_literals(action.del_eff))
+
+        action_text = f"{action.name}({', '.join(objects)})"
+        if manipulators:
+            action_text += f" with {' and '.join(manipulators)}"
+        lines.append(f"{index}. {action_text}")
+        if before:
+            lines.append(f"   Before: {', '.join(before)}")
+        if changes:
+            lines.append(f"   State change: {', '.join(changes)}")
+    return "\n".join(lines)
+
+
+def _render_literal(literal: tuple[str, ...]) -> str:
+    return "(" + " ".join(literal) + ")"
+
+
+def _candidate_initial_state(predicted_problem: str | Path | None) -> str:
+    if predicted_problem is None:
+        return "Candidate Initial State: unavailable."
+    try:
+        parsed = parse_problem_text(read_problem_source(predicted_problem))
+    except (OSError, TypeError, ValueError) as error:
+        return f"Candidate Initial State: unavailable ({error})."
+
+    positive = [_render_literal(literal) for literal in sorted(parsed.positive_init)]
+    negative = [
+        f"(not {_render_literal(literal)})" for literal in sorted(parsed.negative_init)
+    ]
     return "\n".join(
         [
-            "Candidate and reference PDDL disagree on:",
-            *[f"- {contradiction}" for contradiction in result.contradictions],
-            "This is an auxiliary warning, not scene evidence.",
+            "Positive facts:",
+            *(positive or ["(none)"]),
+            "Negative facts:",
+            *(negative or ["(none)"]),
         ]
     )
+
+
+def _candidate_goal(predicted_problem: str | Path | None) -> str:
+    if predicted_problem is None:
+        return "Candidate Goal: unavailable."
+    try:
+        text = read_problem_source(predicted_problem)
+        match = re.search(r"\(\s*:goal\b", text, re.IGNORECASE)
+        if not match:
+            raise ValueError("missing :goal section")
+        depth = 0
+        in_comment = False
+        for index in range(match.start(), len(text)):
+            character = text[index]
+            if character == "\n":
+                in_comment = False
+            elif in_comment:
+                continue
+            elif character == ";":
+                in_comment = True
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    return text[match.start() : index + 1]
+        raise ValueError("unclosed :goal section")
+    except (OSError, TypeError, ValueError) as error:
+        return f"Candidate Goal: unavailable ({error})."
+
+
+def _render_judge_prompt(
+    instruction: str,
+    kf_actions: str,
+    candidate_plan: str,
+    predicted_domain: str | Path | None,
+    predicted_problem: str | Path | None,
+    ground_truth_problem: str | Path | None,
+    pddl_plan: str | Path | None,
+) -> str:
+    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
+    return prompt_path.read_text(encoding="utf-8").format(
+        instruction=instruction,
+        kf_actions=kf_actions,
+        candidate_initial_state=_candidate_initial_state(predicted_problem),
+        candidate_goal=_candidate_goal(predicted_problem),
+        programmatic_findings=_programmatic_findings(
+            predicted_domain,
+            predicted_problem,
+            pddl_plan,
+            ground_truth_problem,
+        ),
+        evaluated_symbolic_trace=_evaluated_symbolic_trace(
+            candidate_plan,
+            predicted_domain,
+            pddl_plan,
+        ),
+    )
+
+
+def _programmatic_findings(
+    predicted_domain: str | Path | None,
+    predicted_problem: str | Path | None,
+    pddl_plan: str | Path | None,
+    ground_truth_problem: str | Path | None,
+) -> str:
+    findings = []
+
+    if predicted_problem is not None and ground_truth_problem is not None:
+        findings.extend(
+            f"- Init: {contradiction}"
+            for contradiction in compare_initial_states(
+                read_problem_source(predicted_problem),
+                read_problem_source(ground_truth_problem),
+            ).contradictions
+        )
+
+    if all(
+        isinstance(source, Path)
+        for source in (predicted_domain, predicted_problem, pddl_plan)
+    ):
+        findings.extend(
+            f"- Tool: {conflict}"
+            for conflict in explicit_tool_possession_conflicts(
+                predicted_domain,
+                predicted_problem,
+                pddl_plan,
+            )
+        )
+        findings.extend(
+            f"- Device: {conflict}"
+            for conflict in implicit_running_device_start_conflicts(
+                predicted_domain,
+                pddl_plan,
+            )
+        )
+
+    if findings:
+        return "\n".join(findings)
+    if ground_truth_problem is None:
+        return "GT PDDL was not supplied; only Candidate-only checks were available."
+    return "None."
 
 
 def judge_pddl(
     model: str,
     first_img: Path,
     instruction: str,
-    kf_plan: str,
+    kf_actions: str,
     candidate_plan: str,
     n: int = 1,
     predicted_problem: str | Path | None = None,
@@ -174,7 +289,7 @@ def judge_pddl(
         isinstance(source, Path)
         for source in (predicted_domain, predicted_problem, pddl_plan)
     ):
-        conflicts = explicit_tool_possession_conflicts(
+        conflicts = unfinished_started_process_conflicts(
             predicted_domain,
             predicted_problem,
             pddl_plan,
@@ -182,72 +297,21 @@ def judge_pddl(
         if conflicts:
             failure = "; ".join(conflicts)
             return {
-                "reasoning": "The evaluated plan explicitly uses a tool without holding or mechanically binding it: " + failure,
+                "reasoning": "The Candidate leaves a task-started process active: "
+                + failure,
                 "pass": False,
-                "feedback": "Hold or mechanically bind the named tool before using it. " + failure,
+                "feedback": "Stop the started process before completion. " + failure,
             }
 
-    if all(isinstance(source, Path) for source in (predicted_domain, pddl_plan)):
-        conflicts = implicit_running_device_start_conflicts(
-            predicted_domain,
-            pddl_plan,
-        )
-        if conflicts:
-            failure = "; ".join(conflicts)
-            return {
-                "reasoning": "The evaluated action has an impossible device-state transition: " + failure,
-                "pass": False,
-                "feedback": "Turn on the device before the running-device action. " + failure,
-            }
-
-    if all(
-        isinstance(source, Path)
-        for source in (
-            predicted_domain,
-            predicted_problem,
-            pddl_plan,
-            ground_truth_problem,
-        )
-    ):
-        reference_domain = ground_truth_problem.parent / "domain.pddl"
-        reference_plan = ground_truth_problem.parent / "plan.txt"
-        if reference_domain.is_file() and reference_plan.is_file():
-            conflicts = reference_contract_conflicts(
-                predicted_domain,
-                predicted_problem,
-                pddl_plan,
-                reference_domain,
-                ground_truth_problem,
-                reference_plan,
-                instruction,
-            )
-            if conflicts:
-                failure = "; ".join(conflicts)
-                return {
-                    "reasoning": "The candidate violates a reference-backed semantic contract: " + failure,
-                    "pass": False,
-                    "feedback": "Preserve the required object count, relation specificity, and independently meaningful state transitions. " + failure,
-                }
-
-    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
-    prompt = prompt_path.read_text(encoding="utf-8").format(
+    prompt = _render_judge_prompt(
         instruction=instruction,
-        kf_plan=kf_plan,
+        kf_actions=kf_actions,
         candidate_plan=candidate_plan,
-        initial_state_crosscheck=_initial_state_crosscheck(
-            predicted_problem,
-            ground_truth_problem,
-        ),
-        pddl_context=_pddl_context(
-            predicted_domain,
-            pddl_plan,
-        ),
+        predicted_domain=predicted_domain,
+        predicted_problem=predicted_problem,
+        ground_truth_problem=ground_truth_problem,
+        pddl_plan=pddl_plan,
     )
-
     results = [_call_validated_judge(model, prompt, first_img) for _ in range(n)]
-
-    passed = sum(r["pass"] for r in results) > n // 2
-
-    for r in results:
-        if r["pass"] == passed:
-            return r
+    majority = sum(result["pass"] for result in results) > n // 2
+    return next(result for result in results if result["pass"] == majority)

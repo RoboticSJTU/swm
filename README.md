@@ -3,7 +3,7 @@
 SWM（Symbolic World Model）用于从机器人操作视频或场景图像中生成可验证的 PDDL 规划数据，并导出视觉语言模型训练样本。
 
 ```text
-视频/图像 + 任务指令 → 关键帧与动作规划 → PDDL 生成 → Fast Downward 求解 → 一致性评估
+视频/图像 + 任务指令 → Temporal-Gradient Keyframe Extraction → Keyframe-based Action Sequence Extraction → PDDL 生成 → Fast Downward 求解 → 一致性评估
 ```
 
 ## 安装
@@ -56,7 +56,7 @@ tar -xzf dataset/data/swm_data_json.tar.gz -C dataset/data/
 
 ## 运行
 
-先修改 `scripts/domain_generation.py` 文件顶部的配置。`STEP_SOURCE = "video"` 会从视频抽帧、提取关键帧并学习动作步骤；`STEP_SOURCE = "steps_json"` 会直接读取 `tasks/steps` 中的步骤和 `tasks/images` 中的场景图。然后运行：
+先修改 `scripts/domain_generation.py` 文件顶部的配置。`STEP_SOURCE = "video"` 会依次执行 Temporal-Gradient Keyframe Extraction 和 Keyframe-based Action Sequence Extraction；`STEP_SOURCE = "steps_json"` 会直接读取 `tasks/steps` 中的步骤和 `tasks/images` 中的场景图。然后运行：
 
 ```bash
 python scripts/domain_generation.py
@@ -68,12 +68,14 @@ python scripts/domain_generation.py
 eval_results/<model>/<task_domain>/<task_id>/<episode_id>/
 ```
 
+视频分支把动作序列保存为 `kf_actions.txt`；其中 `[G#]` 仅记录动作来源的关键帧组，PDDL 生成、检索和语义评估在读取时会去掉该索引。
+
 常用脚本：
 
 - `scripts/steps_generation.py`：生成原子动作序列
 - `scripts/instruction_aug_generation.py`：生成增强指令和元数据
 - `scripts/sharegpt.py`：导出多模态 ShareGPT 数据
-- `scripts/eval_keyframe.py`、`scripts/eval_planning.py`：评测关键帧和 PDDL 规划
+- `scripts/keyframe/eval_keyframe.py`、`scripts/eval_planning.py`：评测关键帧和 PDDL 规划
 
 部分脚本包含本地路径和模型配置，运行前请按实际环境修改。
 

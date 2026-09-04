@@ -1,70 +1,68 @@
-Judge whether an embodied robot plan is executable and fully satisfies the instruction.
+Judge whether the Candidate plan is physically executable and fully satisfies the Instruction.
 
-# Inputs
+# Task
 
-- Instruction:
+Instruction:
 {instruction}
 
-- Ground-truth reference plan:
-{kf_plan}
+Scene image: attached.
 
-- Initial scene image: attached.
+# Candidate Initial State
 
-# Candidate Plan
+{candidate_initial_state}
 
-{candidate_plan}
+Candidate PDDL is unverified.
+
+# Candidate Goal
+
+{candidate_goal}
+
+# Programmatic Findings
+
+{programmatic_findings}
 
 # Evaluated Symbolic Trace
 
-{pddl_context}
+{evaluated_symbolic_trace}
 
-# Auxiliary Initial-State Cross-check
+# Reference
 
-{initial_state_crosscheck}
+Keyframe-based action sequence (evidence, never Candidate actions):
+{kf_actions}
 
-# Evidence Model
+# Required Checks
 
-- The Instruction is authoritative about what must be achieved, including any specified object, scope, method, tool, quantity, order, final relation, cleanup, return condition, or persistence.
-- The reference plan is one valid witness. Use it to infer relevant state changes and causal dependencies, but do not require its wording, incidental details, specific actions, or total order unless they are necessary from the Instruction or action semantics.
-- The image is authoritative for clear visible object identity, initial direct relations, and physical affordances. If it conflicts with a reference-plan scene claim, use the image for that scene fact; treat visually compatible color or name aliases as the same object, while an unclear image cannot overturn a necessary causal condition established by stronger evidence.
-- Other facts are unknown. Reject only when failure follows from the provided evidence or unambiguous action semantics. Do not invent hidden actions, hidden states, or unsupported physical constraints.
-- The Candidate Plan is the sequence under evaluation. When a symbolic trace is supplied, use it to resolve exact action bindings and state changes. When no symbolic trace is supplied, interpret the Candidate Plan as a natural-language action sequence.
-- The symbolic trace, when supplied, is mechanically grounded from the evaluated domain and `plan.txt`; its symbols, effects, and goals are claims, not proof. They cannot invent an unsupported affordance or override clear visual evidence. A required state persists unless the trace explicitly removes it or an effect is logically incompatible; an added state alone is not a failure.
-- In the trace, `Before` lists the conditions claimed for that action; `not (...)` means the literal must not hold. `State change` lists only the claimed delta: `+` adds a literal and `-` removes one. It is not a complete observed state.
-- Treat every trace argument and direct relation as an exact binding. A nearby surface, enclosing container, or broad area does not make a different direct source or destination equivalent.
-- The auxiliary initial-state cross-check only highlights a potential discrepancy. Resolve it using the image and reference steps; do not reject a visually supported alias or an auxiliary-reference error solely because it is reported.
+Pass only if all three layers below succeed.
 
-# Plan Comparison Rules
+1. Instruction completion
+- Build the complete contract: objects, quantities, source, destination, qualifiers, method, order, relations, cleanup, and persistence.
+- Candidate history and result must establish every requirement. A missing transition or underspecified destination/relation is failure, not unknown.
+- An imperative operation must occur in Candidate history; initial facts cannot perform it. Only stative wording such as "leave" or "end up" may already hold when scene evidence confirms it.
+- Preserve stated order. Preparatory access may occur early, but each named completion before "then" or in a process list must finish before the later stage. Results commute only when neither creates clearance, load, receiver, or alignment for the other.
+- Resolve ambiguous modifiers using the image and reference. Do not invent unsupported relations.
+- A few singular symbols do not represent unmodeled remaining items unless explicitly defined as collections.
 
-- Compare state transitions and task-relevant conditions, not text.
-- Accept supported aliases, paraphrases, independent reordering, and alternative paths that establish the same necessary states. Redundant actions are harmless only when each is physically executable and preserves the task contract.
-- Do not treat an action as necessary merely because it appears in the reference plan.
-- An action includes its inherent direct effects, but not separate acquisition, access, relocation, release, opening, closing, or other independently meaningful actions.
-- State persists until changed by a later action.
-- Direct support, containment, possession, and other typed relations are not interchangeable or transitive unless explicitly supported.
-- Instruction-required methods, tools, quantities, order, cleanup, return conditions, and persistence requirements cannot be replaced merely by reaching a similar final state.
-- For each pickup, verify its stated direct source. For each tool action, verify the tool is currently held. With one hand, an unrelated action cannot occur while a required object remains held.
-- A return-to-original requirement preserves the observed original relation, not merely a broad nearby surface.
+2. Symbolic execution
+- Simulate only the Candidate trace, in order, from the Candidate Initial State. Never copy, assume, or execute actions from the reference plan.
+- Every `Before` must hold initially or follow from an earlier Candidate change. Track bindings, possession, direct location, relations, and device state; support, containment, and possession are not interchangeable or transitive.
+- `Before` lists claimed conditions. `State change` is only the claimed delta: `not` requires absence, `+` adds, and `-` removes. Candidate Goal and PDDL facts are claims to verify, not proof.
 
-# Evaluation
+3. Physical execution
+- Check every transition against the scene. Candidate predicates cannot make a blocked object, closed container, occupied destination, wrong alignment, possession conflict, or false source valid.
+- For visible initial identity, possession, and location, clear image evidence outranks reference wording, which outranks Candidate claims. A missed small object, ambiguous adjacent boundary, or guessed reach is not contradiction. Matching reference source/destination corroborates it; hand choice alone does not prove exclusivity.
+- Reference opening, clearance, reposition, transfer, or stopping before later use is causal evidence. Require an equivalent Candidate state. Alignment with one outlet, slot, or workspace does not align another.
+- Track mixture, emptied containers, moved supports, geometry, and active processes. Do not infer impossible orientation or reach from category alone. Stop task-started processes unless continued operation is required.
 
-Perform the following checks in order:
-1. Build the complete task contract from the Instruction.
-2. Derive only the prerequisites, effects, and partial-order dependencies that are necessary for execution or for satisfying that contract, using the Instruction, reference plan, image, and unambiguous action semantics.
-3. Simulate the Candidate Plan from the initial scene in order, tracking all task-relevant state, including access, possession, direct location, object relations, and device state.
-4. At each action, check whether its necessary preconditions are satisfied by the accumulated state.
-   - If a precondition is definitely unsatisfied, stop at the earliest such action and classify the plan as an execution failure.
-   - Do not reject merely because a condition is unknown or unclear.
-5. Only if the entire plan is executable, verify whether the resulting state and action history satisfy the complete task contract.
+# Decision
 
-Before rejecting, verify that the disputed condition is actually necessary and ground the conclusion in decisive input evidence.
+The reference is one witness, not mandatory wording or order. Accept alternatives proving the same contract. Reject the earliest decisive failure. Unknown applies only to unobservable incidental facts, not explicit requirements or unsupported preconditions.
 
 # Output
 
-Return exactly this JSON object and no additional text or fields:
+Return exactly this JSON object and no additional fields:
 
 {{
-  "reasoning": "detailed, evidence-grounded evaluation; for failure, identify the decisive execution or completeness issue",
+  "reasoning": "state the contract, then give the decisive completion, symbolic, or physical evidence",
   "pass": true or false,
-  "feedback": "empty if pass=true; otherwise, briefly identify the erroneous step or unmet requirement"
+  "feedback": "empty if pass=true; otherwise identify the erroneous step or unmet requirement"
 }}

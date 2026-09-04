@@ -1,5 +1,3 @@
-# Task
-
 Your task is to diagnose why the previous PDDL domain and problem failed, use the planner output and failure feedback to identify the necessary corrections, and regenerate a valid, executable, and task-correct PDDL domain and problem.
 
 # INPUT

@@ -8,7 +8,7 @@ from swm.llm import call_gpt_json
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 EVAL_ROOT = ROOT_DIR / "eval_results" / "gemini-3-flash-preview"
-PRED_ROOT = EVAL_ROOT / "human_energy_无指令"
+PRED_ROOT = EVAL_ROOT / "human_temporal_gradient_无指令"
 
 MODEL = "gemini-3-flash-preview"
 GT_ROOT = EVAL_ROOT / "human_GT"
@@ -81,7 +81,11 @@ def episode_key(name):
 
 
 def read_steps(path):
-    return [x.strip() for x in path.read_text(encoding="utf-8", errors="ignore").splitlines() if x.strip()] if path.exists() else []
+    return [
+        re.sub(r"^(?:\[G\d+\]|\d+[.)])\s*", "", line.strip())
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if line.strip()
+    ] if path.exists() else []
 
 
 def clean_indices(xs, n):
@@ -102,8 +106,8 @@ def clean_indices(xs, n):
 
 
 def eval_episode(episode):
-    gt_path = GT_ROOT / episode / "kf_plan.txt"
-    pred_path = PRED_ROOT / episode / "kf_plan.txt"
+    gt_path = GT_ROOT / episode / "kf_actions.txt"
+    pred_path = PRED_ROOT / episode / "kf_actions.txt"
 
     if not gt_path.exists():
         return {

@@ -201,9 +201,9 @@ def load_tasks_one(dataset_name: str) -> list[dict]:
                     image_path = p
                     break
 
-            kf_plan = ""
+            kf_actions = ""
             if episode_name in steps_data:
-                kf_plan = steps_to_text(steps_data[episode_name])
+                kf_actions = steps_to_text(steps_data[episode_name])
 
             tasks.append(
                 {
@@ -212,7 +212,7 @@ def load_tasks_one(dataset_name: str) -> list[dict]:
                     "episode": episode_name,
                     "instruction": instruction,
                     "image": image_path,
-                    "kf_plan": kf_plan,
+                    "kf_actions": kf_actions,
                     "flat": True,
                 }
             )
@@ -245,10 +245,10 @@ def load_tasks_one(dataset_name: str) -> list[dict]:
                     image_path = p2
                     break
 
-            kf_plan = ""
+            kf_actions = ""
             if task_name in steps_data and isinstance(steps_data[task_name], dict):
                 if episode_name in steps_data[task_name]:
-                    kf_plan = steps_to_text(steps_data[task_name][episode_name])
+                    kf_actions = steps_to_text(steps_data[task_name][episode_name])
 
             tasks.append(
                 {
@@ -257,7 +257,7 @@ def load_tasks_one(dataset_name: str) -> list[dict]:
                     "episode": episode_name,
                     "instruction": instruction,
                     "image": image_path,
-                    "kf_plan": kf_plan,
+                    "kf_actions": kf_actions,
                     "flat": False,
                 }
             )
@@ -340,7 +340,7 @@ def generate_one(task: dict):
 def judge_one(task: dict):
     instruction = task["instruction"]
     image_path = task["image"]
-    kf_plan = task["kf_plan"]
+    kf_actions = task["kf_actions"]
 
     save_dir = get_save_dir(task)
     plan_file = save_dir / "plan.txt"
@@ -366,7 +366,7 @@ def judge_one(task: dict):
             model=judge_model,
             first_img=image_path,
             instruction=instruction,
-            kf_plan=kf_plan,
+            kf_actions=kf_actions,
             candidate_plan=candidate_plan,
             n=N,
             predicted_problem=(save_dir / "problem.pddl") if eval_mode == "pddl" else None,

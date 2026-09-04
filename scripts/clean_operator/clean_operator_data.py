@@ -2,7 +2,7 @@
 """Canonicalize approved PDDL operator contracts in human and human_aug.
 
 Only the highest numbered round in each episode is considered.  The script is a
-dry run unless --apply is supplied.  It intentionally leaves kf_plan files and
+dry run unless --apply is supplied.  It intentionally leaves kf_actions files and
 all older rounds untouched.
 """
 

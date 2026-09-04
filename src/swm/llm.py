@@ -15,20 +15,30 @@ load_dotenv(find_dotenv())
 
 
 def get_client(model: str):
-    """Return the OpenAI-compatible client for a model name."""
+    """Return the OpenAI-compatible client for a model name.
+    不要删我注释的api key和url，这些都是备用的"""
     if model.startswith(("gemini", "gpt")):
         api_key = os.getenv("A6_API_KEY")
         base_url = "https://api.a6api.com/v1"        
         # api_key = os.getenv("das_API_KEY")
         # base_url = "https://dasuapi.com/v1"
-
-    elif model.startswith(("kimi-k3", "qwen3.7-max", "glm-5.2")):
+        # api_key = os.getenv("lin_API_KEY")
+        # base_url = "https://direct.linkai.pics/v1" 
+    elif model.startswith(("kimi-k3", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "glm-5.2")):
         api_key = os.getenv("BOYUE_API_KEY")
         base_url = "https://apicz.boyuerichdata.com/v1"
 
     elif model.startswith("Qwen3.8-27B"):
-        api_key = os.getenv("QWEN_API_KEY")
+
+        api_key = os.getenv("SII_API_KEY_1")
         base_url = "https://cqhbod8bjjjbcoakk8pmeebgkaq9akcq.openapi-sj.sii.edu.cn/v1"
+
+        # api_key = os.getenv("SII_API_KEY_2")
+        # base_url = "https://x.openapi-qb-ai.sii.edu.cn/v1"
+
+    elif model.startswith("qwen3.8-flash"):
+        api_key = os.getenv("Ali_API_KEY")
+        base_url = "https://llm-6x4rehswbej92kty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 
     else:
         api_key = "0"
@@ -47,6 +57,9 @@ def call_gpt(
     *,
     response_format: dict | None = None,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    temperature: float | None = None,
+    capture: dict | None = None,
 ) -> str:
     content = [{"type": "text", "text": prompt}]
     if image_paths:
@@ -70,8 +83,15 @@ def call_gpt(
         kwargs["response_format"] = response_format
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
+    if temperature is not None:
+        kwargs["temperature"] = temperature
 
-    if str(client.base_url).startswith("http://127.0.0.1") or model.startswith(("gemini", "gpt")):
+    if temperature is None and (
+        str(client.base_url).startswith("http://127.0.0.1")
+        or model.startswith(("gemini", "gpt"))
+    ):
         kwargs["temperature"] = 0
 
     try:
@@ -81,6 +101,26 @@ def call_gpt(
             raise ValueError(
                 "structured model response did not finish normally: "
                 f"{choice.finish_reason!r}"
+            )
+        if capture is not None:
+            usage = completion.usage
+            if usage is None:
+                usage_data = None
+            elif hasattr(usage, "model_dump"):
+                usage_data = usage.model_dump(mode="json")
+            else:
+                usage_data = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                    "completion_tokens": getattr(usage, "completion_tokens", None),
+                    "total_tokens": getattr(usage, "total_tokens", None),
+                }
+            capture.update(
+                {
+                    "response_id": getattr(completion, "id", None),
+                    "returned_model": getattr(completion, "model", None),
+                    "finish_reason": choice.finish_reason,
+                    "usage": usage_data,
+                }
             )
         return choice.message.content
     finally:
@@ -94,6 +134,8 @@ def call_gpt_json(
     response_format: dict | None = None,
     attempts: int = 5,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    temperature: float | None = None,
     strict_json: bool = False,
     capture: dict | None = None,
 ):
@@ -107,6 +149,10 @@ def call_gpt_json(
             call_kwargs = {}
             if max_tokens is not None:
                 call_kwargs["max_tokens"] = max_tokens
+            if reasoning_effort is not None:
+                call_kwargs["reasoning_effort"] = reasoning_effort
+            if temperature is not None:
+                call_kwargs["temperature"] = temperature
             if response_format is None:
                 raw_output = call_gpt(model, prompt, image_paths, **call_kwargs)
             else:

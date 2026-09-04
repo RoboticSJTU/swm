@@ -178,6 +178,8 @@ def sort_facts(
 def _name(token: str) -> str:
     if token == "-":
         return token
+    if token.startswith(":"):
+        return token.lower()
 
     prefix = "?" if token.startswith("?") else ""
     value = token[len(prefix) :].lower().replace("-", "_")
@@ -251,7 +253,7 @@ def _facts(expression: PDDL) -> list[tuple[bool, list[PDDL]]]:
         if len(expression) != 2 or not isinstance(expression[1], list):
             raise PDDLPostprocessError("invalid negated literal")
         return [(True, expression[1])]
-    if expression[0] in {"or", "when", "forall", "exists", "imply", "="}:
+    if expression[0] in {"or", "when", "forall", "exists", "imply"}:
         raise PDDLPostprocessError(f"unsupported construct: {expression[0]}")
     if not isinstance(expression[0], str) or any(
         not isinstance(value, str) for value in expression[1:]
@@ -442,6 +444,8 @@ def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
     objects = sorted(set(objects))
     object_set = set(objects)
     used_predicates = set()
+    uses_negative_preconditions = False
+    uses_equality = False
 
     def validate(
         expression: PDDL,
@@ -449,19 +453,32 @@ def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
         context: str,
         negative: bool,
     ) -> None:
+        nonlocal uses_negative_preconditions, uses_equality
         for is_negative, fact in _facts(expression):
-            if is_negative and not negative:
+            name = fact[0]
+            if name == "=":
+                if not is_negative or not context.endswith(" precondition"):
+                    raise PDDLPostprocessError(
+                        "equality is only supported as a negated action precondition"
+                    )
+                if len(fact) != 3:
+                    raise PDDLPostprocessError("equality expects exactly two arguments")
+                uses_negative_preconditions = True
+                uses_equality = True
+            elif is_negative and not negative:
                 raise PDDLPostprocessError(
                     f"negative literal is not supported in {context}"
                 )
-            name = fact[0]
-            if name not in declarations:
+            elif name not in declarations:
                 raise PDDLPostprocessError(f"undeclared predicate in {context}: {name}")
-            if declarations[name] != len(fact) - 1:
+            elif declarations[name] != len(fact) - 1:
                 raise PDDLPostprocessError(
                     f"predicate arity mismatch in {context}: {name}"
                 )
-            used_predicates.add(name)
+            else:
+                used_predicates.add(name)
+            if is_negative and context.endswith(" precondition"):
+                uses_negative_preconditions = True
             for argument in fact[1:]:
                 if variables is not None:
                     if argument not in variables:
@@ -475,7 +492,7 @@ def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
 
     for action in clean_actions:
         parameters = set(action[3])
-        validate(action[5], parameters, action[1] + " precondition", False)
+        validate(action[5], parameters, action[1] + " precondition", True)
         validate(action[7], parameters, action[1] + " effect", True)
         effect_facts = _facts(action[7])
         if not effect_facts:
@@ -519,9 +536,15 @@ def postprocess_pddl(domain_text: str, problem_text: str) -> tuple[str, str]:
     init_facts = sort_facts(list(unique_init.values()), labels, declaration_order)
     goal = sort_logic(goal, labels, declaration_order, {})
 
+    requirements = list(requirements_section[1:]) if requirements_section else []
+    if uses_negative_preconditions and ":negative-preconditions" not in requirements:
+        requirements.append(":negative-preconditions")
+    if uses_equality and ":equality" not in requirements:
+        requirements.append(":equality")
+
     domain_lines = [f"(define (domain {domain[1][1]})"]
-    if requirements_section is not None:
-        domain_lines.append(f"  (:requirements {' '.join(requirements_section[1:])})")
+    if requirements:
+        domain_lines.append(f"  (:requirements {' '.join(requirements)})")
     domain_lines.append("  (:predicates")
     domain_lines.extend("    " + _inline(predicate) for predicate in predicates)
     domain_lines.extend(["  )", ""])

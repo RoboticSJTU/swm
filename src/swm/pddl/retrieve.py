@@ -206,7 +206,7 @@ def _get_reranker(model_dir: str, device: str) -> Qwen3RerankerLite:
 
 
 def build_pddl_action_template(
-    kf_plan_path: Path,
+    kf_actions_path: Path,
     unified_domain_path: Path,
     topk: int = 1,
     rerank_model_dir: str = "/inspire/hdd/project/robot-decision/xiaoyunxiao-240108120113/swm/Qwen3-Reranker-0.6B",
@@ -214,16 +214,19 @@ def build_pddl_action_template(
     device: str | None = None,
     query_instruct: str = "Select the single robot action operator whose semantic meaning best matches the given natural language step.",
 ) -> str:
-    kf_plan_path = Path(kf_plan_path)
+    kf_actions_path = Path(kf_actions_path)
     unified_domain_path = Path(unified_domain_path)
 
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    out_dir = kf_plan_path.parent
+    out_dir = kf_actions_path.parent
     out_log = out_dir / "retrieval_log.json"
 
-    steps = _read_lines(kf_plan_path)
+    steps = [
+        re.sub(r"^(?:\[G\d+\]|\d+[.)])\s*", "", step)
+        for step in _read_lines(kf_actions_path)
+    ]
     if not steps:
         out_log.write_text(
             json.dumps([], ensure_ascii=False, indent=2), encoding="utf-8"

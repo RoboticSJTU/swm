@@ -1,5 +1,3 @@
-# Task
-
 You are an expert in writing a PDDL domain and problem grounded in the given image and instruction for robot task planning.
 
 # INPUT

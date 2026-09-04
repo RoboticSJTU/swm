@@ -68,7 +68,7 @@ def collect_jobs(source_data, progress_counts):
                 / SOURCE_TASK_DOMAIN
                 / group_id
                 / episode_id
-                / "kf_plan_group.txt"
+                / "kf_actions.txt"
             )
 
             if not keyframe_dir.is_dir() or not group_file.is_file():
