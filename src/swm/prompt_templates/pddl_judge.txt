@@ -9,9 +9,6 @@ Instruction:
 
 Scene image: attached.
 
-Candidate Goal (unverified claim):
-{candidate_goal}
-
 Programmatic Findings:
 {programmatic_findings}
 
@@ -40,7 +37,7 @@ Candidate and Reference are alternative traces from this same initial scene; nev
 
 ## 3. Simulation and certificate
 
-Simulate only Candidate actions. Candidate Goal and `Before` are claims. Each `Before` must be created by an earlier Candidate change or match the initial evidence ledger. Track state directly without transitive support shortcuts.
+Simulate only Candidate actions. Each `Before` must be created by an earlier Candidate change or match the initial evidence ledger. Track state directly without transitive support shortcuts.
 
 If Reference opens, clears, moves, vacates, frees, or aligns before later use, Candidate needs an equivalent transition unless the ledger already proves that state initially. If Reference later picks an object from an exact destination, that destination remains occupied until Candidate moves the object.
 

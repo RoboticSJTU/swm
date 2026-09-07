@@ -18,7 +18,7 @@ def get_client(model: str):
     """Return the OpenAI-compatible client for a model name.
     codex务必注意：不要删我注释的api key和url，这些都是备用的！
     """
-    if model.startswith(("gemini", "gpt")):
+    if model.startswith(("gemini", "gpt", "qwen3.8-flash")):
         api_key = os.getenv("A6_API_KEY")
         base_url = "https://api.a6api.com/v1"        
         # api_key = os.getenv("das_API_KEY")
@@ -36,9 +36,9 @@ def get_client(model: str):
         # api_key = os.getenv("SII_API_KEY_2")
         # base_url = "https://x.openapi-qb-ai.sii.edu.cn/v1"
 
-    elif model.startswith("qwen3.8-flash"):
-        api_key = os.getenv("Ali_API_KEY")
-        base_url = "https://llm-6x4rehswbej92kty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    # elif model.startswith("qwen3.8-flash"):
+    #     api_key = os.getenv("Ali_API_KEY")
+    #     base_url = "https://llm-6x4rehswbej92kty.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 
     else:
         api_key = "0"

@@ -146,46 +146,11 @@ def _evaluated_symbolic_trace(
     return "\n".join(lines)
 
 
-def _candidate_goal(predicted_problem: str | Path | None) -> str:
-    if predicted_problem is None:
-        return "Candidate Goal: unavailable."
-    try:
-        if isinstance(predicted_problem, Path):
-            text = predicted_problem.read_text(encoding="utf-8")
-        elif "(" in predicted_problem or "\n" in predicted_problem:
-            text = predicted_problem
-        else:
-            text = Path(predicted_problem).read_text(encoding="utf-8")
-        match = re.search(r"\(\s*:goal\b", text, re.IGNORECASE)
-        if not match:
-            raise ValueError("missing :goal section")
-        depth = 0
-        in_comment = False
-        for index in range(match.start(), len(text)):
-            character = text[index]
-            if character == "\n":
-                in_comment = False
-            elif in_comment:
-                continue
-            elif character == ";":
-                in_comment = True
-            elif character == "(":
-                depth += 1
-            elif character == ")":
-                depth -= 1
-                if depth == 0:
-                    return text[match.start() : index + 1]
-        raise ValueError("unclosed :goal section")
-    except (OSError, TypeError, ValueError) as error:
-        return f"Candidate Goal: unavailable ({error})."
-
-
 def _render_judge_prompt(
     instruction: str,
     kf_actions: str,
     candidate_plan: str,
     predicted_domain: str | Path | None,
-    predicted_problem: str | Path | None,
     ground_truth_problem: str | Path | None,
     pddl_plan: str | Path | None,
 ) -> str:
@@ -211,7 +176,6 @@ def _render_judge_prompt(
     return prompt_path.read_text(encoding="utf-8").format(
         instruction=instruction,
         kf_actions=kf_actions,
-        candidate_goal=_candidate_goal(predicted_problem),
         programmatic_findings="\n".join(findings),
         evaluated_symbolic_trace=_evaluated_symbolic_trace(
             candidate_plan,
@@ -1225,7 +1189,6 @@ def judge_pddl(
         kf_actions=kf_actions,
         candidate_plan=candidate_plan,
         predicted_domain=predicted_domain,
-        predicted_problem=predicted_problem,
         ground_truth_problem=ground_truth_problem,
         pddl_plan=pddl_plan,
     )

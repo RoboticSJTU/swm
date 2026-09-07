@@ -666,7 +666,7 @@ def process_domain(task_domain, prompt_template):
     )
 
     valid_rounds = {}
-    removed = 0
+    episodes_to_remove = []
     for episode in episode_dirs(eval_root):
         parts = episode.relative_to(eval_root).parts
         task_id, episode_id = (None, parts[0]) if len(parts) == 1 else parts
@@ -688,12 +688,7 @@ def process_domain(task_domain, prompt_template):
         if valid:
             valid_rounds[(task_id, episode_id)] = round_dir
         else:
-            shutil.rmtree(episode)
-            removed += 1
-
-    for path in eval_root.iterdir():
-        if path.is_dir() and not path.name.startswith("episode") and not any(path.iterdir()):
-            path.rmdir()
+            episodes_to_remove.append(episode)
 
     review_messages = []
     init_reviews = []
@@ -721,8 +716,25 @@ def process_domain(task_domain, prompt_template):
                 invalid_keys.append(key)
 
     for key in invalid_keys:
-        shutil.rmtree(valid_rounds.pop(key).parent)
-        removed += 1
+        episodes_to_remove.append(valid_rounds.pop(key).parent)
+
+    removed = 0
+    if episodes_to_remove:
+        while True:
+            answer = input(
+                f"[{task_domain}] delete {len(episodes_to_remove)} episode(s)? [y/N]: "
+            ).strip().lower()
+            if answer in ("y", "N"):
+                break
+            print("Please enter y or N.")
+        if answer == "y":
+            for episode in episodes_to_remove:
+                shutil.rmtree(episode)
+            removed = len(episodes_to_remove)
+
+    for path in eval_root.iterdir():
+        if path.is_dir() and not path.name.startswith("episode") and not any(path.iterdir()):
+            path.rmdir()
 
     samples = []
     missing_episode = 0
