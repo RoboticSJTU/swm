@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 from swm.pddl.strips import (
@@ -82,7 +83,7 @@ class ParsedProblem:
     positive_init: frozenset[Literal]
     negative_init: frozenset[Literal]
 
-    @property
+    @cached_property
     def unary_roles(self) -> dict[str, frozenset[str]]:
         roles: dict[str, set[str]] = {obj: set() for obj in self.objects}
         for literal in self.positive_init:
@@ -101,6 +102,23 @@ class PrecheckResult:
     @property
     def should_reject(self) -> bool:
         return self.decision == "reject"
+
+
+@dataclass
+class ReferenceContext:
+    predicted: ParsedProblem
+    reference: ParsedProblem
+    mapping: dict[str, str]
+    candidate_schemas: dict
+    reference_schemas: dict
+    candidate_actions: list
+    reference_actions: list
+    candidate_raw_plan: list
+    candidate_goal: set[Literal]
+    reference_initial: set[Literal]
+    reference_goal: set[Literal]
+    reference_goal_negative: set[Literal]
+    instruction: str
 
 
 def _tokenize(text: str) -> list[str]:
@@ -339,22 +357,42 @@ def _reference_context(
     ground_truth_domain: Path,
     ground_truth_problem: Path,
     ground_truth_plan: Path,
-):
+    instruction: str,
+) -> ReferenceContext | None:
     try:
         predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
-        ground_truth = parse_problem_text(
+        reference = parse_problem_text(
             ground_truth_problem.read_text(encoding="utf-8")
         )
-        mapping = map_objects(predicted, ground_truth)
-        candidate_actions = ground_plan(
-            parse_plan(predicted_plan)[0], parse_domain(predicted_domain)
-        )
+        mapping = map_objects(predicted, reference)
+        candidate_schemas = parse_domain(predicted_domain)
+        reference_schemas = parse_domain(ground_truth_domain)
+        candidate_raw_plan = parse_plan(predicted_plan)[0]
+        candidate_actions = ground_plan(candidate_raw_plan, candidate_schemas)
         reference_actions = ground_plan(
-            parse_plan(ground_truth_plan)[0], parse_domain(ground_truth_domain)
+            parse_plan(ground_truth_plan)[0], reference_schemas
+        )
+        _, candidate_goal, _ = parse_strips_problem(predicted_problem)
+        reference_initial, reference_goal, reference_goal_negative = (
+            parse_strips_problem(ground_truth_problem)
         )
     except (OSError, KeyError, NotImplementedError, ValueError):
         return None
-    return predicted, ground_truth, mapping, candidate_actions, reference_actions
+    return ReferenceContext(
+        predicted,
+        reference,
+        mapping,
+        candidate_schemas,
+        reference_schemas,
+        candidate_actions,
+        reference_actions,
+        candidate_raw_plan,
+        candidate_goal,
+        reference_initial,
+        reference_goal,
+        reference_goal_negative,
+        instruction,
+    )
 
 
 def _format_literal(literal: Literal) -> str:
@@ -528,73 +566,6 @@ def compare_initial_states(
     return PrecheckResult("defer", reason, contradictions, unmapped)
 
 
-def explicit_tool_possession_conflicts(
-    predicted_domain: Path,
-    predicted_problem: Path,
-    predicted_plan: Path,
-) -> list[str]:
-    """Find an explicit ``*_with_tool`` use of an unheld, unattached tool.
-
-    The action name itself makes the tool relation explicit.  A tool need not
-    be held only when the action's own preconditions bind it to another action
-    argument through a non-spatial relation, such as an inserted key.  This
-    avoids treating a key already in a lock as a handheld tool.
-    """
-    try:
-        actions = ground_plan(
-            parse_plan(predicted_plan)[0],
-            parse_domain(predicted_domain),
-        )
-        initial_state, _, _ = parse_strips_problem(predicted_problem)
-    except (OSError, KeyError, NotImplementedError, ValueError):
-        return []
-
-    held_relations = {
-        literal
-        for literal in initial_state
-        if len(literal) == 3 and literal[0] == "holding"
-    }
-    conflicts = []
-    for action in actions:
-        tokens = _tokenize(action.name)
-        if "with" in tokens and not any(
-            len(literal) == 3 and literal[0] == "holding"
-            for literal in action.pre_pos
-        ):
-            tool_tokens = set(tokens[tokens.index("with") + 1 :])
-            for tool in action.args:
-                if not tool_tokens & set(_tokenize(tool)):
-                    continue
-                held = any(
-                    len(literal) == 3
-                    and literal[0] == "holding"
-                    and literal[2] == tool
-                    for literal in held_relations
-                )
-                attached = any(
-                    len(literal) >= 3
-                    and literal[0] not in {"holding", *SPATIAL_PREDICATES}
-                    and tool in literal[1:]
-                    and any(
-                        argument != tool and argument in literal[1:]
-                        for argument in action.args
-                    )
-                    for literal in action.pre_pos
-                )
-                if not held and not attached:
-                    conflicts.append(
-                        f"explicit tool action {action.to_line()} uses {tool} while it "
-                        "is neither held nor mechanically bound to its target"
-                    )
-        held_relations.difference_update(action.del_eff)
-        held_relations.update(
-            literal
-            for literal in action.add_eff
-            if len(literal) == 3 and literal[0] == "holding"
-        )
-    return conflicts
-
-
 def implicit_running_device_start_conflicts(
     predicted_domain: Path,
     predicted_plan: Path,
@@ -670,14 +641,7 @@ def unfinished_started_process_conflicts(
     ]
 
 
-def unambiguous_first_pickup_source_conflicts(
-    predicted_domain: Path,
-    predicted_problem: Path,
-    predicted_plan: Path,
-    ground_truth_domain: Path,
-    ground_truth_problem: Path,
-    ground_truth_plan: Path,
-) -> list[str]:
+def _first_pickup_source_conflicts(context: ReferenceContext) -> list[str]:
     """Compare a fully mapped first pickup source with its reference binding.
 
     Direct pickup sources are not transitive.  The check defers when the
@@ -686,13 +650,11 @@ def unambiguous_first_pickup_source_conflicts(
     is modeled as a direct upper part of it.  All other fully mapped first-step
     source disagreements are causal scene conflicts.
     """
-    context = _reference_context(
-        predicted_domain, predicted_problem, predicted_plan,
-        ground_truth_domain, ground_truth_problem, ground_truth_plan,
-    )
-    if context is None:
-        return []
-    predicted, ground_truth, mapping, candidate_actions, reference_actions = context
+    predicted = context.predicted
+    ground_truth = context.reference
+    mapping = context.mapping
+    candidate_actions = context.candidate_actions
+    reference_actions = context.reference_actions
     if not candidate_actions or not reference_actions:
         return []
 
@@ -769,14 +731,8 @@ def unambiguous_first_pickup_source_conflicts(
     return conflicts
 
 
-def missing_required_state_transition_conflicts(
-    predicted_domain: Path,
-    predicted_problem: Path,
-    predicted_plan: Path,
-    ground_truth_domain: Path,
-    ground_truth_problem: Path,
-    ground_truth_plan: Path,
-    instruction: str,
+def _missing_required_state_transition_conflicts(
+    context: ReferenceContext,
 ) -> list[str]:
     """Find an explicit reference task-state change absent from the candidate.
 
@@ -785,19 +741,16 @@ def missing_required_state_transition_conflicts(
     instruction's reference verb and leaves the object without any modeled
     non-spatial state transition at all.
     """
-    context = _reference_context(
-        predicted_domain, predicted_problem, predicted_plan,
-        ground_truth_domain, ground_truth_problem, ground_truth_plan,
-    )
-    if context is None:
-        return []
-    _, ground_truth, mapping, candidate_actions, reference_actions = context
+    ground_truth = context.reference
+    mapping = context.mapping
+    candidate_actions = context.candidate_actions
+    reference_actions = context.reference_actions
     inverse_mapping = {
         reference: candidate for candidate, reference in mapping.items()
     }
 
     ignored_states = {"hand_free", "is_on", "is_off", "open", "closed"}
-    instruction_tokens = set(_tokenize(instruction))
+    instruction_tokens = set(_tokenize(context.instruction))
     candidate_action_tokens = {
         token for action in candidate_actions for token in _tokenize(action.name)
     }
@@ -836,14 +789,7 @@ def missing_required_state_transition_conflicts(
     return sorted(set(conflicts))
 
 
-def reference_timeline_conflicts(
-    predicted_domain: Path,
-    predicted_problem: Path,
-    predicted_plan: Path,
-    ground_truth_domain: Path,
-    ground_truth_problem: Path,
-    ground_truth_plan: Path,
-) -> list[str]:
+def _timeline_conflicts(context: ReferenceContext) -> list[str]:
     """Find initial requirements that the reference establishes only later.
 
     A raw initial-state mismatch is only advisory because the reference PDDL can
@@ -851,13 +797,10 @@ def reference_timeline_conflicts(
     only when the candidate requires a mapped fact before establishing it, while
     the executable reference plan creates that same fact later.
     """
-    context = _reference_context(
-        predicted_domain, predicted_problem, predicted_plan,
-        ground_truth_domain, ground_truth_problem, ground_truth_plan,
-    )
-    if context is None:
-        return []
-    _, ground_truth, mapping, candidate_actions, reference_actions = context
+    ground_truth = context.reference
+    mapping = context.mapping
+    candidate_actions = context.candidate_actions
+    reference_actions = context.reference_actions
 
     established: set[Literal] = set()
     initial_requirements: set[Literal] = set()
@@ -898,24 +841,12 @@ def _contract_tokens(text: str) -> frozenset[str]:
     )
 
 
-def reference_goal_specificity_conflicts(
-    predicted_problem: Path,
-    ground_truth_problem: Path,
-    instruction: str,
-) -> list[str]:
+def _goal_specificity_conflicts(context: ReferenceContext) -> list[str]:
     """Detect an instruction-named destination collapsed to a generic target."""
-    try:
-        predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
-        ground_truth = parse_problem_text(
-            ground_truth_problem.read_text(encoding="utf-8")
-        )
-        _, predicted_goal, _ = parse_strips_problem(predicted_problem)
-        _, ground_truth_goal, _ = parse_strips_problem(ground_truth_problem)
-    except (OSError, NotImplementedError, ValueError):
-        return []
-
-    mapping = map_objects(predicted, ground_truth)
-    instruction_tokens = _contract_tokens(instruction)
+    predicted_goal = context.candidate_goal
+    ground_truth_goal = context.reference_goal
+    mapping = context.mapping
+    instruction_tokens = _contract_tokens(context.instruction)
 
     def same_object(candidate: str, reference: str) -> bool:
         return (
@@ -962,19 +893,13 @@ def reference_goal_specificity_conflicts(
     return conflicts
 
 
-def empty_candidate_trace_conflicts(
-    predicted_plan: Path,
-    ground_truth_problem: Path,
-) -> list[str]:
+def _empty_candidate_trace_conflicts(context: ReferenceContext) -> list[str]:
     """Reject doing nothing when the verified initial state is not already a goal."""
-    try:
-        candidate_plan, _ = parse_plan(predicted_plan)
-        initial, goal_positive, goal_negative = parse_strips_problem(
-            ground_truth_problem
-        )
-    except (OSError, NotImplementedError, ValueError):
-        return []
-    if candidate_plan or goals_satisfied(initial, goal_positive, goal_negative):
+    if context.candidate_raw_plan or goals_satisfied(
+        context.reference_initial,
+        context.reference_goal,
+        context.reference_goal_negative,
+    ):
         return []
     return [
         (
@@ -984,21 +909,12 @@ def empty_candidate_trace_conflicts(
     ]
 
 
-def reference_quantity_conflicts(
-    predicted_problem: Path,
-    ground_truth_problem: Path,
-    instruction: str = "",
-) -> list[str]:
+def _quantity_conflicts(context: ReferenceContext) -> list[str]:
     """Detect a task quantity collapsed into fewer candidate objects."""
-    try:
-        predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
-        ground_truth = parse_problem_text(
-            ground_truth_problem.read_text(encoding="utf-8")
-        )
-        _, predicted_goal, _ = parse_strips_problem(predicted_problem)
-        _, ground_truth_goal, _ = parse_strips_problem(ground_truth_problem)
-    except (OSError, NotImplementedError, ValueError):
-        return []
+    predicted = context.predicted
+    ground_truth = context.reference
+    predicted_goal = context.candidate_goal
+    ground_truth_goal = context.reference_goal
 
     def goal_objects_by_role(problem: ParsedProblem, goal: set[Literal]) -> dict[str, set[str]]:
         result: dict[str, set[str]] = {}
@@ -1020,7 +936,7 @@ def reference_quantity_conflicts(
         "nine": 9,
         "ten": 10,
     }
-    instruction_tokens = _tokenize(instruction)
+    instruction_tokens = _tokenize(context.instruction)
     required_counts = {
         int(token) for token in instruction_tokens if token.isdigit() and int(token) > 1
     }
@@ -1054,21 +970,11 @@ def reference_quantity_conflicts(
     return conflicts
 
 
-def reference_bundled_transition_conflicts(
-    predicted_domain: Path,
-    predicted_plan: Path,
-    ground_truth_domain: Path,
-) -> list[str]:
+def _bundled_transition_conflicts(context: ReferenceContext) -> list[str]:
     """Detect a shared action that invents a separate release and relocation."""
-    try:
-        candidate_schemas = parse_domain(predicted_domain)
-        reference_schemas = parse_domain(ground_truth_domain)
-        candidate_action_names = {
-            name for name, _ in parse_plan(predicted_plan)[0]
-        }
-    except (OSError, NotImplementedError, ValueError):
-        return []
-
+    candidate_schemas = context.candidate_schemas
+    reference_schemas = context.reference_schemas
+    candidate_action_names = {name for name, _ in context.candidate_raw_plan}
     conflicts = []
     for name in sorted(
         candidate_action_names & candidate_schemas.keys() & reference_schemas.keys()
@@ -1111,22 +1017,11 @@ def reference_bundled_transition_conflicts(
     return conflicts
 
 
-def reference_activation_support_conflicts(
-    predicted_domain: Path,
-    predicted_problem: Path,
-    predicted_plan: Path,
-    ground_truth_domain: Path,
-    ground_truth_problem: Path,
-    ground_truth_plan: Path,
-) -> list[str]:
+def _activation_support_conflicts(context: ReferenceContext) -> list[str]:
     """Compare required support relations for a shared device-start action."""
-    context = _reference_context(
-        predicted_domain, predicted_problem, predicted_plan,
-        ground_truth_domain, ground_truth_problem, ground_truth_plan,
-    )
-    if context is None:
-        return []
-    _, _, mapping, candidate_actions, reference_actions = context
+    mapping = context.mapping
+    candidate_actions = context.candidate_actions
+    reference_actions = context.reference_actions
 
     conflicts = []
     for candidate in candidate_actions:
@@ -1172,27 +1067,16 @@ def reference_activation_support_conflicts(
     return conflicts
 
 
-def locked_goal_target_conflicts(
-    predicted_problem: Path,
-    ground_truth_problem: Path,
-) -> list[str]:
+def _locked_goal_target_conflicts(context: ReferenceContext) -> list[str]:
     """Find a locked terminal state moved to a different mapped object.
 
     A lock is a direct state of its target.  When both PDDL problems map the
     intended target unambiguously, declaring the same ``locked`` state for a
     different object does not preserve the reference terminal condition.
     """
-    try:
-        predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
-        ground_truth = parse_problem_text(
-            ground_truth_problem.read_text(encoding="utf-8")
-        )
-        _, predicted_goal, _ = parse_strips_problem(predicted_problem)
-        _, ground_truth_goal, _ = parse_strips_problem(ground_truth_problem)
-    except (OSError, NotImplementedError, ValueError):
-        return []
-
-    mapping = map_objects(predicted, ground_truth)
+    mapping = context.mapping
+    predicted_goal = context.candidate_goal
+    ground_truth_goal = context.reference_goal
     inverse_mapping = {reference: candidate for candidate, reference in mapping.items()}
     candidate_targets = {
         literal[1]
@@ -1217,20 +1101,14 @@ def locked_goal_target_conflicts(
     return conflicts
 
 
-def collapsed_closed_locked_entity_conflicts(
-    predicted_problem: Path,
-    ground_truth_problem: Path,
+def _collapsed_closed_locked_entity_conflicts(
+    context: ReferenceContext,
 ) -> list[str]:
     """Find a reference close/lock pair collapsed onto one candidate entity."""
-    try:
-        predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
-        ground_truth = parse_problem_text(
-            ground_truth_problem.read_text(encoding="utf-8")
-        )
-        _, predicted_goal, _ = parse_strips_problem(predicted_problem)
-        _, ground_truth_goal, _ = parse_strips_problem(ground_truth_problem)
-    except (OSError, NotImplementedError, ValueError):
-        return []
+    predicted = context.predicted
+    ground_truth = context.reference
+    predicted_goal = context.candidate_goal
+    ground_truth_goal = context.reference_goal
 
     reference_closed = {
         literal[1]
@@ -1292,97 +1170,34 @@ def reference_contract_conflicts(
     instruction: str = "",
 ) -> list[str]:
     """Return narrow reference-backed semantic contradictions for a candidate."""
-    conflicts = empty_candidate_trace_conflicts(
+    conflicts = unfinished_started_process_conflicts(
+        predicted_domain,
+        predicted_problem,
         predicted_plan,
+    )
+    context = _reference_context(
+        predicted_domain,
+        predicted_problem,
+        predicted_plan,
+        ground_truth_domain,
         ground_truth_problem,
+        ground_truth_plan,
+        instruction,
     )
-    conflicts.extend(
-        unfinished_started_process_conflicts(
-            predicted_domain,
-            predicted_problem,
-            predicted_plan,
-        )
-    )
-    conflicts.extend(
-        reference_goal_specificity_conflicts(
-            predicted_problem,
-            ground_truth_problem,
-            instruction,
-        )
-    )
-    conflicts.extend(
-        reference_timeline_conflicts(
-            predicted_domain,
-            predicted_problem,
-            predicted_plan,
-            ground_truth_domain,
-            ground_truth_problem,
-            ground_truth_plan,
-        )
-    )
-    conflicts.extend(
-        unambiguous_first_pickup_source_conflicts(
-            predicted_domain,
-            predicted_problem,
-            predicted_plan,
-            ground_truth_domain,
-            ground_truth_problem,
-            ground_truth_plan,
-        )
-    )
-    conflicts.extend(
-        missing_required_state_transition_conflicts(
-            predicted_domain,
-            predicted_problem,
-            predicted_plan,
-            ground_truth_domain,
-            ground_truth_problem,
-            ground_truth_plan,
-            instruction,
-        )
-    )
-    conflicts.extend(
-        locked_goal_target_conflicts(
-            predicted_problem,
-            ground_truth_problem,
-        )
-    )
-    conflicts.extend(
-        collapsed_closed_locked_entity_conflicts(
-            predicted_problem,
-            ground_truth_problem,
-        )
-    )
-    conflicts.extend(
-        reference_quantity_conflicts(
-            predicted_problem,
-            ground_truth_problem,
-            instruction,
-        )
-    )
-    conflicts.extend(
-        reference_bundled_transition_conflicts(
-            predicted_domain,
-            predicted_plan,
-            ground_truth_domain,
-        )
-    )
-    conflicts.extend(
-        reference_activation_support_conflicts(
-            predicted_domain,
-            predicted_problem,
-            predicted_plan,
-            ground_truth_domain,
-            ground_truth_problem,
-            ground_truth_plan,
-        )
-    )
+    if context is None:
+        return sorted(set(conflicts))
+
+    for check in (
+        _empty_candidate_trace_conflicts,
+        _goal_specificity_conflicts,
+        _timeline_conflicts,
+        _first_pickup_source_conflicts,
+        _missing_required_state_transition_conflicts,
+        _locked_goal_target_conflicts,
+        _collapsed_closed_locked_entity_conflicts,
+        _quantity_conflicts,
+        _bundled_transition_conflicts,
+        _activation_support_conflicts,
+    ):
+        conflicts.extend(check(context))
     return sorted(set(conflicts))
-
-
-def read_problem_source(source: str | Path) -> str:
-    if isinstance(source, Path):
-        return source.read_text(encoding="utf-8")
-    if "(" in source or "\n" in source:
-        return source
-    return Path(source).read_text(encoding="utf-8")

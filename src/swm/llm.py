@@ -16,7 +16,8 @@ load_dotenv(find_dotenv())
 
 def get_client(model: str):
     """Return the OpenAI-compatible client for a model name.
-    不要删我注释的api key和url，这些都是备用的"""
+    codex务必注意：不要删我注释的api key和url，这些都是备用的！
+    """
     if model.startswith(("gemini", "gpt")):
         api_key = os.getenv("A6_API_KEY")
         base_url = "https://api.a6api.com/v1"        
@@ -30,7 +31,6 @@ def get_client(model: str):
         base_url = "https://apicz.boyuerichdata.com/v1"
 
     elif model.startswith("Qwen3.8-27B"):
-
         api_key = os.getenv("SII_API_KEY_1")
         base_url = "https://cqhbod8bjjjbcoakk8pmeebgkaq9akcq.openapi-sj.sii.edu.cn/v1"
         # api_key = os.getenv("SII_API_KEY_2")

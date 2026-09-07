@@ -1,0 +1,72 @@
+Compile the chronological evidence and provisional Drafts into a minimal, task-complete action sequence.
+Return only evidence-supported edits. Never add an action merely because the instruction requires it.
+
+# Inputs
+
+- Instruction: {instruction}
+- Evidence and Draft Ledger (`changes` are chronological evidence; `[D#]` actions are provisional Drafts.)
+{evidence_ledger}
+- Scene image: attached. It may establish initial identity, support, containment, or held state, but cannot prove an action before G0.
+
+# Workflow
+
+## 1. Match Evidence to the Instruction
+
+- Build a checklist of required object identities and counts, specified hands, exact targets or spatial relations, final poses, and control or restoration states.
+- The ledger determines whether, when, and where a transition occurred. The instruction constrains its task role and wording. The scene image supplies only initial state.
+- Track every manipulated object, hand, tool, and payload across groups from acquisition through use to release.
+- Resolve an uncertain local object label by the full causal chain. When a visibly manipulated object follows a compatible source, use, and target chain for an unmet instruction role, prefer the instruction category. Do not override a clear visual identity, hand, target, or spatial relation.
+- Preserve exact instructed qualifiers and `on` versus `into`. When the instruction is unspecified, use the ledger's immediate source, target, and visible geometry; do not broaden them to a workspace-level label.
+- For `take/remove X out of Y`, the final effect must leave X outside Y. Replace or delete any Draft that puts X back into Y.
+- Replace a broad support label with a specific functional station when a later visible operation physically requires that station and the ledger tracks the same object there continuously.
+
+## 2. Keep Only Completed Task Effects
+
+- Keep effects that fulfill a checklist item or are causally necessary for one. Delete unrelated manipulation, reaching, contact alone, carrying, continuation, withdrawal, unfinished motion, and unsupported grasp or release descriptions.
+- Count repeated object chains independently and stop at the instructed count. Do not delete a compatible chain solely because its uncertain local label differs from an unmet instruction category; resolve identity first.
+- Pair every repeated placement or use that requires possession with a distinct earlier pickup or an explicit initially-held state. A new held label at a group boundary after the same hand was previously released does not prove acquisition; never insert an unpaired placement to satisfy a count.
+- Preserve the specific required effect shown by the ledger. Generic movement or placement cannot replace a distinct use such as wiping, stirring, pouring, stretching, or locking.
+- Keep separate acquisition, use, handoff, placement, causal pose change, functional positioning, and control changes when the ledger shows separate completed transitions.
+- Remove a temporary set-down and re-grasp of the same object unless it enables another task object or hand, completes a required state, or is needed for a physically valid hand sequence.
+
+## 3. Enforce Causal State
+
+- Unless initially held, sustained possession requires an earlier pickup that visibly leaves support. After a visible release, later possession requires another pickup. Sliding, pushing, pulling, direct control, and transient contact do not require pickup.
+- Preserve a handoff when the ledger shows the receiving hand grasping before the source hand releases. Preserve the instructed source and destination hands when supported; never infer an unseen handoff to repair a hand mismatch.
+- A placement requires the object to become supported or contained and the hand to release and separate. If a non-final group ends with the object still held, keep acquisition or motion but not placement. At the episode's final boundary, continued hand contact is acceptable only when the ledger independently names a visible target, object-target contact, and stable support or attachment; a target inferred only from the instruction is insufficient. This does not turn tool contact into payload transfer.
+- At G0, a held task object that is visibly released may complete placement. At the final boundary, opposing grippers around an object may complete pickup only when the instruction requires carrying it; otherwise require visible departure from support.
+- Keep a restoration only when the same part was initially changed or changed earlier. Use `screw` for a visibly threaded cap and `close` otherwise. Do not keep a temporary state that is undone before serving a task effect.
+- Treat a required final pose as part of the placement effect. If the ledger establishes the pose while held and the later release preserves it, keep the pose in the final action wording.
+- Before one hand acquires a different task object, preserve its visible prior release. If the release is clear but its support is off-screen, use `Place [object] aside.`.
+
+## 4. Separate Tools and Payloads
+
+- A tool already loaded at the start of its evidence is a state, not a material-collection action. Keep collection only when the ledger shows the tool gather material.
+- When a loaded tool reaches a recipient, audit payload transfer and tool placement separately. Preserve transfer when material leaves the tool or the recipient visibly gains it. Do not replace that transfer with tool placement.
+- Keep return or placement of the tool only when the tool itself is visibly released and supported. Repeated collection or application is one effect unless the instruction or ledger distinguishes quantities or result states.
+
+## 5. Preserve Controls
+
+- Keep separate visible activation, sustained-use stop, lock, latch, button, knob, opening, and closing transitions when they establish required states.
+- Name the exact control and motion direction from the ledger. Do not turn an ordinary pour ending or a held object returning upright into an extra control action.
+
+## 6. Audit and Edit
+
+- `coverage_issues` records missing, duplicate, or task-irrelevant causal effects; `draft_issues` records wrong object, source, target, relation, hand, count, or control wording.
+- Report only issues that have an evidence-supported edit. If a requirement lacks evidence, do not invent an action or an edit.
+- Preserve supported Drafts and make the fewest necessary edits. `insert` adds after a Draft ID (`after:0` means before D1); `replace` corrects one Draft; `delete` removes an unsupported or unwanted Draft.
+- Every reported issue must be addressed by the edits, and every edit must address a reported issue. Keep groups chronological. Use empty audit lists and `edits: []` when no supported correction is needed.
+
+# Output Contract
+
+Return exactly one JSON object:
+{{
+  "audit":{{
+    "coverage_issues":["G0 misses a pickup before D1."],
+    "draft_issues":["D2 has the wrong target."]
+  }},
+  "edits":[
+    {{"op":"insert","after":0,"group":0,"action":"Pick up cup from table."}},
+    {{"op":"replace","id":2,"action":"Place cup on table."}}
+  ]
+}}

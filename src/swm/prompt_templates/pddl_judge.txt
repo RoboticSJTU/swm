@@ -1,68 +1,59 @@
-Judge whether the Candidate plan is physically executable and fully satisfies the Instruction.
+# Role
 
-# Task
+Judge the Candidate trace itself. Pass only if its actions are executable and fully complete the Instruction. Reference is observed evidence, never extra Candidate actions.
+
+# Evidence
 
 Instruction:
 {instruction}
 
 Scene image: attached.
 
-# Candidate Initial State
-
-{candidate_initial_state}
-
-Candidate PDDL is unverified.
-
-# Candidate Goal
-
+Candidate Goal (unverified claim):
 {candidate_goal}
 
-# Programmatic Findings
-
+Programmatic Findings:
 {programmatic_findings}
 
-# Evaluated Symbolic Trace
-
+Candidate Trace:
 {evaluated_symbolic_trace}
 
-# Reference
-
-Keyframe-based action sequence (evidence, never Candidate actions):
+Reference observed sequence (evidence only):
 {kf_actions}
 
-# Required Checks
+# Audit
 
-Pass only if all three layers below succeed.
+## 1. Contract
 
-1. Instruction completion
-- Build the complete contract: objects, quantities, source, destination, qualifiers, method, order, relations, cleanup, and persistence.
-- Candidate history and result must establish every requirement. A missing transition or underspecified destination/relation is failure, not unknown.
-- An imperative operation must occur in Candidate history; initial facts cannot perform it. Only stative wording such as "leave" or "end up" may already hold when scene evidence confirms it.
-- Preserve stated order. Preparatory access may occur early, but each named completion before "then" or in a process list must finish before the later stage. Results commute only when neither creates clearance, load, receiver, or alignment for the other.
-- Resolve ambiguous modifiers using the image and reference. Do not invent unsupported relations.
-- A few singular symbols do not represent unmodeled remaining items unless explicitly defined as collections.
+Extract required objects, quantity, operations, source, destination, relation, method, explicit order, cleanup, and persistent result.
 
-2. Symbolic execution
-- Simulate only the Candidate trace, in order, from the Candidate Initial State. Never copy, assume, or execute actions from the reference plan.
-- Every `Before` must hold initially or follow from an earlier Candidate change. Track bindings, possession, direct location, relations, and device state; support, containment, and possession are not interchangeable or transitive.
-- `Before` lists claimed conditions. `State change` is only the claimed delta: `not` requires absence, `+` adds, and `-` removes. Candidate Goal and PDDL facts are claims to verify, not proof.
+- Every imperative operation needs a Candidate action; initial/goal facts cannot perform it.
+- Preserve named sides, regions, drawers, slots, outlets, matching positions, and direct relations. A generic location is insufficient; do not assume unmodeled execution supplies a qualifier.
+- Enforce only stated order (`then`, `before`, `after`, or an explicit process sequence), using completion effects. Ordinary pickup, tool insertion, hand choice, and independent setup may differ.
+- If any source is allowed, do not require an exact source.
 
-3. Physical execution
-- Check every transition against the scene. Candidate predicates cannot make a blocked object, closed container, occupied destination, wrong alignment, possession conflict, or false source valid.
-- For visible initial identity, possession, and location, clear image evidence outranks reference wording, which outranks Candidate claims. A missed small object, ambiguous adjacent boundary, or guessed reach is not contradiction. Matching reference source/destination corroborates it; hand choice alone does not prove exclusivity.
-- Reference opening, clearance, reposition, transfer, or stopping before later use is causal evidence. Require an equivalent Candidate state. Alignment with one outlet, slot, or workspace does not align another.
-- Track mixture, emptied containers, moved supports, geometry, and active processes. Do not infer impossible orientation or reach from category alone. Stop task-started processes unless continued operation is required.
+## 2. Initial evidence ledger
 
-# Decision
+Before simulation, record only positively supported task-relevant initial facts: each held object/free hand, direct source/support, open/closed state, occupied destination, alignment, and device state.
 
-The reference is one witness, not mandatory wording or order. Accept alternatives proving the same contract. Reject the earliest decisive failure. Unknown applies only to unobservable incidental facts, not explicit requirements or unsupported preconditions.
+Candidate and Reference are alternative traces from this same initial scene; never execute Reference actions for Candidate. Reference wording such as `held`, `lift the hand with`, or `cleared by` is evidence of possession or a performed transition. The image is initial evidence only, never evidence against a later Candidate-created state. Absence in clutter is not evidence.
+
+## 3. Simulation and certificate
+
+Simulate only Candidate actions. Candidate Goal and `Before` are claims. Each `Before` must be created by an earlier Candidate change or match the initial evidence ledger. Track state directly without transitive support shortcuts.
+
+If Reference opens, clears, moves, vacates, frees, or aligns before later use, Candidate needs an equivalent transition unless the ledger already proves that state initially. If Reference later picks an object from an exact destination, that destination remains occupied until Candidate moves the object.
+
+Fail only with both the exact missing contract item or first failing Candidate step and exact positive evidence. Valid evidence includes a clearly visible wrong direct source, held object, occupied hand/destination, blocked container, open/closed state, or Reference-recorded required transition.
+
+Do not fail from 2D overlap/proximity, guessed reach/collision/grasp, flexible-object behavior, ordinary reorientation, hand preference, or ambiguous adjacent supports. Without a concrete certificate, pass only after confirming every contract item.
 
 # Output
 
-Return exactly this JSON object and no additional fields:
+Return exactly:
 
 {{
-  "reasoning": "state the contract, then give the decisive completion, symbolic, or physical evidence",
+  "reasoning": "Contract: ... Initial evidence: ... Simulation: ... Failure certificate: ... Decision: ...",
   "pass": true or false,
-  "feedback": "empty if pass=true; otherwise identify the erroneous step or unmet requirement"
+  "feedback": "empty if pass=true; otherwise identify the first failed step or unmet requirement"
 }}

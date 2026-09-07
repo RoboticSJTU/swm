@@ -12,11 +12,9 @@ from swm.llm import call_gpt_json
 from swm.pddl.init_state_precheck import (
     _identity_compatible,
     compare_initial_states,
-    explicit_tool_possession_conflicts,
     implicit_running_device_start_conflicts,
     map_objects,
     parse_problem_text,
-    read_problem_source,
     reference_contract_conflicts,
     unfinished_started_process_conflicts,
 )
@@ -115,11 +113,7 @@ def _evaluated_symbolic_trace(
     except (OSError, KeyError, ValueError, NotImplementedError) as error:
         return f"{candidate_plan}\n\nSymbolic details unavailable: {error}"
 
-    dynamic_predicates = {
-        literal[0]
-        for schema in schemas.values()
-        for literal in schema.add_eff | schema.del_eff
-    }
+    dynamic_predicates = _dynamic_predicates(schemas)
 
     def format_literals(literals: set[tuple[str, ...]]) -> list[str]:
         return sorted(
@@ -152,37 +146,16 @@ def _evaluated_symbolic_trace(
     return "\n".join(lines)
 
 
-def _render_literal(literal: tuple[str, ...]) -> str:
-    return "(" + " ".join(literal) + ")"
-
-
-def _candidate_initial_state(predicted_problem: str | Path | None) -> str:
-    if predicted_problem is None:
-        return "Candidate Initial State: unavailable."
-    try:
-        parsed = parse_problem_text(read_problem_source(predicted_problem))
-    except (OSError, TypeError, ValueError) as error:
-        return f"Candidate Initial State: unavailable ({error})."
-
-    positive = [_render_literal(literal) for literal in sorted(parsed.positive_init)]
-    negative = [
-        f"(not {_render_literal(literal)})" for literal in sorted(parsed.negative_init)
-    ]
-    return "\n".join(
-        [
-            "Positive facts:",
-            *(positive or ["(none)"]),
-            "Negative facts:",
-            *(negative or ["(none)"]),
-        ]
-    )
-
-
 def _candidate_goal(predicted_problem: str | Path | None) -> str:
     if predicted_problem is None:
         return "Candidate Goal: unavailable."
     try:
-        text = read_problem_source(predicted_problem)
+        if isinstance(predicted_problem, Path):
+            text = predicted_problem.read_text(encoding="utf-8")
+        elif "(" in predicted_problem or "\n" in predicted_problem:
+            text = predicted_problem
+        else:
+            text = Path(predicted_problem).read_text(encoding="utf-8")
         match = re.search(r"\(\s*:goal\b", text, re.IGNORECASE)
         if not match:
             raise ValueError("missing :goal section")
@@ -216,55 +189,10 @@ def _render_judge_prompt(
     ground_truth_problem: str | Path | None,
     pddl_plan: str | Path | None,
 ) -> str:
-    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
-    return prompt_path.read_text(encoding="utf-8").format(
-        instruction=instruction,
-        kf_actions=kf_actions,
-        candidate_initial_state=_candidate_initial_state(predicted_problem),
-        candidate_goal=_candidate_goal(predicted_problem),
-        programmatic_findings=_programmatic_findings(
-            predicted_domain,
-            predicted_problem,
-            pddl_plan,
-            ground_truth_problem,
-        ),
-        evaluated_symbolic_trace=_evaluated_symbolic_trace(
-            candidate_plan,
-            predicted_domain,
-            pddl_plan,
-        ),
-    )
-
-
-def _programmatic_findings(
-    predicted_domain: str | Path | None,
-    predicted_problem: str | Path | None,
-    pddl_plan: str | Path | None,
-    ground_truth_problem: str | Path | None,
-) -> str:
     findings = []
-
-    if predicted_problem is not None and ground_truth_problem is not None:
-        findings.extend(
-            f"- Init: {contradiction}"
-            for contradiction in compare_initial_states(
-                read_problem_source(predicted_problem),
-                read_problem_source(ground_truth_problem),
-            ).contradictions
-        )
-
-    if all(
-        isinstance(source, Path)
-        for source in (predicted_domain, predicted_problem, pddl_plan)
-    ):
-        findings.extend(
-            f"- Tool: {conflict}"
-            for conflict in explicit_tool_possession_conflicts(
-                predicted_domain,
-                predicted_problem,
-                pddl_plan,
-            )
-        )
+    # Candidate initial-state facts and findings derived from them must never
+    # enter the Judge VLM prompt.
+    if isinstance(predicted_domain, Path) and isinstance(pddl_plan, Path):
         findings.extend(
             f"- Device: {conflict}"
             for conflict in implicit_running_device_start_conflicts(
@@ -272,12 +200,25 @@ def _programmatic_findings(
                 pddl_plan,
             )
         )
+    if not findings:
+        findings = [
+            "GT PDDL was not supplied; only Candidate-only checks were available."
+            if ground_truth_problem is None
+            else "None."
+        ]
 
-    if findings:
-        return "\n".join(findings)
-    if ground_truth_problem is None:
-        return "GT PDDL was not supplied; only Candidate-only checks were available."
-    return "None."
+    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
+    return prompt_path.read_text(encoding="utf-8").format(
+        instruction=instruction,
+        kf_actions=kf_actions,
+        candidate_goal=_candidate_goal(predicted_problem),
+        programmatic_findings="\n".join(findings),
+        evaluated_symbolic_trace=_evaluated_symbolic_trace(
+            candidate_plan,
+            predicted_domain,
+            pddl_plan,
+        ),
+    )
 
 
 def _grounded_key(action) -> tuple:
@@ -386,7 +327,6 @@ class SymbolMapping:
     predicates: dict[str, str]
 
 
-IDENTITY_ALIASES = {"grey": "gray"}
 IDENTITY_TOKENS = {
     "black",
     "blue",
@@ -435,78 +375,52 @@ NAME_ALIASES = {
     "worktop": "counter",
 }
 PHYSICAL_RELATIONS = {
-    "above": "above",
-    "beneath": "under",
-    "below": "under",
-    "carrying": "holding",
-    "closed": "closed",
-    "close_to": "near",
-    "contains_nothing": "empty",
-    "empty": "empty",
-    "flat": "flat",
-    "grasping": "holding",
-    "holding": "holding",
-    "horizontal": "flat",
-    "in": "in",
-    "inside": "in",
-    "inserted": "inserted",
-    "into": "in",
-    "is_off": "is_off",
-    "is_on": "is_on",
-    "laid_flat": "flat",
-    "lock_engaged": "locked",
-    "lock_released": "unlocked",
-    "locked": "locked",
-    "lying_flat": "flat",
-    "near": "near",
-    "on": "on",
-    "open": "open",
-    "opened": "open",
-    "over": "above",
-    "plugged_in": "inserted",
-    "powered_off": "is_off",
-    "powered_on": "is_on",
-    "resting_on": "on",
-    "right_side_up": "upright",
-    "seated_in_socket": "inserted",
-    "shut": "closed",
-    "standing_upright": "upright",
-    "switched_off": "is_off",
-    "switched_on": "is_on",
-    "under": "under",
-    "underneath": "under",
-    "unlocked": "unlocked",
-    "upon": "on",
-    "upright": "upright",
-    "within": "in",
+    alias: meaning
+    for meaning, aliases in {
+        "above": "above over",
+        "under": "beneath below under underneath",
+        "holding": "carrying grasping holding",
+        "closed": "closed shut",
+        "near": "close_to near",
+        "empty": "contains_nothing empty",
+        "flat": "flat horizontal laid_flat lying_flat",
+        "in": "in inside into within",
+        "inserted": "inserted plugged_in seated_in_socket",
+        "is_off": "is_off powered_off switched_off",
+        "is_on": "is_on powered_on switched_on",
+        "locked": "lock_engaged locked",
+        "unlocked": "lock_released unlocked",
+        "on": "on resting_on upon",
+        "open": "open opened",
+        "upright": "right_side_up standing_upright upright",
+    }.items()
+    for alias in aliases.split()
 }
 ACTION_METHODS = {
-    "close": "close",
-    "decant": "pour",
-    "empty": "empty",
-    "fill": "fill",
-    "grab": "pick",
-    "grasp": "pick",
-    "hold": "hold",
-    "insert": "insert",
-    "inspect": "inspect",
-    "lift": "lift",
-    "lock": "lock",
-    "lower": "lower",
-    "open": "open",
-    "pick": "pick",
-    "place": "place",
-    "pour": "pour",
-    "press": "press",
-    "push": "push",
-    "put": "place",
-    "release": "release",
-    "remove": "remove",
-    "rotate": "rotate",
-    "shut": "close",
-    "throw": "throw",
-    "toss": "throw",
-    "unlock": "unlock",
+    alias: method
+    for method, aliases in {
+        "close": "close shut",
+        "pour": "decant pour",
+        "pick": "grab grasp pick",
+        "place": "place put",
+        "throw": "throw toss",
+        "empty": "empty",
+        "fill": "fill",
+        "hold": "hold",
+        "insert": "insert",
+        "inspect": "inspect",
+        "lift": "lift",
+        "lock": "lock",
+        "lower": "lower",
+        "open": "open",
+        "press": "press",
+        "push": "push",
+        "release": "release",
+        "remove": "remove",
+        "rotate": "rotate",
+        "unlock": "unlock",
+    }.items()
+    for alias in aliases.split()
 }
 
 
@@ -633,7 +547,7 @@ def tokens(value: str) -> list[str]:
 
 def _identity(value: str) -> frozenset[str]:
     return frozenset(
-        IDENTITY_ALIASES.get(token, token)
+        "gray" if token == "grey" else token
         for token in tokens(value)
         if token in IDENTITY_TOKENS or token.isdigit()
     )
@@ -824,8 +738,6 @@ Return exactly JSON: {{"equivalent": true or false}}"""
         "Qwen3.8-27B",
         prompt,
         attempts=1,
-        reasoning_effort="low",
-        temperature=0,
     )
     return (
         set(result) == {"equivalent"}
@@ -1169,7 +1081,6 @@ def _reference_verdict(
     predicted_problem: Path,
     pddl_plan: Path,
     ground_truth_problem: Path,
-    call_mapper=verify_mapping_with_qwen,
 ) -> dict | None:
     verdict = symbolic_verdict(
         predicted_domain,
@@ -1236,7 +1147,7 @@ def _reference_verdict(
             }
         if mapping_verdict is None:
             try:
-                accepted = call_mapper(
+                accepted = verify_mapping_with_qwen(
                     instruction,
                     candidate_plan,
                     reference_plan_text,
@@ -1278,15 +1189,11 @@ def judge_pddl(
     if not candidate_plan:
         raise ValueError("candidate_plan must be non-empty")
 
-    if all(
+    candidate_paths = all(
         isinstance(source, Path)
-        for source in (
-            predicted_domain,
-            predicted_problem,
-            pddl_plan,
-            ground_truth_problem,
-        )
-    ):
+        for source in (predicted_domain, predicted_problem, pddl_plan)
+    )
+    if candidate_paths and isinstance(ground_truth_problem, Path):
         verdict = _reference_verdict(
             instruction,
             candidate_plan,
@@ -1298,10 +1205,7 @@ def judge_pddl(
         if verdict is not None:
             return verdict
 
-    if all(
-        isinstance(source, Path)
-        for source in (predicted_domain, predicted_problem, pddl_plan)
-    ):
+    if candidate_paths:
         conflicts = unfinished_started_process_conflicts(
             predicted_domain,
             predicted_problem,

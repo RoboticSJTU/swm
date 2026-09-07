@@ -1,7 +1,5 @@
 """Keyframe-based Action Sequence Extraction."""
 
-from __future__ import annotations
-
 import json
 import re
 import time
@@ -10,13 +8,14 @@ from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from swm.llm import call_gpt
+from ..llm import call_gpt
 
 API_ATTEMPTS = 10
 MAX_HAND_RETRIES = 2
 DELTA_RE = re.compile(
     r"^([+-])\s+([a-z][a-z0-9_]*)\s*\(\s*"
-    r"([a-z][a-z0-9_]*(?:\s*,\s*[a-z][a-z0-9_]*)*)\s*\)\s*$",
+    r"([a-z][a-z0-9_-]*(?:\s+[a-z0-9_-]+)*"
+    r"(?:\s*,\s*[a-z][a-z0-9_-]*(?:\s+[a-z0-9_-]+)*)*)\s*\)\s*$",
     re.IGNORECASE,
 )
 PICKUP_RE = re.compile(r"\b(pick\s+up|grasp|lift)\b", re.IGNORECASE)
@@ -30,18 +29,18 @@ HELD_TOOL_RE = re.compile(
     re.IGNORECASE,
 )
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.IGNORECASE | re.DOTALL)
+HAND_ALIASES = {
+    "hand": "right_hand",
+    "robot_hand": "right_hand",
+    "robot_arm": "right_hand",
+    "gripper": "right_hand",
+    "robot_gripper": "right_hand",
+    "end_effector": "right_hand",
+}
 
 
 class OutputContractError(ValueError):
     pass
-
-
-def _parse_json_output(raw_output: str) -> dict:
-    text = raw_output.strip()
-    match = JSON_FENCE_RE.fullmatch(text)
-    if match:
-        text = match.group(1).strip()
-    return json.loads(text)
 
 
 def _normalize_delta(value: str) -> str:
@@ -51,7 +50,10 @@ def _normalize_delta(value: str) -> str:
             "every state_change item must be '+ predicate' or '- predicate'"
         )
     sign, name = match.group(1), match.group(2).lower()
-    arguments = tuple(part.strip().lower() for part in match.group(3).split(","))
+    arguments = tuple(
+        re.sub(r"[^a-z0-9]+", "_", part.strip().lower()).strip("_")
+        for part in match.group(3).split(",")
+    )
     if name not in {"holding", "hand_free"}:
         raise OutputContractError(
             "state_change may contain only holding(hand,obj) or hand_free(hand)"
@@ -59,8 +61,10 @@ def _normalize_delta(value: str) -> str:
     arity = 2 if name == "holding" else 1
     if len(arguments) != arity:
         raise OutputContractError(f"predicate {name} expects {arity} arguments")
-    if arguments[0] not in {"left_hand", "right_hand"}:
+    hand = HAND_ALIASES.get(arguments[0], arguments[0])
+    if hand not in {"left_hand", "right_hand"}:
         raise OutputContractError("hand argument must be left_hand or right_hand")
+    arguments = (hand, *arguments[1:])
     return f"{sign} {name}({','.join(arguments)})"
 
 
@@ -76,21 +80,12 @@ def _normalize_action_text(value: str) -> str:
     return action if action.endswith(".") else action + "."
 
 
-def normalize_group_result(data: dict, frames: int | list[str]) -> dict:
+def normalize_group_result(data: dict, frame_count: int) -> dict:
     changes = data["changes"].strip()
     actions = data["actions"]
     if not changes or not isinstance(actions, list):
         raise OutputContractError("generator changes must be text and actions must be a list")
 
-    frame_count = frames if type(frames) is int else len(frames)
-    if type(frames) is not int:
-        for index, (first, second) in enumerate(zip(frames, frames[1:])):
-            changes = re.sub(
-                rf"{re.escape(first)}\s*(?:->|→)\s*{re.escape(second)}\s*:",
-                f"K{index}->K{index + 1}:",
-                changes,
-                flags=re.IGNORECASE,
-            )
     for index in range(frame_count - 1):
         if not re.search(
             rf"K{index}\s*(?:->|→)\s*K{index + 1}\s*:", changes, re.IGNORECASE
@@ -388,7 +383,9 @@ def _call_json(
         api_capture = {}
         try:
             raw_output = call_gpt(model, prompt, images, capture=api_capture)
-            parsed_output = _parse_json_output(raw_output)
+            text = raw_output.strip()
+            match = JSON_FENCE_RE.fullmatch(text)
+            parsed_output = json.loads(match.group(1).strip() if match else text)
             result = normalize(parsed_output)
             trace["attempts"].append(
                 {
@@ -445,10 +442,10 @@ def extract_keyframe_actions(
     actions_path.unlink(missing_ok=True)
 
     prompt_dir = Path(__file__).parents[1] / "prompt_templates"
-    generator_template = (prompt_dir / "kf_actions_extraction.txt").read_text(
+    generator_template = (prompt_dir / "kf_actions_generator.txt").read_text(
         encoding="utf-8"
     )
-    compiler_template = (prompt_dir / "kf_actions_compilation.txt").read_text(
+    compiler_template = (prompt_dir / "kf_actions_compiler.txt").read_text(
         encoding="utf-8"
     )
     history = []
@@ -488,6 +485,7 @@ def extract_keyframe_actions(
                 prompt = generator_template.format(
                     instruction=instruction,
                     group=group,
+                    last_group=len(segment_images) - 1,
                     frame_order=frame_order,
                     previous_history="\n".join(history) or "(no accepted actions)",
                     retry_block=retry_block,

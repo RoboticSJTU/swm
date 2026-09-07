@@ -1,0 +1,69 @@
+Convert the visible transitions in the current keyframe group into completed, task-relevant atomic actions.
+Infer changes only from the current images. Use the instruction and accepted history only to resolve labels, relevance, counts, and hand state; never use them to invent a transition.
+
+# Inputs
+
+- Instruction: {instruction}
+- Previously accepted actions (context only; do not repeat or revise):
+{previous_history}
+- Current group: G{group} of G{last_group}. Ordered keyframes: {frame_order}
+
+{retry_block}
+
+# Procedure
+
+## 1. Record Changes
+
+- Describe every adjacent pair K0->K1, K1->K2, and so on, in order.
+- For each visible change, name the object and hand, immediate source or target, support versus containment, and whether the object becomes held, remains held, is released, changes a task-relevant pose, or changes a device state.
+- For direct controls, name the control and visible motion direction.
+- Describe visible transitions even when they produce no task-relevant action.
+
+## 2. Ground Claims
+
+- Read the instruction as a checklist of required objects and counts, specified hands, exact targets or spatial relations, final poses, and control or restoration states. Preserve these constraints in action wording when the images support the transition.
+- Visible evidence determines whether and when a change occurred. The instruction may resolve an ambiguous object label or goal only among visible candidates; it cannot supply an unseen action, handoff, target, or state change.
+- Resolve an uncertain local object label by its complete visible role. If it follows an unmet instruction role through a compatible acquisition, use, and target chain, prefer the instruction category. Do not relabel an object whose appearance or visible target clearly contradicts that role.
+- Preserve exact qualifiers and relations. Use `into` only when the target visibly contains the object's lower part; otherwise use `on`. State uncertainty when identity or relation remains unresolved.
+- For `take/remove X out of Y`, completion requires X to end outside Y. Never describe the final effect as placing X back into Y.
+
+## 3. Select Actions
+
+- Output only completed effects that fulfill an instruction requirement or are causally necessary for one. Ignore unrelated manipulation, reaching, contact alone, carrying, withdrawal, continuation, and unfinished motion. Do not exceed an instructed count.
+- Keep acquisition, task use, release or placement, causal pose change, handoff, and distinct control-state changes separate when they complete in separate transitions.
+- Preserve the instruction's specific effect when visible; do not reduce wiping, stirring, pouring, stretching, locking, or another required effect to generic movement or placement.
+- A pickup requires the object to visibly leave its support and remain carried. Supported sliding, pushing, pulling, or contact is not pickup.
+- A placement requires the object to stop on or inside a support and the hand to visibly release and separate from it. Lowering an object into a target while it remains held, including at the final frame, is not a completed placement.
+- Final-group exception: if this is G{last_group}, count a task effect with continued hand contact only when the images themselves show the named target, object-target contact, and stable support or attachment. Ending in free space, merely moving toward the instructed goal, or naming a target only from the instruction is not completion. Do not apply this exception to a tool merely touching a payload target.
+- If K0 starts with a task object held and a later frame visibly releases it, output the completed placement even when acquisition occurred before this group. Do not repeat an effect already completed in accepted history.
+- Preserve a visible release needed before the same hand manipulates another task object. If the release is clear but its support is off-screen, use `Place [object] aside.`.
+- Keep a task-relevant pose or functional positioning only when it visibly enables later use or establishes a required final state. If release preserves a required pose established while held, include that pose in the placement wording.
+
+## 4. Separate Tools and Payloads
+
+- Track a held tool and its payload independently. A tool already loaded at K0 is a state, not a collection action.
+- Record collection only when an empty tool visibly gathers material. Record transfer when material visibly leaves the tool or the target visibly gains it.
+- When a loaded tool moves to a target, inspect payload transfer and tool support separately. Do not replace a payload transfer with placement of the tool, and do not call it tool placement unless the tool itself is visibly released and remains supported.
+
+## 5. Encode Hand State
+
+- `state_change` contains only `holding(hand,obj)` and `hand_free(hand)` changes, using lowercase snake_case.
+- Use only `left_hand` and `right_hand`. Use `right_hand` for an unlabeled single robot arm or gripper.
+- Pickup adds `holding` and removes `hand_free`; placement or insertion removes `holding` and adds `hand_free`. Use an empty list for actions that do not change what the hand holds.
+- When a held tool manipulates a payload, the hand continues holding the tool, so the payload action has an empty `state_change`.
+
+# Output Contract
+
+Return exactly this JSON object and no extra fields:
+{{
+  "changes": "K0->K1: ... K1->K2: ...",
+  "actions": [
+    {{
+      "action": "Pick up cup from table.",
+      "state_change": [
+        "+ holding(right_hand,cup)",
+        "- hand_free(right_hand)"
+      ]
+    }}
+  ]
+}}

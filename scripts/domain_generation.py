@@ -15,7 +15,7 @@ TASK_DOMAIN = "droid"
 
 PDDL_MODEL = "gpt-5.6-sol"
 ACTION_EXTRACTION_MODEL = "gemini-3.7-flash"
-JUDGE_MODEL = PDDL_MODEL
+JUDGE_MODEL = "Qwen3.8-27B"
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
 ACTION_TEMPLATE_MODE = "fixed"  # "fixed" or "retrieved"
@@ -26,11 +26,21 @@ TASK_WORKERS = 30  # 主线程并发数
 MAX_PLAN_ATTEMPTS = 3
 PREPROCESS_WORKERS = 16  # 关键帧提取并发
 
-def temporal_gradient_radius(frame_count: int) -> int:
-    # human
-    radius = min(90, 10 + 10 * max(0, (frame_count - 1) // 500))
+FIXED_TEMPORAL_GRADIENT_RADIUS = {
+    "bridgedata_v2": 4,
+    "human": 21,
+    "agibot": 78,
+    "droid": 39,
+}
 
-    return radius
+
+def temporal_gradient_radius(frame_count: int, dataset: str = TASK_DOMAIN) -> int:
+    if frame_count < 1:
+        raise ValueError("frame_count must be positive")
+    try:
+        return FIXED_TEMPORAL_GRADIENT_RADIUS[dataset]
+    except KeyError as error:
+        raise ValueError(f"Unsupported fixed-radius dataset: {dataset}") from error
 
 def load_tasks() -> list[dict]:
     instructions_path = ROOT_DIR / "tasks" / "instructions" / f"instructions_{TASK_DOMAIN}.json"
@@ -97,7 +107,7 @@ def prepare_temporal_gradient_keyframes(task: dict) -> dict:
     extract_frames(task["video_path"], task["frames_dir"])
 
     frame_count = len(list(task["frames_dir"].glob("*.png")))
-    radius = temporal_gradient_radius(frame_count)
+    radius = temporal_gradient_radius(frame_count, dataset)
 
     cached_metadata = {}
     if metadata_path.is_file():
