@@ -23,10 +23,25 @@ PICKUP_RE = re.compile(r"\b(pick\s+up|grasp|lift)\b", re.IGNORECASE)
 PLACEMENT_RE = re.compile(
     r"\b(place|put|set\s+down|return|insert)\b", re.IGNORECASE
 )
+HELD_TOOL_RE = re.compile(
+    r"\b(?:with|using)\s+(?:the\s+)?"
+    r"([a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,3}?)"
+    r"(?=\s+(?:from|into|in|on|onto|at|over|under|to|by)\b|[.,;:]|$)",
+    re.IGNORECASE,
+)
+JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.IGNORECASE | re.DOTALL)
 
 
 class OutputContractError(ValueError):
     pass
+
+
+def _parse_json_output(raw_output: str) -> dict:
+    text = raw_output.strip()
+    match = JSON_FENCE_RE.fullmatch(text)
+    if match:
+        text = match.group(1).strip()
+    return json.loads(text)
 
 
 def _normalize_delta(value: str) -> str:
@@ -177,6 +192,15 @@ def _same_held_object_label(first: str, second: str) -> bool:
     )
 
 
+def _held_tool_used(action: str, holdings: list[tuple[str, str]]) -> str | None:
+    for match in HELD_TOOL_RE.finditer(action):
+        label = re.sub(r"[^a-z0-9]+", "_", match.group(1).lower()).strip("_")
+        for _, held_object in holdings:
+            if _same_held_object_label(label, held_object):
+                return held_object
+    return None
+
+
 def validate_hand_actions(
     actions: list[dict], current_state: set[str], allow_discontinuity: bool = False
 ) -> tuple[set[str] | None, str | None]:
@@ -185,6 +209,12 @@ def validate_hand_actions(
         action = item["action"]
         prefix = f"Action {index} ({action})"
         holdings = _holdings(state)
+        held_tool = _held_tool_used(action, holdings)
+        if held_tool and item["state_change"]:
+            return None, (
+                f"{prefix}: the hand continues holding {held_tool} while the tool "
+                "manipulates another object, so state_change must be empty"
+            )
         state_change = []
         for delta in item["state_change"]:
             if delta.startswith("- holding("):
@@ -194,6 +224,18 @@ def validate_hand_actions(
                     delta = f"- holding({hand},{held_objects[0]})"
             state_change.append(delta)
         added, removed = _deltas_by_sign(state_change)
+
+        added_by_hand = {hand: obj for hand, obj in _holdings(added)}
+        removed_by_hand = {hand: obj for hand, obj in _holdings(removed)}
+        for hand in added_by_hand.keys() & removed_by_hand.keys():
+            if not _same_held_object_label(
+                added_by_hand[hand], removed_by_hand[hand]
+            ):
+                return None, (
+                    f"{prefix}: {hand} switches directly from holding "
+                    f"{removed_by_hand[hand]} to {added_by_hand[hand]}; emit separate "
+                    "release and acquisition actions"
+                )
 
         if allow_discontinuity:
             for hand, obj in _holdings(removed):
@@ -222,7 +264,7 @@ def validate_hand_actions(
         held = _holdings(state)
         if PICKUP_RE.search(action):
             acquired = _holdings(added)
-            if not acquired:
+            if not acquired and not held_tool:
                 return None, f"{prefix}: {action} must add holding(hand,obj)"
             for hand, _ in acquired:
                 free = f"hand_free({hand})"
@@ -233,7 +275,7 @@ def validate_hand_actions(
 
         if PLACEMENT_RE.search(action):
             released = _holdings(removed)
-            if not released:
+            if not released and not held_tool:
                 return None, f"{prefix}: {action} must remove holding(hand,obj)"
             for hand, obj in released:
                 holding = f"holding({hand},{obj})"
@@ -346,7 +388,7 @@ def _call_json(
         api_capture = {}
         try:
             raw_output = call_gpt(model, prompt, images, capture=api_capture)
-            parsed_output = json.loads(raw_output)
+            parsed_output = _parse_json_output(raw_output)
             result = normalize(parsed_output)
             trace["attempts"].append(
                 {

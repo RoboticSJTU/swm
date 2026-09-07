@@ -24,6 +24,7 @@ def get_client(model: str):
         # base_url = "https://dasuapi.com/v1"
         # api_key = os.getenv("lin_API_KEY")
         # base_url = "https://direct.linkai.pics/v1" 
+        
     elif model.startswith(("kimi-k3", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "glm-5.2")):
         api_key = os.getenv("BOYUE_API_KEY")
         base_url = "https://apicz.boyuerichdata.com/v1"
@@ -32,7 +33,6 @@ def get_client(model: str):
 
         api_key = os.getenv("SII_API_KEY_1")
         base_url = "https://cqhbod8bjjjbcoakk8pmeebgkaq9akcq.openapi-sj.sii.edu.cn/v1"
-
         # api_key = os.getenv("SII_API_KEY_2")
         # base_url = "https://x.openapi-qb-ai.sii.edu.cn/v1"
 

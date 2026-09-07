@@ -20,6 +20,8 @@ Audit the evidence and Drafts before editing, then return only the evidence-supp
 
 Track each manipulated object across groups from acquisition through pose or use to release, preserving its identity and state.
 
+- Track each hand's held object as well. Before the same hand acquires or sustainably manipulates a different object, preserve the prior object's visible or causally required release. If only the release is supported and its target is off-screen, use `Place [object] aside.`.
+
 ### 2.1 Completed, Atomic Effects
 
 - Keep only completed, task-relevant effects. Ignore reaching, contact alone, continuation, carrying, withdrawal, unfinished motion, and bare grasp or release descriptions.

@@ -41,6 +41,7 @@ Produce `changes` first, then derive `actions` from the visible changes.
 - List only atomic, task-relevant actions visibly completed in this group.
 - Do not output reaching, contact alone, carrying, withdrawal, or unfinished motion.
 - Preserve a causal pose change or obstruction-clearing move only when it enables a later task effect.
+- Preserve a release or set-down that frees a hand to manipulate a different task object. If the release is visible but its support is off-screen, write `Place [object] aside.` rather than omitting it.
 - Use concise task-level wording.
 - Name a direct control and its visible motion rather than only the resulting device state.
 
@@ -61,6 +62,7 @@ Produce `changes` first, then derive `actions` from the visible changes.
 
 - For each action, `state_change` records only `holding(hand,obj)` and `hand_free(hand)` transitions.
 - Use an empty list when no hand state changes.
+- If a hand keeps holding a tool while the tool picks up or releases another object, the hand state does not change; use an empty list and name the tool in the action.
 - Predicate arguments use lowercase snake_case.
 - Do not output world-state predicates.
 

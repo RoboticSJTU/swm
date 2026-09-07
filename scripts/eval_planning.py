@@ -21,7 +21,6 @@ ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_2 unidomain
 datasets = ["swm", "unidomain"]
-N = 1
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
 
@@ -368,7 +367,6 @@ def judge_one(task: dict):
             instruction=instruction,
             kf_actions=kf_actions,
             candidate_plan=candidate_plan,
-            n=N,
             predicted_problem=(save_dir / "problem.pddl") if eval_mode == "pddl" else None,
             ground_truth_problem=(
                 latest_round_problem(

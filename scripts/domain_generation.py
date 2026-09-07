@@ -6,19 +6,19 @@ from pathlib import Path
 
 from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
-from swm.pddl.judge import judge_pddl
+from swm.pddl.judge import judge_pddl, latest_round_problem
 from swm.prompts import construct_instruction_with_steps, read_prompt
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 STEP_SOURCE = "video"  # "video" or "steps_json"
-TASK_DOMAIN = "human_aug"
+TASK_DOMAIN = "droid"
 
 PDDL_MODEL = "gpt-5.6-sol"
 ACTION_EXTRACTION_MODEL = "gemini-3.7-flash"
 JUDGE_MODEL = PDDL_MODEL
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
-ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
+ACTION_TEMPLATE_MODE = "fixed"  # "fixed" or "retrieved"
 ACTION_TEMPLATE_DOMAIN = "human"
 ACTION_TEMPLATE_MODEL = PDDL_MODEL
 
@@ -26,18 +26,28 @@ TASK_WORKERS = 30  # 主线程并发数
 MAX_PLAN_ATTEMPTS = 3
 PREPROCESS_WORKERS = 16  # 关键帧提取并发
 
+def temporal_gradient_radius(frame_count: int) -> int:
+    # human
+    radius = min(90, 10 + 10 * max(0, (frame_count - 1) // 500))
+
+    return radius
 
 def load_tasks() -> list[dict]:
     instructions_path = ROOT_DIR / "tasks" / "instructions" / f"instructions_{TASK_DOMAIN}.json"
     instructions = json.loads(instructions_path.read_text(encoding="utf-8"))
 
-    if STEP_SOURCE == "steps_json":
+    if STEP_SOURCE == "video":
+        video_dir = ROOT_DIR / "dataset" / "videos" / TASK_DOMAIN
+        videos = {path.stem: path for path in video_dir.glob("*.mp4")}
+    else:
         steps_path = ROOT_DIR / "tasks" / "steps" / f"steps_{TASK_DOMAIN}.json"
         all_steps = json.loads(steps_path.read_text(encoding="utf-8"))
-
     tasks = []
     for task_id, episodes in sorted(instructions.items()):
         for episode_id, instruction in sorted(episodes.items()):
+            if STEP_SOURCE == "video" and episode_id not in videos:
+                continue
+
             task = {
                 "dataset": TASK_DOMAIN,
                 "task_id": task_id,
@@ -47,7 +57,7 @@ def load_tasks() -> list[dict]:
             }
 
             if STEP_SOURCE == "video":
-                task["video_path"] = ROOT_DIR / "dataset" / "videos" / TASK_DOMAIN / f"{episode_id}.mp4"
+                task["video_path"] = videos[episode_id]
                 task["frames_dir"] = ROOT_DIR / "dataset" / "frames" / TASK_DOMAIN / episode_id
                 task["keyframe_dir"] = ROOT_DIR / "dataset" / "keyframes" / TASK_DOMAIN / task_id / episode_id
             else:
@@ -57,15 +67,6 @@ def load_tasks() -> list[dict]:
             tasks.append(task)
 
     return tasks
-
-
-def temporal_gradient_radius(frame_count: int, dataset: str = "human") -> int:
-    if frame_count < 1:
-        raise ValueError("frame_count must be positive")
-    is_human = dataset == "human" or dataset.startswith("human_")
-    base, step = (10, 10) if is_human else (20, 20)
-    return min(90, base + step * max(0, (frame_count - 1) // 500))
-
 
 def _keyframe_segments(keyframe_dir: Path) -> list[dict]:
     segments = []
@@ -96,7 +97,7 @@ def prepare_temporal_gradient_keyframes(task: dict) -> dict:
     extract_frames(task["video_path"], task["frames_dir"])
 
     frame_count = len(list(task["frames_dir"].glob("*.png")))
-    radius = temporal_gradient_radius(frame_count, dataset)
+    radius = temporal_gradient_radius(frame_count)
 
     cached_metadata = {}
     if metadata_path.is_file():
@@ -233,6 +234,9 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
     )
     retry_state = RetryState()
     planning_success = False
+    ground_truth_problem = latest_round_problem(
+        ROOT_DIR / "eval_results" / "gt" / task["dataset"] / task["task_id"]
+    )
 
     for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
         round_result = generate_pddl(
@@ -266,6 +270,7 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
             predicted_domain=round_result["round_dir"] / "domain.pddl",
             predicted_problem=round_result["round_dir"] / "problem.pddl",
             pddl_plan=round_result["round_dir"] / "plan.txt",
+            ground_truth_problem=ground_truth_problem,
         )
         (round_result["round_dir"] / "judge.json").write_text(
             json.dumps(judge_out, ensure_ascii=False, indent=2),
