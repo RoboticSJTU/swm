@@ -13,29 +13,34 @@ Return only evidence-supported edits. Never add an action merely because the ins
 ## 1. Match Evidence to the Instruction
 
 - Build a checklist of required object identities and counts, specified hands, exact targets or spatial relations, final poses, and control or restoration states.
-- The ledger determines whether, when, and where a transition occurred. The instruction constrains its task role and wording. The scene image supplies only initial state.
+- The ledger determines whether, when, and where a transition occurred. The instruction constrains its task role and wording. The scene image supplies only initial state and cannot override an explicit chronological state change in the ledger.
 - Track every manipulated object, hand, tool, and payload across groups from acquisition through use to release.
 - Resolve an uncertain local object label by the full causal chain. When a visibly manipulated object follows a compatible source, use, and target chain for an unmet instruction role, prefer the instruction category. Do not override a clear visual identity, hand, target, or spatial relation.
+- Compare repeated instances as a set. If one compatible category exceeds the instructed count while another is short, re-check relative color, shape, packaging, order, and target before deciding which uncertain label fills the unmet role.
+- Do not equate screen side with left or right hand. Preserve anatomical/robot arm identity and use an explicit instructed hand to resolve only ambiguous visual labels.
 - Preserve exact instructed qualifiers and `on` versus `into`. When the instruction is unspecified, use the ledger's immediate source, target, and visible geometry; do not broaden them to a workspace-level label.
 - For `take/remove X out of Y`, the final effect must leave X outside Y. Replace or delete any Draft that puts X back into Y.
 - Replace a broad support label with a specific functional station when a later visible operation physically requires that station and the ledger tracks the same object there continuously.
 
 ## 2. Keep Only Completed Task Effects
 
-- Keep effects that fulfill a checklist item or are causally necessary for one. Delete unrelated manipulation, reaching, contact alone, carrying, continuation, withdrawal, unfinished motion, and unsupported grasp or release descriptions.
+- Keep effects that fulfill a checklist item or are causally necessary for one. Moving a blocker or cover, closing an overlapping compartment, and opening a required container are causal access effects; never delete them merely because their object is absent from the instruction. Delete unrelated manipulation, reaching, contact alone, carrying, continuation, withdrawal, unfinished motion, and unsupported grasp or release descriptions.
 - Count repeated object chains independently and stop at the instructed count. Do not delete a compatible chain solely because its uncertain local label differs from an unmet instruction category; resolve identity first.
-- Pair every repeated placement or use that requires possession with a distinct earlier pickup or an explicit initially-held state. A new held label at a group boundary after the same hand was previously released does not prove acquisition; never insert an unpaired placement to satisfy a count.
+- Pair every repeated placement or use that requires possession with a distinct earlier pickup or an explicit initially-held state. If adjacent evidence directly relocates an object from a known source to a released target, restore both pickup and placement even when the carried pose was skipped. If a later group starts with a task object held after that hand was visibly free, insert the acquisition only when earlier evidence or the scene establishes its source and the later use proves continuous possession.
 - Preserve the specific required effect shown by the ledger. Generic movement or placement cannot replace a distinct use such as wiping, stirring, pouring, stretching, or locking.
 - Keep separate acquisition, use, handoff, placement, causal pose change, functional positioning, and control changes when the ledger shows separate completed transitions.
+- Preserve the immediate support at each stacking step. Once an object occupies a base in a vertical stack, a later object placed above that position is supported by the current top object, not directly by the shared base. Apply the same rule to pickup sources.
 - Remove a temporary set-down and re-grasp of the same object unless it enables another task object or hand, completes a required state, or is needed for a physically valid hand sequence.
+- Do not delete a visible state change merely because it is later reversed. Preserve a close-then-open access cycle when the intervening ledger shows manipulation of an overlapping, obstructed, or otherwise inaccessible part.
 
 ## 3. Enforce Causal State
 
 - Unless initially held, sustained possession requires an earlier pickup that visibly leaves support. After a visible release, later possession requires another pickup. Sliding, pushing, pulling, direct control, and transient contact do not require pickup.
 - Preserve a handoff when the ledger shows the receiving hand grasping before the source hand releases. Preserve the instructed source and destination hands when supported; never infer an unseen handoff to repair a hand mismatch.
-- A placement requires the object to become supported or contained and the hand to release and separate. If a non-final group ends with the object still held, keep acquisition or motion but not placement. At the episode's final boundary, continued hand contact is acceptable only when the ledger independently names a visible target, object-target contact, and stable support or attachment; a target inferred only from the instruction is insufficient. This does not turn tool contact into payload transfer.
-- At G0, a held task object that is visibly released may complete placement. At the final boundary, opposing grippers around an object may complete pickup only when the instruction requires carrying it; otherwise require visible departure from support.
+- A placement normally requires the object to become supported or contained and the hand to release and separate. If a non-final group ends with the object still held, keep acquisition or motion but not placement. At the episode's final boundary, continued hand contact is acceptable only when the ledger independently names a visible target, object-target contact, and stable support or attachment; a target inferred only from the instruction is insufficient. This does not turn tool contact into payload transfer.
+- At G0, a held task object that is visibly released may complete placement. At the final boundary, opposing grippers may complete pickup only when the ledger shows a stable grasp or load transfer and the instruction requires carrying; mere surrounding contact or the instruction alone is insufficient.
 - Keep a restoration only when the same part was initially changed or changed earlier. Use `screw` for a visibly threaded cap and `close` otherwise. Do not keep a temporary state that is undone before serving a task effect.
+- When the scene image and ledger disagree about a compartment or control state, continue from the ledger's latest explicit transition; never delete that transition solely from a scene-image guess.
 - Treat a required final pose as part of the placement effect. If the ledger establishes the pose while held and the later release preserves it, keep the pose in the final action wording.
 - Before one hand acquires a different task object, preserve its visible prior release. If the release is clear but its support is off-screen, use `Place [object] aside.`.
 
@@ -43,11 +48,13 @@ Return only evidence-supported edits. Never add an action merely because the ins
 
 - A tool already loaded at the start of its evidence is a state, not a material-collection action. Keep collection only when the ledger shows the tool gather material.
 - When a loaded tool reaches a recipient, audit payload transfer and tool placement separately. Preserve transfer when material leaves the tool or the recipient visibly gains it. Do not replace that transfer with tool placement.
+- Name the held tool in a payload-transfer action. If sparse evidence shows a task-specific tool acquired and later returned, preserve an intervening use only when the ledger also records a target-state change or another direct effect of that use; the tool chain and instruction compatibility alone are insufficient.
 - Keep return or placement of the tool only when the tool itself is visibly released and supported. Repeated collection or application is one effect unless the instruction or ledger distinguishes quantities or result states.
 
 ## 5. Preserve Controls
 
 - Keep separate visible activation, sustained-use stop, lock, latch, button, knob, opening, and closing transitions when they establish required states.
+- An active stream or indicator becoming inactive is sufficient evidence for a stop action even when the sampled frames omit finger contact. Audit the final ledger group for required start/stop/lock/close states before returning edits.
 - Name the exact control and motion direction from the ledger. Do not turn an ordinary pour ending or a held object returning upright into an extra control action.
 
 ## 6. Audit and Edit

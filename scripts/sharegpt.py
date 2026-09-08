@@ -724,7 +724,7 @@ def process_domain(task_domain, prompt_template):
             answer = input(
                 f"[{task_domain}] delete {len(episodes_to_remove)} episode(s)? [y/N]: "
             ).strip().lower()
-            if answer in ("y", "N"):
+            if answer in ("y", "n"):
                 break
             print("Please enter y or N.")
         if answer == "y":

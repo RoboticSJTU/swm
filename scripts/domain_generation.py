@@ -14,7 +14,7 @@ STEP_SOURCE = "video"  # "video" or "steps_json"
 TASK_DOMAIN = "droid"
 
 PDDL_MODEL = "gpt-5.6-sol"
-ACTION_EXTRACTION_MODEL = "gemini-3.7-flash"
+ACTION_EXTRACTION_MODEL = "qwen3.8-flash"
 JUDGE_MODEL = "Qwen3.8-27B"
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"

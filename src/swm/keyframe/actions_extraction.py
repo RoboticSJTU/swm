@@ -178,12 +178,26 @@ def _holdings(atoms: set[str]) -> list[tuple[str, str]]:
 
 
 def _same_held_object_label(first: str, second: str) -> bool:
+    def canonical(label: str) -> str:
+        label = re.sub(r"_\d+$", "", label)
+        parts = label.split("_")
+        word = parts[-1]
+        if word.endswith("ies") and len(word) > 3:
+            word = word[:-3] + "y"
+        elif word.endswith(("ches", "shes", "xes", "zes", "sses")):
+            word = word[:-2]
+        elif word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        parts[-1] = word
+        return "_".join(parts)
+
+    first_base = canonical(first)
+    second_base = canonical(second)
     return (
         first == second
-        or first.endswith(f"_{second}")
-        or second.endswith(f"_{first}")
-        or re.sub(r"_\d+$", "", first) == second
-        or re.sub(r"_\d+$", "", second) == first
+        or first_base == second_base
+        or first_base.endswith(f"_{second_base}")
+        or second_base.endswith(f"_{first_base}")
     )
 
 
@@ -271,6 +285,14 @@ def validate_hand_actions(
         if PLACEMENT_RE.search(action):
             released = _holdings(removed)
             if not released and not held_tool:
+                if holdings:
+                    held_names = ", ".join(obj for _, obj in holdings)
+                    return None, (
+                        f"{prefix}: the hand currently holds {held_names}. If this "
+                        "action transfers a payload with that tool, keep state_change "
+                        "empty and explicitly name the held tool with 'with' or "
+                        "'using'; otherwise emit the missing acquisition/release chain"
+                    )
                 return None, f"{prefix}: {action} must remove holding(hand,obj)"
             for hand, obj in released:
                 holding = f"holding({hand},{obj})"
