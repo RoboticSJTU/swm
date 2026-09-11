@@ -7,24 +7,33 @@ from pathlib import Path
 from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
 from swm.pddl.judge import judge_pddl, latest_round_problem
+from swm.pddl.strips import (
+    assert_goals,
+    ground_plan,
+    parse_domain,
+    parse_plan,
+    parse_problem_model,
+    rollout,
+)
 from swm.prompts import construct_instruction_with_steps, read_prompt
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-STEP_SOURCE = "video"  # "video" or "steps_json"
-TASK_DOMAIN = "droid"
+STEP_SOURCE = "steps_json"  # "video" or "steps_json"
+TASK_DOMAIN = "human_aug"
 
 PDDL_MODEL = "gpt-5.6-sol"
-ACTION_EXTRACTION_MODEL = "qwen3.8-flash"
-JUDGE_MODEL = "Qwen3.8-27B"
+ACTION_EXTRACTION_MODEL = "gemini-3.8-flash"
+JUDGE_MODEL = "gemini-3.8-flash"
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
-ACTION_TEMPLATE_MODE = "fixed"  # "fixed" or "retrieved"
+ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
+ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
 ACTION_TEMPLATE_DOMAIN = "human"
-ACTION_TEMPLATE_MODEL = PDDL_MODEL
 
-TASK_WORKERS = 30  # 主线程并发数
+
 MAX_PLAN_ATTEMPTS = 3
-PREPROCESS_WORKERS = 16  # 关键帧提取并发
+TASK_WORKERS = 20  # 主线程并发数
+PREPROCESS_WORKERS = TASK_WORKERS  # 关键帧提取并发
 
 FIXED_TEMPORAL_GRADIENT_RADIUS = {
     "bridgedata_v2": 4,
@@ -170,9 +179,14 @@ def find_task_action_template(task_id: str) -> str:
         round_dir = judge_path.parent
         round_number = round_dir.name.removeprefix("round")
         if round_number.isdigit() and judge_path.is_file():
-            judge_result = json.loads(judge_path.read_text(encoding="utf-8"))
-            if judge_result["pass"]:
-                passed_rounds.append((int(round_number), round_dir))
+            try:
+                judge_result = json.loads(judge_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if judge_result.get("pass") is True:
+                domain_path = round_dir / "domain.pddl"
+                if domain_path.is_file():
+                    passed_rounds.append((int(round_number), round_dir))
 
     if not passed_rounds:
         return ""
@@ -181,7 +195,8 @@ def find_task_action_template(task_id: str) -> str:
     if not domain_path.is_file():
         return ""
 
-    lines = domain_path.read_text(encoding="utf-8").splitlines()
+    domain_text = domain_path.read_text(encoding="utf-8")
+    lines = domain_text.splitlines()
     first_action = next(
         (index for index, line in enumerate(lines) if "(:action" in line), None
     )
@@ -195,9 +210,66 @@ def find_task_action_template(task_id: str) -> str:
     ):
         action_start -= 1
     action_section = "\n".join(lines[action_start + 1 : -1]).strip()
-    return "\n\n".join(
+    action_reference = "\n\n".join(
         block.strip() for block in action_section.split("\n\n") if block.strip()
     )
+    type_match = re.search(r"\(\s*:types\b", domain_text, re.IGNORECASE)
+    if type_match is None:
+        return action_reference
+
+    depth = 0
+    type_end = None
+    for index in range(type_match.start(), len(domain_text)):
+        if domain_text[index] == "(":
+            depth += 1
+        elif domain_text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                type_end = index + 1
+                break
+    if type_end is None:
+        raise ValueError(f"Unclosed :types section in {domain_path}")
+    type_context = domain_text[type_match.start() : type_end].strip()
+    return f"Type context:\n{type_context}\n\n{action_reference}"
+
+
+def _round_has_verified_plan(round_dir: Path) -> bool:
+    judge_path = round_dir / "judge.json"
+    domain_path = round_dir / "domain.pddl"
+    problem_path = round_dir / "problem.pddl"
+    plan_path = round_dir / "plan.txt"
+    if not all(path.is_file() for path in (judge_path, domain_path, problem_path, plan_path)):
+        return False
+
+    try:
+        judge = json.loads(judge_path.read_text(encoding="utf-8"))
+        if judge.get("pass") is not True or not plan_path.read_text(encoding="utf-8").strip():
+            return False
+        schemas = parse_domain(domain_path)
+        problem = parse_problem_model(problem_path, schemas)
+        raw_plan, _ = parse_plan(plan_path)
+        if not raw_plan:
+            return False
+        plan = ground_plan(raw_plan, schemas, problem.object_types)
+        final_state = rollout(problem.init_state, plan)
+        assert_goals(
+            final_state,
+            problem.goal_positive,
+            problem.goal_negative,
+            "Saved plan does not satisfy goal.",
+        )
+    except (OSError, ValueError, KeyError, NotImplementedError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def _latest_verified_round(save_dir: Path) -> Path | None:
+    rounds = []
+    for round_dir in save_dir.glob("round*"):
+        suffix = round_dir.name.removeprefix("round")
+        if suffix.isdigit() and _round_has_verified_plan(round_dir):
+            rounds.append((int(suffix), round_dir))
+    return max(rounds, default=(0, None), key=lambda item: item[0])[1]
 
 
 def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
@@ -303,14 +375,10 @@ def main() -> None:
     tasks = load_tasks()
     total_loaded = len(tasks)
     failed = 0
-    tasks = [
-        task
-        for task in tasks
-        if not any(
-            json.loads(path.read_text(encoding="utf-8"))["pass"]
-            for path in task["save_dir"].glob("round*/judge.json")
-        )
+    verified = [
+        (task, _latest_verified_round(task["save_dir"])) for task in tasks
     ]
+    tasks = [task for task, round_dir in verified if round_dir is None]
     already_passed = total_loaded - len(tasks)
 
     task_ids = {task["task_id"] for task in tasks}

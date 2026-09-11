@@ -17,8 +17,8 @@ You are an expert in writing a PDDL domain and problem grounded in the given ima
 # REASONING PROCESS
 
 (a) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
-(b) Domain construction: Based on the scene understanding and action templates, define only the necessary action definitions in the causal execution order. Before output, check that Domain `:predicates` has no duplicate predicate name+arity.
-(c) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
+(b) Domain construction: Based on the scene understanding and action templates, declare the necessary predicates and action definitions in causal execution order.
+(c) Problem construction: Encode all and only task-relevant objects and initial facts, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
 
 Return exactly one valid JSON object and no Markdown code fence or surrounding text.
 

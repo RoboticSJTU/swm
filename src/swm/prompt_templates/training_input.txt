@@ -9,7 +9,7 @@ Before writing PDDL, internally construct the task as a symbolic world model.
 1. Ground objects
 - Identify task-relevant objects from the image and instruction.
 2. Encode initial and goal states
-- Encode task-relevant facts from the image and instruction, including type predicates, object states, spatial relations and action-enabling conditions.
+- Encode task-relevant facts from the image and instruction, including object states, spatial relations and action-enabling conditions.
 - Derive the required final facts as :goal from the image and instruction.
 3. Build causal transitions
 - Construct the causal action chain from :init to :goal, including intermediate actions needed to satisfy later action preconditions.

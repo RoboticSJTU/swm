@@ -11,8 +11,10 @@ from swm.pddl.strips import (
     ground_plan,
     parse_domain,
     parse_plan,
+    parse_problem_model,
 )
 from swm.pddl.strips import parse_problem as parse_strips_problem
+from swm.pddl.typing import TypeHierarchy, typed_symbol_map
 
 Literal = tuple[str, ...]
 
@@ -82,10 +84,16 @@ class ParsedProblem:
     objects: frozenset[str]
     positive_init: frozenset[Literal]
     negative_init: frozenset[Literal]
+    object_types: dict[str, str] = field(default_factory=dict)
+    type_hierarchy: TypeHierarchy = field(default_factory=TypeHierarchy.object_only)
 
     @cached_property
     def unary_roles(self) -> dict[str, frozenset[str]]:
         roles: dict[str, set[str]] = {obj: set() for obj in self.objects}
+        for obj, type_name in self.object_types.items():
+            for ancestor in self.type_hierarchy.ancestors(type_name):
+                if ancestor != "object":
+                    roles.setdefault(obj, set()).add(_canonical_type(ancestor))
         for literal in self.positive_init:
             if len(literal) == 2 and literal[0] not in IGNORED_UNARY_PREDICATES:
                 roles.setdefault(literal[1], set()).add(_canonical_type(literal[0]))
@@ -176,29 +184,6 @@ def _parse_sexpr(text: str) -> list[object]:
     return roots[0]
 
 
-def _typed_symbols(items: Iterable[object]) -> set[str]:
-    tokens = list(items)
-    if any(not isinstance(item, str) for item in tokens):
-        raise ValueError(":objects may contain only symbols and type annotations")
-
-    objects: set[str] = set()
-    pending: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token != "-":
-            pending.append(token)
-            index += 1
-            continue
-        if not pending or index + 1 >= len(tokens):
-            raise ValueError("malformed typed :objects section")
-        objects.update(pending)
-        pending = []
-        index += 2
-    objects.update(pending)
-    return objects
-
-
 def _literal(expression: object) -> Literal:
     if (
         not isinstance(expression, list)
@@ -209,7 +194,7 @@ def _literal(expression: object) -> Literal:
     return tuple(expression)
 
 
-def parse_problem_text(text: str) -> ParsedProblem:
+def parse_problem_text(text: str, domain_text: str | None = None) -> ParsedProblem:
     root = _parse_sexpr(text)
     if not root or root[0] != "define":
         raise ValueError("not a PDDL define expression")
@@ -229,7 +214,38 @@ def parse_problem_text(text: str) -> ParsedProblem:
             "problem must contain one :init and at most one :objects section"
         )
 
-    objects = _typed_symbols(object_sections[0][1:]) if object_sections else set()
+    hierarchy = TypeHierarchy.object_only()
+    if domain_text is not None:
+        domain = _parse_sexpr(domain_text)
+        type_sections = [
+            item
+            for item in domain[1:]
+            if isinstance(item, list) and item and item[0] == ":types"
+        ]
+        if len(type_sections) > 1:
+            raise ValueError("domain contains duplicate :types sections")
+        if type_sections:
+            hierarchy = TypeHierarchy.from_declaration(type_sections[0][1:])
+
+    if object_sections:
+        order, object_types, _ = typed_symbol_map(
+            object_sections[0][1:],
+            context=":objects",
+        )
+        objects = set(order)
+        if domain_text is None:
+            hierarchy = TypeHierarchy(
+                {
+                    type_name: "object"
+                    for type_name in set(object_types.values())
+                    if type_name != "object"
+                }
+            )
+        for type_name in object_types.values():
+            hierarchy.require(type_name, ":objects")
+    else:
+        objects = set()
+        object_types = {}
     positive: set[Literal] = set()
     negative: set[Literal] = set()
     for expression in init_sections[0][1:]:
@@ -244,7 +260,15 @@ def parse_problem_text(text: str) -> ParsedProblem:
         argument for literal in positive | negative for argument in literal[1:]
     }
     objects.update(referenced)
-    return ParsedProblem(frozenset(objects), frozenset(positive), frozenset(negative))
+    for obj in referenced:
+        object_types.setdefault(obj, "object")
+    return ParsedProblem(
+        frozenset(objects),
+        frozenset(positive),
+        frozenset(negative),
+        object_types,
+        hierarchy,
+    )
 
 
 def _relation_neighborhood(
@@ -360,22 +384,42 @@ def _reference_context(
     instruction: str,
 ) -> ReferenceContext | None:
     try:
-        predicted = parse_problem_text(predicted_problem.read_text(encoding="utf-8"))
+        predicted_domain_text = predicted_domain.read_text(encoding="utf-8")
+        reference_domain_text = ground_truth_domain.read_text(encoding="utf-8")
+        predicted = parse_problem_text(
+            predicted_problem.read_text(encoding="utf-8"),
+            predicted_domain_text,
+        )
         reference = parse_problem_text(
-            ground_truth_problem.read_text(encoding="utf-8")
+            ground_truth_problem.read_text(encoding="utf-8"),
+            reference_domain_text,
         )
         mapping = map_objects(predicted, reference)
         candidate_schemas = parse_domain(predicted_domain)
         reference_schemas = parse_domain(ground_truth_domain)
+        candidate_problem_model = parse_problem_model(
+            predicted_problem,
+            candidate_schemas,
+        )
+        reference_problem_model = parse_problem_model(
+            ground_truth_problem,
+            reference_schemas,
+        )
         candidate_raw_plan = parse_plan(predicted_plan)[0]
-        candidate_actions = ground_plan(candidate_raw_plan, candidate_schemas)
+        candidate_actions = ground_plan(
+            candidate_raw_plan,
+            candidate_schemas,
+            candidate_problem_model.object_types,
+        )
         reference_actions = ground_plan(
-            parse_plan(ground_truth_plan)[0], reference_schemas
+            parse_plan(ground_truth_plan)[0],
+            reference_schemas,
+            reference_problem_model.object_types,
         )
-        _, candidate_goal, _ = parse_strips_problem(predicted_problem)
-        reference_initial, reference_goal, reference_goal_negative = (
-            parse_strips_problem(ground_truth_problem)
-        )
+        candidate_goal = candidate_problem_model.goal_positive
+        reference_initial = reference_problem_model.init_state
+        reference_goal = reference_problem_model.goal_positive
+        reference_goal_negative = reference_problem_model.goal_negative
     except (OSError, KeyError, NotImplementedError, ValueError):
         return None
     return ReferenceContext(
@@ -569,6 +613,7 @@ def compare_initial_states(
 def implicit_running_device_start_conflicts(
     predicted_domain: Path,
     predicted_plan: Path,
+    predicted_problem: Path | None = None,
 ) -> list[str]:
     """Reject a running-device use that instead starts the device from off.
 
@@ -578,9 +623,17 @@ def implicit_running_device_start_conflicts(
     already-running use.
     """
     try:
+        schemas = parse_domain(predicted_domain)
+        object_types = None
+        if predicted_problem is not None:
+            object_types = parse_problem_model(
+                predicted_problem,
+                schemas,
+            ).object_types
         actions = ground_plan(
             parse_plan(predicted_plan)[0],
-            parse_domain(predicted_domain),
+            schemas,
+            object_types,
         )
     except (OSError, KeyError, NotImplementedError, ValueError):
         return []
@@ -614,11 +667,15 @@ def unfinished_started_process_conflicts(
 ) -> list[str]:
     """Find a process started by the plan but left active outside the goal."""
     try:
+        schemas = parse_domain(predicted_domain)
+        problem = parse_problem_model(predicted_problem, schemas)
         actions = ground_plan(
             parse_plan(predicted_plan)[0],
-            parse_domain(predicted_domain),
+            schemas,
+            problem.object_types,
         )
-        initial_state, goal, _ = parse_strips_problem(predicted_problem)
+        initial_state = problem.init_state
+        goal = problem.goal_positive
     except (OSError, KeyError, NotImplementedError, ValueError):
         return []
 

@@ -97,7 +97,7 @@ Thumbs.db
 # Repository-local scratch files
 /1.py
 /gpt.py
-/mergy.py
+/merge.py
 /merged_domain.pddl
 /.sii/
 /experiments/

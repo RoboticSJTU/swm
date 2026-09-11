@@ -3,7 +3,6 @@ from pathlib import Path
 
 from swm.llm import call_gpt_json
 from swm.pddl.planner import solve_pddl, summarize_solver_error
-from swm.pddl.postprocess import PDDLPostprocessError, postprocess_pddl
 from swm.prompts import construct_prompt_with_feedback
 
 
@@ -52,8 +51,6 @@ def generate_pddl(
     )
 
     data = call_gpt_json(generate_pddl_model_name, prompt, [task_img])
-    domain_str = data["domain"]
-    problem_str = data["problem"]
 
     for path in (
         plan_path,
@@ -62,18 +59,28 @@ def generate_pddl(
     ):
         path.unlink(missing_ok=True)
 
-    try:
-        domain_str, problem_str = postprocess_pddl(domain_str, problem_str)
-    except PDDLPostprocessError as error:
+    raw_domain = data.get("domain")
+    raw_problem = data.get("problem")
+    domain_str = raw_domain if isinstance(raw_domain, str) else ""
+    problem_str = raw_problem if isinstance(raw_problem, str) else ""
+    if not domain_str.strip() or not problem_str.strip():
         domain_path.write_text(domain_str, encoding="utf-8")
         problem_path.write_text(problem_str, encoding="utf-8")
+        invalid = []
+        if not domain_str.strip():
+            invalid.append("domain")
+        if not problem_str.strip():
+            invalid.append("problem")
         return {
             "ok": False,
             "round_dir": round_dir,
             "domain": domain_str,
             "problem": problem_str,
             "plan": "",
-            "solver_feedback": f"PDDL post-processing failed: {error}",
+            "solver_feedback": (
+                "PDDL output contract failed: expected non-empty string field(s): "
+                + ", ".join(invalid)
+            ),
         }
 
     domain_path.write_text(domain_str, encoding="utf-8")

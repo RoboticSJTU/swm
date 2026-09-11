@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import re
@@ -27,6 +28,7 @@ from swm.pddl.strips import (
     parse_domain,
     parse_plan,
     parse_problem,
+    parse_problem_model,
     rollout,
 )
 
@@ -76,20 +78,35 @@ def _call_validated_judge(
     model: str,
     prompt: str,
     first_img: Path,
+    capture: dict | None = None,
 ) -> dict:
     last_error: Exception | None = None
-    for _ in range(3):
+    attempts = []
+    for attempt in range(1, 4):
+        attempt_capture = {"attempt": attempt}
         try:
-            return _validated_vlm_result(
+            call_kwargs = {"attempts": 1}
+            if capture is not None:
+                call_kwargs["capture"] = attempt_capture
+            result = _validated_vlm_result(
                 call_gpt_json(
                     model,
                     prompt,
                     [first_img],
-                    attempts=1,
+                    **call_kwargs,
                 )
             )
+            attempts.append(attempt_capture)
+            if capture is not None:
+                capture["attempts"] = attempts
+            return result
         except (RuntimeError, ValueError) as error:
+            attempt_capture["error_type"] = type(error).__name__
+            attempt_capture["error"] = str(error)
+            attempts.append(attempt_capture)
             last_error = error
+    if capture is not None:
+        capture["attempts"] = attempts
     raise ValueError(
         "Judge did not return the required flat judge schema after 3 attempts: "
         f"{last_error}"
@@ -100,16 +117,23 @@ def _evaluated_symbolic_trace(
     candidate_plan: str,
     predicted_domain: str | Path | None,
     pddl_plan: str | Path | None,
+    predicted_problem: str | Path | None = None,
 ) -> str:
     if not isinstance(predicted_domain, Path) or not isinstance(pddl_plan, Path):
         return candidate_plan
 
     try:
-        schemas = parse_domain(predicted_domain)
         raw_plan, _ = parse_plan(pddl_plan)
         if not raw_plan:
             return "Candidate trace contains zero actions."
-        actions = ground_plan(raw_plan, schemas)
+        schemas = parse_domain(predicted_domain)
+        object_types = None
+        if isinstance(predicted_problem, Path):
+            object_types = parse_problem_model(
+                predicted_problem,
+                schemas,
+            ).object_types
+        actions = ground_plan(raw_plan, schemas, object_types)
     except (OSError, KeyError, ValueError, NotImplementedError) as error:
         return f"{candidate_plan}\n\nSymbolic details unavailable: {error}"
 
@@ -151,6 +175,7 @@ def _render_judge_prompt(
     kf_actions: str,
     candidate_plan: str,
     predicted_domain: str | Path | None,
+    predicted_problem: str | Path | None,
     ground_truth_problem: str | Path | None,
     pddl_plan: str | Path | None,
 ) -> str:
@@ -163,6 +188,7 @@ def _render_judge_prompt(
             for conflict in implicit_running_device_start_conflicts(
                 predicted_domain,
                 pddl_plan,
+                predicted_problem,
             )
         )
     if not findings:
@@ -181,8 +207,33 @@ def _render_judge_prompt(
             candidate_plan,
             predicted_domain,
             pddl_plan,
+            predicted_problem,
         ),
     )
+
+
+def _candidate_symbolic_failure(
+    predicted_domain: Path,
+    predicted_problem: Path,
+    pddl_plan: Path,
+) -> str | None:
+    try:
+        schemas = parse_domain(predicted_domain)
+        problem = parse_problem_model(predicted_problem, schemas)
+        raw_plan = parse_plan(pddl_plan)[0]
+        if not raw_plan:
+            return "Candidate PDDL plan contains zero actions."
+        actions = ground_plan(raw_plan, schemas, problem.object_types)
+        final_state = rollout(problem.init_state, actions)
+    except (OSError, KeyError, NotImplementedError, TypeError, ValueError) as error:
+        return f"Candidate PDDL plan is invalid: {error}"
+    if not goals_satisfied(
+        final_state,
+        problem.goal_positive,
+        problem.goal_negative,
+    ):
+        return "Candidate PDDL plan does not satisfy its own goal."
+    return None
 
 
 def _grounded_key(action) -> tuple:
@@ -195,6 +246,7 @@ def _grounded_key(action) -> tuple:
         tuple(sorted(action.del_eff)),
         tuple(sorted(action.equality_preconditions)),
         tuple(sorted(action.inequality_preconditions)),
+        action.parameter_types,
     )
 
 
@@ -203,13 +255,21 @@ def _reference_certificate(problem_path: Path) -> tuple:
     domain_path = problem_path.parent / "domain.pddl"
     plan_path = problem_path.parent / "plan.txt"
     schemas = parse_domain(domain_path)
-    initial, goal_positive, goal_negative = parse_problem(problem_path)
+    problem = parse_problem_model(problem_path, schemas)
     raw_plan = parse_plan(plan_path)[0]
-    actions = ground_plan(raw_plan, schemas)
-    final = rollout(initial, actions)
-    if not goals_satisfied(final, goal_positive, goal_negative):
+    actions = ground_plan(raw_plan, schemas, problem.object_types)
+    final = rollout(problem.init_state, actions)
+    if not goals_satisfied(final, problem.goal_positive, problem.goal_negative):
         raise ValueError("reference plan does not satisfy the reference goal")
-    return schemas, initial, goal_positive, goal_negative, raw_plan, actions
+    return (
+        schemas,
+        problem.init_state,
+        problem.goal_positive,
+        problem.goal_negative,
+        raw_plan,
+        actions,
+        problem.object_types,
+    )
 
 
 def symbolic_verdict(
@@ -226,14 +286,20 @@ def symbolic_verdict(
             reference_goal_negative,
             reference_raw_plan,
             reference_actions,
+            reference_object_types,
         ) = _reference_certificate(ground_truth_problem)
 
         candidate_schemas = parse_domain(predicted_domain)
-        candidate_initial, candidate_goal_positive, candidate_goal_negative = (
-            parse_problem(predicted_problem)
-        )
+        candidate_problem = parse_problem_model(predicted_problem, candidate_schemas)
+        candidate_initial = candidate_problem.init_state
+        candidate_goal_positive = candidate_problem.goal_positive
+        candidate_goal_negative = candidate_problem.goal_negative
         candidate_raw_plan = parse_plan(pddl_plan)[0]
-        candidate_actions = ground_plan(candidate_raw_plan, candidate_schemas)
+        candidate_actions = ground_plan(
+            candidate_raw_plan,
+            candidate_schemas,
+            candidate_problem.object_types,
+        )
         candidate_final = rollout(candidate_initial, candidate_actions)
         if not goals_satisfied(
             candidate_final, candidate_goal_positive, candidate_goal_negative
@@ -262,7 +328,11 @@ def symbolic_verdict(
             return None
 
         try:
-            reordered_actions = ground_plan(candidate_raw_plan, reference_schemas)
+            reordered_actions = ground_plan(
+                candidate_raw_plan,
+                reference_schemas,
+                reference_object_types,
+            )
             reordered_final = rollout(reference_initial, reordered_actions)
         except (KeyError, TypeError, ValueError):
             reordered_final = None
@@ -873,6 +943,7 @@ def _effect_mappings(
 def _groundings(
     schema: ActionSchema,
     objects: set[str],
+    object_types: dict[str, str],
     initial: set[tuple[str, ...]],
     dynamic_predicates: set[str],
 ):
@@ -889,7 +960,11 @@ def _groundings(
             sorted(
                 obj
                 for obj in objects
-                if all((predicate, obj) in initial for predicate in requirements)
+                if schema.type_hierarchy.is_subtype(
+                    object_types.get(obj, "object"),
+                    schema.param_types.get(parameter, "object"),
+                )
+                and all((predicate, obj) in initial for predicate in requirements)
             )
         )
     if any(not domain for domain in domains):
@@ -903,6 +978,7 @@ def _groundings(
         yield ground_plan(
             [(schema.name, list(arguments))],
             {schema.name: schema},
+            object_types,
         )[0]
 
 
@@ -917,23 +993,36 @@ def reference_replay_certificate(
     try:
         candidate_schemas = parse_domain(candidate_domain)
         reference_schemas = parse_domain(reference_domain)
+        candidate_problem_model = parse_problem_model(
+            candidate_problem,
+            candidate_schemas,
+        )
+        reference_problem_model = parse_problem_model(
+            reference_problem,
+            reference_schemas,
+        )
         candidate_actions = ground_plan(
-            parse_plan(candidate_plan)[0], candidate_schemas
+            parse_plan(candidate_plan)[0],
+            candidate_schemas,
+            candidate_problem_model.object_types,
         )
         reference_actions = ground_plan(
             parse_plan(reference_dir / "plan.txt")[0],
             reference_schemas,
+            reference_problem_model.object_types,
         )
         candidate_parsed = parse_problem_text(
-            candidate_problem.read_text(encoding="utf-8")
+            candidate_problem.read_text(encoding="utf-8"),
+            candidate_domain.read_text(encoding="utf-8"),
         )
         reference_parsed = parse_problem_text(
-            reference_problem.read_text(encoding="utf-8")
+            reference_problem.read_text(encoding="utf-8"),
+            reference_domain.read_text(encoding="utf-8"),
         )
         object_mapping = _object_mapping(candidate_parsed, reference_parsed)
-        reference_initial, reference_goal_pos, reference_goal_neg = parse_problem(
-            reference_problem
-        )
+        reference_initial = reference_problem_model.init_state
+        reference_goal_pos = reference_problem_model.goal_positive
+        reference_goal_neg = reference_problem_model.goal_negative
     except (OSError, KeyError, NotImplementedError, TypeError, ValueError) as error:
         return ReplayCertificate("defer", f"parse_error:{type(error).__name__}")
 
@@ -977,6 +1066,7 @@ def reference_replay_certificate(
                 _groundings(
                     schema,
                     reference_objects,
+                    reference_problem_model.object_types,
                     reference_initial,
                     reference_dynamic,
                 )
@@ -1094,9 +1184,27 @@ def _reference_verdict(
 
     try:
         reference_plan_text = reference_plan.read_text(encoding="utf-8")
+        candidate_schemas = parse_domain(predicted_domain)
+        reference_schemas = parse_domain(reference_domain)
+        candidate_problem_model = parse_problem_model(
+            predicted_problem,
+            candidate_schemas,
+        )
+        reference_problem_model = parse_problem_model(
+            ground_truth_problem,
+            reference_schemas,
+        )
         mapping = unique_structural_mapping(
-            ground_plan(parse_plan(pddl_plan)[0], parse_domain(predicted_domain)),
-            ground_plan(parse_plan(reference_plan)[0], parse_domain(reference_domain)),
+            ground_plan(
+                parse_plan(pddl_plan)[0],
+                candidate_schemas,
+                candidate_problem_model.object_types,
+            ),
+            ground_plan(
+                parse_plan(reference_plan)[0],
+                reference_schemas,
+                reference_problem_model.object_types,
+            ),
         )
     except (OSError, KeyError, NotImplementedError, TypeError, ValueError):
         mapping = None
@@ -1148,6 +1256,7 @@ def judge_pddl(
     ground_truth_problem: str | Path | None = None,
     predicted_domain: str | Path | None = None,
     pddl_plan: str | Path | None = None,
+    capture: dict | None = None,
 ):
     candidate_plan = candidate_plan.strip()
     if not candidate_plan:
@@ -1157,6 +1266,20 @@ def judge_pddl(
         isinstance(source, Path)
         for source in (predicted_domain, predicted_problem, pddl_plan)
     )
+    if candidate_paths:
+        failure = _candidate_symbolic_failure(
+            predicted_domain,
+            predicted_problem,
+            pddl_plan,
+        )
+        if failure is not None:
+            if capture is not None:
+                capture["decision_source"] = "candidate_symbolic_validation"
+            return {
+                "reasoning": failure,
+                "pass": False,
+                "feedback": failure,
+            }
     if candidate_paths and isinstance(ground_truth_problem, Path):
         verdict = _reference_verdict(
             instruction,
@@ -1167,6 +1290,8 @@ def judge_pddl(
             ground_truth_problem,
         )
         if verdict is not None:
+            if capture is not None:
+                capture["decision_source"] = "reference_symbolic_validation"
             return verdict
 
     if candidate_paths:
@@ -1177,6 +1302,8 @@ def judge_pddl(
         )
         if conflicts:
             failure = "; ".join(conflicts)
+            if capture is not None:
+                capture["decision_source"] = "started_process_validation"
             return {
                 "reasoning": "The Candidate leaves a task-started process active: "
                 + failure,
@@ -1189,7 +1316,16 @@ def judge_pddl(
         kf_actions=kf_actions,
         candidate_plan=candidate_plan,
         predicted_domain=predicted_domain,
+        predicted_problem=predicted_problem,
         ground_truth_problem=ground_truth_problem,
         pddl_plan=pddl_plan,
     )
-    return _call_validated_judge(model, prompt, first_img)
+    if capture is not None:
+        capture.update(
+            {
+                "decision_source": "vlm",
+                "model": model,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            }
+        )
+    return _call_validated_judge(model, prompt, first_img, capture)

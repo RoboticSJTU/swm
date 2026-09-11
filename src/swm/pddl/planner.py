@@ -24,7 +24,7 @@ def summarize_solver_error(log: str) -> str:
     action = re.findall(r"Parsing action '([^']+)'", log)
     location = f" in action '{action[-1]}'" if action else ""
     match = re.search(
-        r"(?:Undefined|Undeclared)\s+(predicate|object|variable)\s*\nGot:\s*([^\n]+)",
+        r"(?:Undefined|Undeclared)\s+(predicate|object|variable|type)\s*\nGot:\s*([^\n]+)",
         log,
         re.IGNORECASE,
     )
@@ -39,6 +39,11 @@ def summarize_solver_error(log: str) -> str:
         re.IGNORECASE,
     ):
         detail = f"predicate '{match.group(1)}' expects {match.group(2)} arguments but got {match.group(3)}{location}"
+    elif match := re.search(
+        r"(?i)(?:type mismatch|expected type)[:\s]+([^\n]+)",
+        log,
+    ):
+        detail = "type mismatch: " + match.group(1).strip()
     elif re.search(r"Expected .*words:\s*:domain", log, re.IGNORECASE):
         detail = "the problem is missing the required (:domain NAME) block"
     elif match := re.search(r"(?:^|\n)([^\n]+)\nSyntax:", log):

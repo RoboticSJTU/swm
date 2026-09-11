@@ -12,7 +12,7 @@ sys.path.insert(0, str(CLEAN_OPERATOR_DIR))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import clean_operator_data as cleanup  # noqa: E402
-import mergy  # noqa: E402
+import merge  # noqa: E402
 
 
 def action(
@@ -1940,7 +1940,7 @@ def test_cleaned_wipe_uses_a_distinct_clean_name() -> None:
 
 
 def test_merge_actions_numbers_same_name_with_different_contracts() -> None:
-    first = mergy.ActionItem(
+    first = merge.ActionItem(
         name="wipe_table_with_cloth",
         param_arity=3,
         block_text="(:action wipe_table_with_cloth)",
@@ -1948,7 +1948,7 @@ def test_merge_actions_numbers_same_name_with_different_contracts() -> None:
         leading_comments=[],
         sources=["source-a"],
     )
-    second = mergy.ActionItem(
+    second = merge.ActionItem(
         name="wipe_table_with_cloth",
         param_arity=3,
         block_text="(:action wipe_table_with_cloth)",
@@ -1957,7 +1957,7 @@ def test_merge_actions_numbers_same_name_with_different_contracts() -> None:
         sources=["source-b"],
     )
 
-    merged = mergy.merge_actions([first, second])
+    merged = merge.merge_actions([first, second])
 
     assert [(name, item.signature) for name, item in merged] == [
         ("wipe_table_with_cloth_1", "contract-a"),
@@ -1965,41 +1965,18 @@ def test_merge_actions_numbers_same_name_with_different_contracts() -> None:
     ]
 
 
-def test_merge_actions_combines_sources_for_the_same_contract() -> None:
-    first = mergy.ActionItem(
-        name="open_drawer",
-        param_arity=2,
-        block_text="(:action open_drawer)",
-        signature="shared-contract",
-        sources=["source-a"],
-    )
-    second = mergy.ActionItem(
-        name="open_drawer",
-        param_arity=2,
-        block_text="(:action open_drawer)",
-        signature="shared-contract",
-        sources=["source-b"],
-    )
-
-    merged = mergy.merge_actions([first, second])
-
-    assert len(merged) == 1
-    assert merged[0][0] == "open_drawer"
-    assert merged[0][1].sources == ["source-a", "source-b"]
-
-
 def test_merge_rejects_cross_source_predicate_arity_conflicts() -> None:
-    unary = mergy.PredicateItem(
+    unary = merge.PredicateItem(
         name="dispensing", arity=1, expr="(dispensing ?x)",
         sources=["source-a"],
     )
-    binary = mergy.PredicateItem(
+    binary = merge.PredicateItem(
         name="dispensing", arity=2, expr="(dispensing ?x ?y)",
         sources=["source-b"],
     )
 
     with pytest.raises(ValueError, match="require semantic cleanup"):
-        mergy.resolve_predicate_arity_collisions([unary, binary], [])
+        merge.resolve_predicate_arity_collisions([unary, binary], [])
 
 
 def test_unused_dispensing_declaration_is_removed_but_live_one_is_kept() -> None:

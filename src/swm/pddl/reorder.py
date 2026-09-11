@@ -14,7 +14,7 @@ from swm.pddl.strips import (
     ground_plan,
     parse_domain,
     parse_plan,
-    parse_problem,
+    parse_problem_model,
     rollout,
 )
 
@@ -521,9 +521,12 @@ def plan_reorder(
 ) -> None:
     try:
         schemas = parse_domain(domain_path)
-        init_state, goal_pos, goal_neg = parse_problem(problem_path)
+        problem = parse_problem_model(problem_path, schemas)
+        init_state = problem.init_state
+        goal_pos = problem.goal_positive
+        goal_neg = problem.goal_negative
         raw_plan, comments = parse_plan(plan_path)
-        plan = ground_plan(raw_plan, schemas)
+        plan = ground_plan(raw_plan, schemas, problem.object_types)
 
         original_final = rollout(init_state, plan)
         assert_goals(

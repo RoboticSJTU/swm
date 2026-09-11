@@ -74,6 +74,7 @@ eval_results/<model>/<task_domain>/<task_id>/<episode_id>/
 
 - `scripts/steps_generation.py`：生成原子动作序列
 - `scripts/instruction_aug_generation.py`：生成增强指令和元数据
+- `scripts/merge.py`：修改脚本顶部的 `DATASET` 后运行 `python scripts/merge.py`，生成该数据集的 `unified_domain.pddl`
 - `scripts/sharegpt.py`：导出多模态 ShareGPT 数据
 - `scripts/keyframe/eval_keyframe.py`、`scripts/eval_planning.py`：评测关键帧和 PDDL 规划
 

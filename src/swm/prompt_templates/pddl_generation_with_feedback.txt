@@ -36,11 +36,10 @@ Your task is to diagnose why the previous PDDL domain and problem failed, use th
 
 (a) Failure diagnosis: identify the key issues in the previous attempt.
 (b) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
-(c) Domain construction: Based on the scene understanding and action templates, define only the necessary action definitions in the causal execution order. Before output, check that Domain `:predicates` has no duplicate predicate name+arity.
-(d) Problem construction: Encode all and only task-relevant initial facts in init, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
+(c) Domain construction: Based on the scene understanding and action templates, declare the necessary predicates and action definitions in causal execution order.
+(d) Problem construction: Encode all and only task-relevant objects and initial facts, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
 
-Return exactly one valid JSON object and no Markdown code fence or surrounding text. `reasoning` must concisely report the analysis above. `domain` and `problem` must be complete PDDL strings, not nested objects. Escape their contents as required by JSON.
-
+Return exactly one valid JSON object and no Markdown code fence or surrounding text.
 {{
   "reasoning": "a four-part analysis with the following structure: (a) Failure diagnosis. (b) Scene understanding. (c) Domain construction. (d) Problem construction.",
   "domain": "complete PDDL domain string",

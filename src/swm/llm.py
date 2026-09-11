@@ -132,7 +132,7 @@ def call_gpt_json(
     image_paths: list[Path] | None = None,
     *,
     response_format: dict | None = None,
-    attempts: int = 5,
+    attempts: int = 3,
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
     temperature: float | None = None,
@@ -147,14 +147,22 @@ def call_gpt_json(
         json_text = None
         try:
             call_kwargs = {}
+            call_capture = {} if capture is not None else None
             if max_tokens is not None:
                 call_kwargs["max_tokens"] = max_tokens
             if reasoning_effort is not None:
                 call_kwargs["reasoning_effort"] = reasoning_effort
             if temperature is not None:
                 call_kwargs["temperature"] = temperature
+            if call_capture is not None:
+                call_kwargs["capture"] = call_capture
             if response_format is None:
-                raw_output = call_gpt(model, prompt, image_paths, **call_kwargs)
+                raw_output = call_gpt(
+                    model,
+                    prompt,
+                    image_paths,
+                    **call_kwargs,
+                )
             else:
                 raw_output = call_gpt(
                     model,
@@ -173,6 +181,7 @@ def call_gpt_json(
             if not isinstance(response_json, dict):
                 raise ValueError("model response is not a JSON object")
             if capture is not None:
+                capture.update(call_capture or {})
                 capture.update(
                     {
                         "attempt": attempt + 1,
