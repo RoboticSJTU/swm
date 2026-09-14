@@ -34,10 +34,10 @@ PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION.replace("-", "_")
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
 PROMPT_PATH = ROOT_DIR / "src/swm/prompt_templates/training_input.txt"
-OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/data/human.json"
+OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/data/{'_'.join(TASK_DOMAINS)}.json"
 ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
-MAX_WORKERS = 40
+MAX_WORKERS = 100
 
 
 # ============================================================
@@ -358,10 +358,13 @@ def prepare_round(item):
 
         problem = parse_pddl(problem_raw)
         conflicts, hand_states = inspect_init(problem)
+        review = None
+        init_review = None
         if conflicts:
             problem_path = source_paths[1].relative_to(ROOT_DIR)
             message = f"{problem_path}: " + " | ".join(conflicts)
-            return key, None, "[INIT CONFLICT] " + message, message, None
+            review = "[INIT CONFLICT] " + message
+            init_review = message
 
         validate_round(*source_paths)
         domain = parse_pddl(domain_raw)
@@ -421,15 +424,15 @@ def prepare_round(item):
             atomic_write(source_paths[1], source_problem)
             atomic_write(source_paths[0], source_domain)
 
-        review = None
         if ROBOT_CONFIGURATION == "single-arm" and len(hand_states) > 1:
             message = (
                 f"{source_paths[1].relative_to(ROOT_DIR)}: "
                 + " | ".join(hand_states)
             )
-            review = "[HAND STATE] " + message
+            hand_review = "[HAND STATE] " + message
+            review = f"{review}\n{hand_review}" if review else hand_review
 
-        return key, prepared, review, None, None
+        return key, prepared, review, init_review, None
     except Exception as error:  # noqa: BLE001 - 单个 episode 失败不应中断批量导出
         message = f"{round_dir.relative_to(ROOT_DIR)}: {error}"
         return key, None, "[PDDL SKIP] " + message, None, message
@@ -550,10 +553,6 @@ def process_domain(task_domain, prompt_template):
         f"missing_image={missing_image}  init_review={len(init_reviews)}  "
         f"pddl_skip={len(pddl_errors)}"
     )
-    if init_reviews:
-        print("  [REVIEW init] :init 中发现冲突状态，以下 episode 已保留但未写入训练集：")
-        for message in init_reviews:
-            print("   - " + message)
 
     return samples, review_messages
 

@@ -7,6 +7,12 @@ The user prefers code that is minimal, direct, and easy to understand.
 - Do not generalize for hypothetical future needs.
 - Keep changes scoped to the request and preserve existing simple patterns.
 - Explain any unavoidable non-trivial complexity in Chinese before adding it.
+- Keep pipeline flows and prompts minimal and direct. Add a field, stage, fallback, or abstraction only after a concrete failure proves it necessary.
+
+## Human GT Annotations
+
+- Human-annotated GT contracts must be decisive and must not use an `unknown` label.
+- Keep human GT to the minimum information required for scoring; do not duplicate inputs or store program-derived metadata.
 
 ## PDDL Artifact Consistency
 

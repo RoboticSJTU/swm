@@ -18,21 +18,21 @@ from swm.pddl.strips import (
 from swm.prompts import construct_instruction_with_steps, read_prompt
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-STEP_SOURCE = "steps_json"  # "video" or "steps_json"
-TASK_DOMAIN = "human_aug"
+STEP_SOURCE = "video"  # "video" or "steps_json"
+TASK_DOMAIN = "droid"
 
 PDDL_MODEL = "gpt-5.6-sol"
 ACTION_EXTRACTION_MODEL = "gemini-3.8-flash"
 JUDGE_MODEL = "gemini-3.8-flash"
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
-ACTION_TEMPLATE_MODE = "retrieved"  # "fixed" or "retrieved"
+ACTION_TEMPLATE_MODE = "fixed"  # "fixed" or "retrieved"
 ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
 ACTION_TEMPLATE_DOMAIN = "human"
 
 
 MAX_PLAN_ATTEMPTS = 3
-TASK_WORKERS = 20  # 主线程并发数
+TASK_WORKERS = 100  # 主线程并发数
 PREPROCESS_WORKERS = TASK_WORKERS  # 关键帧提取并发
 
 FIXED_TEMPORAL_GRADIENT_RADIUS = {
