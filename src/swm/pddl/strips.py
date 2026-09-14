@@ -9,6 +9,111 @@ from swm.pddl.typing import TypeHierarchy, typed_symbol_map
 Literal = tuple[str, ...]
 
 
+def normalize_domain_types(path: Path) -> bool:
+    """Remove redundant root declarations and repair grouped self-inheritance."""
+    text = path.read_text(encoding="utf-8")
+    tokens: list[tuple[str, int, int]] = []
+    for match in re.finditer(r";[^\n]*(?:\n|$)|[()]|[^()\s;]+", text):
+        value = match.group()
+        if not value.startswith(";"):
+            tokens.append((value, match.start(), match.end()))
+
+    depth = 0
+    section_start: int | None = None
+    type_sections: list[tuple[int, int]] = []
+    for index, (value, _, _) in enumerate(tokens):
+        if value == "(":
+            if (
+                depth == 1
+                and index + 1 < len(tokens)
+                and tokens[index + 1][0].lower() == ":types"
+            ):
+                section_start = index
+            depth += 1
+        elif value == ")":
+            depth -= 1
+            if section_start is not None and depth == 1:
+                type_sections.append((section_start, index))
+                section_start = None
+
+    # Leave malformed or duplicate sections untouched for the normal parser to reject.
+    if len(type_sections) != 1:
+        return False
+
+    start, end = type_sections[0]
+    items = tokens[start + 2 : end]
+    if any(value in {"(", ")"} for value, _, _ in items):
+        return False
+
+    groups: list[
+        tuple[
+            list[tuple[str, int, int]],
+            tuple[str, int, int] | None,
+            tuple[str, int, int] | None,
+        ]
+    ] = []
+    cursor = 0
+    while cursor < len(items):
+        dash = next(
+            (index for index in range(cursor, len(items)) if items[index][0] == "-"),
+            None,
+        )
+        if dash is None:
+            groups.append((items[cursor:], None, None))
+            break
+        if dash == cursor or dash + 1 >= len(items) or items[dash + 1][0] == "-":
+            return False
+        groups.append((items[cursor:dash], items[dash], items[dash + 1]))
+        cursor = dash + 2
+
+    # Redeclaring the built-in root below another type is a real error.
+    for names, _, parent in groups:
+        parent_name = parent[0].lower() if parent is not None else "object"
+        if parent_name != "object" and any(
+            name.lower() == "object" for name, _, _ in names
+        ):
+            return False
+
+    edits: list[tuple[int, int, str]] = []
+    for names, dash, parent in groups:
+        parent_name = parent[0].lower() if parent is not None else "object"
+        if parent_name == "object":
+            redundant = [token for token in names if token[0].lower() == "object"]
+            for _, token_start, token_end in redundant:
+                edits.append((token_start, token_end, ""))
+            if redundant and len(redundant) == len(names) and parent is not None:
+                edits.append((dash[1], dash[2], ""))
+                edits.append((parent[1], parent[2], ""))
+            continue
+
+        self_types = [
+            (index, token)
+            for index, token in enumerate(names)
+            if token[0].lower() == parent_name
+        ]
+        if not self_types:
+            continue
+        if len(self_types) != 1:
+            return False
+
+        index, self_type = self_types[0]
+        has_before = index > 0
+        has_after = index + 1 < len(names)
+        if has_before:
+            edits.append((self_type[1], self_type[1], f"- {parent[0]} "))
+        if has_after:
+            edits.append((self_type[2], self_type[2], " - object"))
+        else:
+            edits.append((parent[1], parent[2], "object"))
+
+    if not edits:
+        return False
+    for edit_start, edit_end, replacement in sorted(edits, reverse=True):
+        text = text[:edit_start] + replacement + text[edit_end:]
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 @dataclass
 class ActionSchema:
     name: str
@@ -173,6 +278,7 @@ def _validate_literal_types(
 
 
 def parse_domain(path: Path) -> DomainSchemas:
+    normalize_domain_types(path)
     root = parse_sexpr_file(path)
     if not isinstance(root, list) or not root or root[0] != "define":
         raise ValueError(f"{path} is not a valid domain file")
