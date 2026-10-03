@@ -36,9 +36,9 @@ def get_client(model: str):
          # 公共
         # api_key = os.getenv("SII_API_KEY_2")
         # base_url = "https://x.openapi-qb-ai.sii.edu.cn/v1" 
-        # 决策
-        api_key = os.getenv("SII_API_KEY_2")
-        base_url = "https://xy.openapi-qb-ai.sii.edu.cn/v1"   
+        # # 决策
+        # api_key = os.getenv("SII_API_KEY_2")
+        # base_url = "https://xy.openapi-qb-ai.sii.edu.cn/v1"   
 
     # elif model.startswith("qwen3.8-flash"):
     #     api_key = os.getenv("Ali_API_KEY")

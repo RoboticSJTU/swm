@@ -23,8 +23,8 @@ eval_model = "actor_hf"
 judge_model = "Qwen3.8-27B"  # Qwen3.8-27B
 ROBOT_CONFIGURATION = "single-arm"
 
-# swm swm_2 unidomain
-datasets = ["swm", "unidomain"]
+# swm swm_v2 unidomain
+datasets = ["swm_v2"]
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
 
