@@ -3,7 +3,7 @@
 ### (1) Causal modeling
 
 - Model each action as a minimal causal transition rather than a snapshot of the whole scene, including only the direct participants, necessary preconditions, and immediate effects required to determine whether the action is applicable and how it changes the state.
-- Include a schema for every supplied manipulation step that changes holding, support, containment, or device state, even when the initial scene lets a shortest plan omit it.
+- Keep mutually exclusive state literals adjacent in preconditions and effects. Write each effect transition as deletion of the old state followed immediately by addition of the new state.
 - For finite transfers, delete the source relation when adding the target relation; model unlimited sources with static `dispenses`.
 - Add a process result only to the action that completes the process.
 - For every object category, an oriented placement must require the visually supported source pose and change only that pose: delete the source pose and add the target pose. Do not emit unrelated pose negations. Picking preserves pose; when the source and target pose are identical, placement has no pose effect.
@@ -22,5 +22,9 @@
 
 ## 2. Predicates
 
+- Use no :types, :typing, or typed declarations. Represent categories with static unary predicates in :init and action preconditions.
 - Use the smallest predicate vocabulary that preserves all planning-relevant distinctions; omit irrelevant attributes, scene details, and unnecessary intermediate states.
+- Prefer canonical relations such as `at(object, position)`, `on(object, support)`, `in(content, container)`, `part_of(part, whole)`.
 - Reuse general predicates with consistent meaning and arity across compatible objects and roles; avoid synonymous or object-specific schemas.
+- Omit static capability, eligibility, selector, and ordinal-role predicates when unary category predicates, current state, structural relations, or the goal already determine legal bindings.
+- Add persistent event predicates only when the instruction requires an intermediate event that cannot be inferred from the final physical state. Use a reusable action relation bound to the essential participants; never use counters, phases, generic completion flags, or task-specific history labels.

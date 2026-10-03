@@ -24,6 +24,7 @@ from swm.pddl.strips import (
     parse_plan,
     parse_problem_model,
     rollout,
+    validate_untyped_pddl,
 )
 
 MODEL_NAME = "gpt-5.6-sol"
@@ -312,7 +313,7 @@ def validate_round(domain_path, problem_path, plan_path):
     raw_plan, _ = parse_plan(plan_path)
     if not raw_plan:
         raise ValueError("没有可用 action")
-    actions = ground_plan(raw_plan, schemas, problem.object_types)
+    actions = ground_plan(raw_plan, schemas, problem.objects)
     final_state = rollout(problem.init_state, actions)
     if not goals_satisfied(
         final_state,
@@ -356,6 +357,8 @@ def prepare_round(item):
             path.read_text(encoding="utf-8") for path in source_paths
         )
 
+        validate_untyped_pddl(domain_raw)
+        validate_untyped_pddl(problem_raw)
         problem = parse_pddl(problem_raw)
         conflicts, hand_states = inspect_init(problem)
         review = None

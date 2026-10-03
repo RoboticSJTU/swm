@@ -12,7 +12,7 @@ from typing import Union
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from swm.pddl.typing import TypeHierarchy, render_typed_symbols, typed_symbol_map
+from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 
 
 # 只需要修改这里。
@@ -43,7 +43,6 @@ class ActionItem:
     block_text: str
     leading_comments: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
-    parameter_types: tuple[str, ...] = ()
 
 
 def remove_comments(text: str) -> str:
@@ -115,16 +114,16 @@ def canonical_signature(
     parameters_text: str,
     precondition_text: str,
     effect_text: str,
-) -> tuple[int, str, tuple[str, ...]]:
+) -> tuple[int, str]:
     """Normalize variable names and unordered Boolean terms for action deduplication."""
     parameters = parse_sexp(parameters_text)
     if not isinstance(parameters, list):
         raise ValueError("action parameters must be a list")
-    param_vars, param_types, _ = typed_symbol_map(
-        parameters,
-        context="action parameters",
-    )
-    param_vars = [variable.lower() for variable in param_vars]
+    if any(not isinstance(value, str) or not value.startswith("?") for value in parameters):
+        raise ValueError("action parameters must be untyped variables")
+    param_vars = [variable.lower() for variable in parameters]
+    if len(set(param_vars)) != len(param_vars):
+        raise ValueError("duplicate action parameter")
     precondition = parse_sexp(precondition_text)
     effect = parse_sexp(effect_text)
     usage = {variable: [] for variable in param_vars}
@@ -186,13 +185,11 @@ def canonical_signature(
             children = [canon(child) for child in node[1:]]
         return "(" + " ".join([head, *children]) + ")"
 
-    ordered_types = tuple(param_types[variable] for variable in ordered_vars)
     signature = (
-        f"arity={len(param_vars)} | types={ordered_types} | "
+        f"arity={len(param_vars)} | "
         f"pre={canon(precondition)} | eff={canon(effect)}"
     )
-    parameter_types = tuple(param_types[variable] for variable in param_vars)
-    return len(param_vars), signature, parameter_types
+    return len(param_vars), signature
 
 
 def find_domain_files(root_dir: Path) -> list[Path]:
@@ -228,19 +225,7 @@ def parse_domain_file(domain_path: Path):
     try:
         text = domain_path.read_text(encoding="utf-8")
         source = str(domain_path)
-        domain = parse_sexp(remove_comments(text))
-        type_sections = [
-            section
-            for section in domain[2:]
-            if isinstance(section, list)
-            and section
-            and str(section[0]).lower() == ":types"
-        ]
-        if len(type_sections) > 1:
-            raise ValueError("重复 :types 块")
-        type_items = type_sections[0][1:] if type_sections else []
-        type_parents = TypeHierarchy.from_declaration(type_items).parents
-        type_order = list(type_parents)
+        validate_untyped_pddl(text)
 
         predicates = []
         pred_start = find_token(text, "(:predicates")
@@ -295,10 +280,7 @@ def parse_domain_file(domain_path: Path):
             ):
                 raise ValueError(f"无法解析 predicate: {expr}")
             name = declaration[0]
-            argument_names, _, _ = typed_symbol_map(
-                declaration[1:],
-                context=f"predicate {name}",
-            )
+            argument_names = declaration[1:]
             predicates.append(
                 PredicateItem(
                     name=name,
@@ -356,7 +338,7 @@ def parse_domain_file(domain_path: Path):
                 field_end = find_matching_paren(clean_action, field_start)
                 fields[keyword] = clean_action[field_start : field_end + 1].strip()
 
-            param_arity, signature, parameter_types = canonical_signature(
+            param_arity, signature = canonical_signature(
                 fields[":parameters"],
                 fields[":precondition"],
                 fields[":effect"],
@@ -366,17 +348,16 @@ def parse_domain_file(domain_path: Path):
                     name=action_name,
                     param_arity=param_arity,
                     signature=signature,
-                    block_text=action_block,
+                    block_text=format_action_conditions(action_block),
                     leading_comments=leading_comments,
                     sources=[source],
-                    parameter_types=parameter_types,
                 )
             )
             position = action_end + 1
 
-        return True, source, predicates, actions, (type_order, type_parents), ""
+        return True, source, predicates, actions, ""
     except Exception as error:
-        return False, str(domain_path), [], [], ([], {}), str(error)
+        return False, str(domain_path), [], [], str(error)
 
 
 def merge_predicates(predicates: list[PredicateItem]) -> list[PredicateItem]:
@@ -485,8 +466,6 @@ def merge_actions(actions: list[ActionItem]) -> list[tuple[str, ActionItem]]:
 
 
 def write_outputs(
-    type_order: list[str],
-    type_parents: dict[str, str],
     predicates: list[PredicateItem],
     actions: list[tuple[str, ActionItem]],
     domain_name: str,
@@ -495,8 +474,7 @@ def write_outputs(
 ) -> None:
     lines = [
         f"(define (domain {domain_name})",
-        "  (:requirements :strips :typing :negative-preconditions :equality)",
-        "  (:types " + " ".join(render_typed_symbols(type_order, type_parents)) + ")",
+        "  (:requirements :strips :negative-preconditions :equality)",
         "  (:predicates",
     ]
 
@@ -557,7 +535,6 @@ def main() -> None:
     action_index: dict[
         tuple[str, str], tuple[ActionItem, set[str]]
     ] = {}
-    combined_type_parents: dict[str, str] = {}
     raw_predicate_count = 0
     raw_action_count = 0
     parsed_count = 0
@@ -567,7 +544,7 @@ def main() -> None:
         max_workers=min(MAX_WORKERS, len(domain_files))
     ) as executor:
         results = executor.map(parse_domain_file, domain_files, chunksize=50)
-        for ok, path, predicates, actions, type_info, error in results:
+        for ok, path, predicates, actions, error in results:
             if not ok:
                 skipped_count += 1
                 print(f"[WARN] 跳过解析失败文件: {path}")
@@ -575,19 +552,6 @@ def main() -> None:
                 continue
 
             parsed_count += 1
-            type_order, type_parents = type_info
-            for type_name in type_order:
-                parent = type_parents[type_name]
-                if (
-                    type_name in combined_type_parents
-                    and combined_type_parents[type_name] != parent
-                ):
-                    raise ValueError(
-                        f"type parent conflict for {type_name}: "
-                        f"{combined_type_parents[type_name]} / {parent}"
-                    )
-                combined_type_parents[type_name] = parent
-
             raw_predicate_count += len(predicates)
             for item in predicates:
                 key = (item.name.lower(), item.arity)
@@ -630,9 +594,6 @@ def main() -> None:
     predicate_arity_renames = resolve_predicate_arity_collisions(
         all_predicates, all_actions
     )
-    hierarchy = TypeHierarchy(combined_type_parents)
-    for type_name in combined_type_parents:
-        hierarchy.ancestors(type_name)
     merged_predicates = merge_predicates(all_predicates)
     merged_actions = merge_actions(all_actions)
 
@@ -645,8 +606,6 @@ def main() -> None:
     ]
 
     write_outputs(
-        list(combined_type_parents),
-        combined_type_parents,
         merged_predicates,
         merged_actions,
         DATASET,

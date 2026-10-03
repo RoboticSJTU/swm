@@ -79,7 +79,7 @@ AgiBot、BridgeData 及同类数据集，但不要求它们使用相同的对象
 | scope | 当前选中哪些数据根、任务、episode 与 round；哪些明确排除 |
 | round policy | 最大有效 round 的定义；缺 `domain/problem/plan/kf_actions` 时的处理 |
 | artifacts | domain、problem、plan、plan_nl、kf_actions、group、图像、日志的位置 |
-| PDDL profile | `:requirements`、typed/unary 类型风格、equality 支持、使用的 solver |
+| PDDL profile | `:requirements`、一元类别谓词格式、equality 支持、使用的 solver |
 | equivalence oracle | 任务等价的 instruction、kf、图像与人工复核准则 |
 | aggregate outputs | 需要重建的 unified domain、source mapping、catalog、JSON 字段 |
 | exclusion policy | 缺文件、解析失败、证据冲突、不可唯一绑定时怎样隔离 |
@@ -191,7 +191,7 @@ unified/source mapping 摘要。清洗后必须解释这些值的变化。
 ### 4.1 分类与一致性
 
 先区分 type/object、role、configuration、availability、result、spatial relation 和其他 relation。
-同一概念在 typed 和 unary type predicate 中可以跨数据集映射，但不得为“统一外观”改写目标本体。
+对象类别统一使用一元类别谓词；跨数据集映射不得为“统一外观”改写目标本体。
 
 所有批次必须满足：
 

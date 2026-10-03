@@ -14,7 +14,7 @@ from swm.pddl.strips import (
     parse_problem_model,
 )
 from swm.pddl.strips import parse_problem as parse_strips_problem
-from swm.pddl.typing import TypeHierarchy, typed_symbol_map
+from swm.pddl.strips import parse_symbols, validate_untyped_pddl
 
 Literal = tuple[str, ...]
 
@@ -45,7 +45,7 @@ TOKEN_ALIASES = {
     "outlet": "socket",
     "tap": "faucet",
 }
-TYPE_ALIASES = {
+CATEGORY_ALIASES = {
     **TOKEN_ALIASES,
     "dish_rack": "rack",
     "water_bottle": "bottle",
@@ -84,19 +84,13 @@ class ParsedProblem:
     objects: frozenset[str]
     positive_init: frozenset[Literal]
     negative_init: frozenset[Literal]
-    object_types: dict[str, str] = field(default_factory=dict)
-    type_hierarchy: TypeHierarchy = field(default_factory=TypeHierarchy.object_only)
 
     @cached_property
     def unary_roles(self) -> dict[str, frozenset[str]]:
         roles: dict[str, set[str]] = {obj: set() for obj in self.objects}
-        for obj, type_name in self.object_types.items():
-            for ancestor in self.type_hierarchy.ancestors(type_name):
-                if ancestor != "object":
-                    roles.setdefault(obj, set()).add(_canonical_type(ancestor))
         for literal in self.positive_init:
             if len(literal) == 2 and literal[0] not in IGNORED_UNARY_PREDICATES:
-                roles.setdefault(literal[1], set()).add(_canonical_type(literal[0]))
+                roles.setdefault(literal[1], set()).add(_canonical_category(literal[0]))
         return {obj: frozenset(values) for obj, values in roles.items()}
 
 
@@ -134,10 +128,10 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def _canonical_type(value: str) -> str:
+def _canonical_category(value: str) -> str:
     normalized = "_".join(_tokenize(value))
-    if normalized in TYPE_ALIASES:
-        return TYPE_ALIASES[normalized]
+    if normalized in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[normalized]
     tokens = [TOKEN_ALIASES.get(token, token) for token in _tokenize(value)]
     return "_".join(tokens)
 
@@ -214,38 +208,10 @@ def parse_problem_text(text: str, domain_text: str | None = None) -> ParsedProbl
             "problem must contain one :init and at most one :objects section"
         )
 
-    hierarchy = TypeHierarchy.object_only()
+    validate_untyped_pddl(text)
     if domain_text is not None:
-        domain = _parse_sexpr(domain_text)
-        type_sections = [
-            item
-            for item in domain[1:]
-            if isinstance(item, list) and item and item[0] == ":types"
-        ]
-        if len(type_sections) > 1:
-            raise ValueError("domain contains duplicate :types sections")
-        if type_sections:
-            hierarchy = TypeHierarchy.from_declaration(type_sections[0][1:])
-
-    if object_sections:
-        order, object_types, _ = typed_symbol_map(
-            object_sections[0][1:],
-            context=":objects",
-        )
-        objects = set(order)
-        if domain_text is None:
-            hierarchy = TypeHierarchy(
-                {
-                    type_name: "object"
-                    for type_name in set(object_types.values())
-                    if type_name != "object"
-                }
-            )
-        for type_name in object_types.values():
-            hierarchy.require(type_name, ":objects")
-    else:
-        objects = set()
-        object_types = {}
+        validate_untyped_pddl(domain_text)
+    objects = set(parse_symbols(object_sections[0][1:])) if object_sections else set()
     positive: set[Literal] = set()
     negative: set[Literal] = set()
     for expression in init_sections[0][1:]:
@@ -260,14 +226,10 @@ def parse_problem_text(text: str, domain_text: str | None = None) -> ParsedProbl
         argument for literal in positive | negative for argument in literal[1:]
     }
     objects.update(referenced)
-    for obj in referenced:
-        object_types.setdefault(obj, "object")
     return ParsedProblem(
         frozenset(objects),
         frozenset(positive),
         frozenset(negative),
-        object_types,
-        hierarchy,
     )
 
 
@@ -409,12 +371,12 @@ def _reference_context(
         candidate_actions = ground_plan(
             candidate_raw_plan,
             candidate_schemas,
-            candidate_problem_model.object_types,
+            candidate_problem_model.objects,
         )
         reference_actions = ground_plan(
             parse_plan(ground_truth_plan)[0],
             reference_schemas,
-            reference_problem_model.object_types,
+            reference_problem_model.objects,
         )
         candidate_goal = candidate_problem_model.goal_positive
         reference_initial = reference_problem_model.init_state
@@ -624,16 +586,16 @@ def implicit_running_device_start_conflicts(
     """
     try:
         schemas = parse_domain(predicted_domain)
-        object_types = None
+        objects = None
         if predicted_problem is not None:
-            object_types = parse_problem_model(
+            objects = parse_problem_model(
                 predicted_problem,
                 schemas,
-            ).object_types
+            ).objects
         actions = ground_plan(
             parse_plan(predicted_plan)[0],
             schemas,
-            object_types,
+            objects,
         )
     except (OSError, KeyError, NotImplementedError, ValueError):
         return []
@@ -672,7 +634,7 @@ def unfinished_started_process_conflicts(
         actions = ground_plan(
             parse_plan(predicted_plan)[0],
             schemas,
-            problem.object_types,
+            problem.objects,
         )
         initial_state = problem.init_state
         goal = problem.goal_positive

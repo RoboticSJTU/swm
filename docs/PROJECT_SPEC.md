@@ -166,16 +166,13 @@ PDDL domain 用于描述任务规划中的通用规则，包括：
 - 动作前置条件；
 - 动作执行效果。
 
-Domain 使用经典 typed PDDL：在 `:requirements` 中声明 `:typing`，通过
-`:types` 声明浅层类型体系，并为 predicate 参数和 action 参数标注类型。
-稳定对象类别由类型表达，不再同时作为一元类别 predicate 写入状态。
+Domain 不使用 `:types`、`:typing` 或带类型的声明。对象类别通过静态一元谓词
+表达，例如 `(cup ?x)`、`(drawer ?x)`；action 参数为普通变量列表，在
+precondition 中加入对应类别谓词以限制合法绑定。
 
-`open`、`closed`、`upright`、`clear`、`hand_free` 等状态，以及不能由稳定
-类别完整替代的能力或位置角色，仍保留为 predicate。共享关系可使用内置
-`object` 或有依据的共同父类型，避免把原本合法的对象绑定人为收窄。
-
-类型声明遵循 PDDL 分组语义，例如 `?a ?b - block`；未显式标注的符号默认为
-`object`。仅在任务语义确有需要时使用浅层继承。
+`open`、`closed`、`upright`、`clear`、`hand_free` 等状态仍使用谓词表达。
+precondition 和 effect 各写成一行；同一互斥状态转移相邻书写，effect
+先删除旧状态，再加入新状态，不按正负极性整体排序。
 
 ### 6.2 PDDL Problem
 
@@ -185,8 +182,8 @@ PDDL problem 用于描述当前具体任务，包括：
 - 场景初始状态；
 - 任务目标状态。
 
-`:objects` 为每个实例声明兼容类型。`:init` 只包含状态、角色和关系事实，
-不重复写入已由对象类型完整表达的类别事实。
+`:objects` 仅列出对象名称，不带类型标注。`:init` 包含一元类别事实及
+状态、角色和关系事实，例如 `(cup cup1)`。
 
 ---
 
@@ -234,13 +231,11 @@ Judge 的主要输入包括：
 - 从关键帧中提取的动作序列；
 - 当前轮 PDDL，以及可用时的 GT/reference PDDL。
 
-系统优先执行程序化符号检查，包括验证计划能否达到目标、检查对象和动作参数的
-类型兼容、检查明确的初始状态或任务契约冲突，以及判断 Candidate 是否可由
-reference 计划等价解释。对象角色同时读取 declared type 和仍保留的一元角色
-predicate；typed Candidate 与旧式一元类别 reference 可以通过统一的内部表示比较，
-但声明类型不会被当成动作效果或独立视觉证据。能够获得明确结论时直接通过或拒绝；
-无法确定时，再调用多模态 Judge 综合图像、指令、Candidate trace 和关键帧动作证据
-进行判断。
+系统优先执行程序化符号检查，包括验证对象声明、动作参数、一元类别前置条件、
+计划回放和目标满足情况，并检查明确的初始状态或任务契约冲突。对象角色从一元
+类别事实读取，Candidate 和 reference 均使用当前无类型声明格式。类别守卫是
+符号约束，不是独立视觉证据。无法确定时，再调用多模态 Judge 综合图像、指令、
+Candidate trace 和关键帧动作证据进行判断。
 
 多模态 Judge 重点检查：
 
@@ -394,10 +389,9 @@ Pick up the yellow block and place it into the red bowl.
 
 这些 ShareGPT 格式数据将用于后续视觉语言模型的监督微调。
 
-训练导出只读取已经完成类型一致性、重新求解、计划回放和任务等价验证的
-source round。导出过程保留 domain 的 `:types`、predicate/action 参数类型和
-problem 的 typed `:objects`，不会回写或删除源 PDDL；action、对象和类型符号保持
-源计划接口不变，并在导出后再次执行类型兼容、计划回放和目标验证。
+训练导出检查无类型声明格式、重新求解、计划回放和任务等价性。类别事实与
+类别前置条件按普通谓词保留，action 和对象名称保持计划接口不变。
+precondition 和 effect 各写成一行，并保留状态转移顺序。
 
 ---
 

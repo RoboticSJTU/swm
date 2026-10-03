@@ -6,9 +6,11 @@ from pathlib import Path
 
 from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
-from swm.pddl.judge import judge_pddl, latest_round_problem
+from swm.pddl.judge import judge_pddl
 from swm.pddl.strips import (
     assert_goals,
+    format_action_conditions,
+    validate_untyped_pddl,
     ground_plan,
     parse_domain,
     parse_plan,
@@ -22,7 +24,7 @@ STEP_SOURCE = "video"  # "video" or "steps_json"
 TASK_DOMAIN = "droid"
 
 PDDL_MODEL = "gpt-5.6-sol"
-ACTION_EXTRACTION_MODEL = "gemini-3.8-flash"
+ACTION_EXTRACTION_MODEL = "Qwen3.8-27B"
 JUDGE_MODEL = "gemini-3.8-flash"
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
@@ -196,7 +198,8 @@ def find_task_action_template(task_id: str) -> str:
         return ""
 
     domain_text = domain_path.read_text(encoding="utf-8")
-    lines = domain_text.splitlines()
+    validate_untyped_pddl(domain_text)
+    lines = format_action_conditions(domain_text).splitlines()
     first_action = next(
         (index for index, line in enumerate(lines) if "(:action" in line), None
     )
@@ -213,24 +216,7 @@ def find_task_action_template(task_id: str) -> str:
     action_reference = "\n\n".join(
         block.strip() for block in action_section.split("\n\n") if block.strip()
     )
-    type_match = re.search(r"\(\s*:types\b", domain_text, re.IGNORECASE)
-    if type_match is None:
-        return action_reference
-
-    depth = 0
-    type_end = None
-    for index in range(type_match.start(), len(domain_text)):
-        if domain_text[index] == "(":
-            depth += 1
-        elif domain_text[index] == ")":
-            depth -= 1
-            if depth == 0:
-                type_end = index + 1
-                break
-    if type_end is None:
-        raise ValueError(f"Unclosed :types section in {domain_path}")
-    type_context = domain_text[type_match.start() : type_end].strip()
-    return f"Type context:\n{type_context}\n\n{action_reference}"
+    return action_reference
 
 
 def _round_has_verified_plan(round_dir: Path) -> bool:
@@ -245,12 +231,17 @@ def _round_has_verified_plan(round_dir: Path) -> bool:
         judge = json.loads(judge_path.read_text(encoding="utf-8"))
         if judge.get("pass") is not True or not plan_path.read_text(encoding="utf-8").strip():
             return False
+        domain_text = domain_path.read_text(encoding="utf-8")
+        validate_untyped_pddl(domain_text)
+        validate_untyped_pddl(problem_path.read_text(encoding="utf-8"))
+        if format_action_conditions(domain_text) != domain_text:
+            return False
         schemas = parse_domain(domain_path)
         problem = parse_problem_model(problem_path, schemas)
         raw_plan, _ = parse_plan(plan_path)
         if not raw_plan:
             return False
-        plan = ground_plan(raw_plan, schemas, problem.object_types)
+        plan = ground_plan(raw_plan, schemas, problem.objects)
         final_state = rollout(problem.init_state, plan)
         assert_goals(
             final_state,
@@ -316,10 +307,6 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
     )
     retry_state = RetryState()
     planning_success = False
-    ground_truth_problem = latest_round_problem(
-        ROOT_DIR / "eval_results" / "gt" / task["dataset"] / task["task_id"]
-    )
-
     for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
         round_result = generate_pddl(
             generate_pddl_model_name=PDDL_MODEL,
@@ -352,7 +339,6 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
             predicted_domain=round_result["round_dir"] / "domain.pddl",
             predicted_problem=round_result["round_dir"] / "problem.pddl",
             pddl_plan=round_result["round_dir"] / "plan.txt",
-            ground_truth_problem=ground_truth_problem,
         )
         (round_result["round_dir"] / "judge.json").write_text(
             json.dumps(judge_out, ensure_ascii=False, indent=2),

@@ -4,114 +4,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from swm.pddl.typing import TypeHierarchy, typed_symbol_map
-
 Literal = tuple[str, ...]
-
-
-def normalize_domain_types(path: Path) -> bool:
-    """Remove redundant root declarations and repair grouped self-inheritance."""
-    text = path.read_text(encoding="utf-8")
-    tokens: list[tuple[str, int, int]] = []
-    for match in re.finditer(r";[^\n]*(?:\n|$)|[()]|[^()\s;]+", text):
-        value = match.group()
-        if not value.startswith(";"):
-            tokens.append((value, match.start(), match.end()))
-
-    depth = 0
-    section_start: int | None = None
-    type_sections: list[tuple[int, int]] = []
-    for index, (value, _, _) in enumerate(tokens):
-        if value == "(":
-            if (
-                depth == 1
-                and index + 1 < len(tokens)
-                and tokens[index + 1][0].lower() == ":types"
-            ):
-                section_start = index
-            depth += 1
-        elif value == ")":
-            depth -= 1
-            if section_start is not None and depth == 1:
-                type_sections.append((section_start, index))
-                section_start = None
-
-    # Leave malformed or duplicate sections untouched for the normal parser to reject.
-    if len(type_sections) != 1:
-        return False
-
-    start, end = type_sections[0]
-    items = tokens[start + 2 : end]
-    if any(value in {"(", ")"} for value, _, _ in items):
-        return False
-
-    groups: list[
-        tuple[
-            list[tuple[str, int, int]],
-            tuple[str, int, int] | None,
-            tuple[str, int, int] | None,
-        ]
-    ] = []
-    cursor = 0
-    while cursor < len(items):
-        dash = next(
-            (index for index in range(cursor, len(items)) if items[index][0] == "-"),
-            None,
-        )
-        if dash is None:
-            groups.append((items[cursor:], None, None))
-            break
-        if dash == cursor or dash + 1 >= len(items) or items[dash + 1][0] == "-":
-            return False
-        groups.append((items[cursor:dash], items[dash], items[dash + 1]))
-        cursor = dash + 2
-
-    # Redeclaring the built-in root below another type is a real error.
-    for names, _, parent in groups:
-        parent_name = parent[0].lower() if parent is not None else "object"
-        if parent_name != "object" and any(
-            name.lower() == "object" for name, _, _ in names
-        ):
-            return False
-
-    edits: list[tuple[int, int, str]] = []
-    for names, dash, parent in groups:
-        parent_name = parent[0].lower() if parent is not None else "object"
-        if parent_name == "object":
-            redundant = [token for token in names if token[0].lower() == "object"]
-            for _, token_start, token_end in redundant:
-                edits.append((token_start, token_end, ""))
-            if redundant and len(redundant) == len(names) and parent is not None:
-                edits.append((dash[1], dash[2], ""))
-                edits.append((parent[1], parent[2], ""))
-            continue
-
-        self_types = [
-            (index, token)
-            for index, token in enumerate(names)
-            if token[0].lower() == parent_name
-        ]
-        if not self_types:
-            continue
-        if len(self_types) != 1:
-            return False
-
-        index, self_type = self_types[0]
-        has_before = index > 0
-        has_after = index + 1 < len(names)
-        if has_before:
-            edits.append((self_type[1], self_type[1], f"- {parent[0]} "))
-        if has_after:
-            edits.append((self_type[2], self_type[2], " - object"))
-        else:
-            edits.append((parent[1], parent[2], "object"))
-
-    if not edits:
-        return False
-    for edit_start, edit_end, replacement in sorted(edits, reverse=True):
-        text = text[:edit_start] + replacement + text[edit_end:]
-    path.write_text(text, encoding="utf-8")
-    return True
 
 
 @dataclass
@@ -122,27 +15,22 @@ class ActionSchema:
     pre_neg: set[Literal]
     add_eff: set[Literal]
     del_eff: set[Literal]
-    param_types: dict[str, str] = field(default_factory=dict)
-    explicit_param_types: set[str] = field(default_factory=set)
-    type_hierarchy: TypeHierarchy = field(default_factory=TypeHierarchy.object_only)
 
 
 class DomainSchemas(dict[str, ActionSchema]):
     def __init__(
         self,
         *args,
-        type_hierarchy: TypeHierarchy | None = None,
-        predicate_types: dict[str, tuple[str, ...]] | None = None,
+        predicate_arities: dict[str, int] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.type_hierarchy = type_hierarchy or TypeHierarchy.object_only()
-        self.predicate_types = predicate_types or {}
+        self.predicate_arities = predicate_arities or {}
 
 
 @dataclass(frozen=True)
 class ProblemModel:
-    object_types: dict[str, str]
+    objects: frozenset[str]
     init_state: set[Literal]
     init_negative: set[Literal]
     goal_positive: set[Literal]
@@ -159,30 +47,33 @@ class GroundAction:
     del_eff: set[Literal]
     equality_preconditions: set[Literal] = field(default_factory=set)
     inequality_preconditions: set[Literal] = field(default_factory=set)
-    parameter_types: tuple[str, ...] = ()
 
     def to_line(self) -> str:
         return f"({self.name} {' '.join(self.args)})"
 
 
 def parse_sexpr_file(path: Path):
-    text = re.sub(r";[^\n]*", "", path.read_text(encoding="utf-8")).lower()
+    return parse_sexpr(path.read_text(encoding="utf-8"), str(path))
+
+
+def parse_sexpr(text: str, context: str = "PDDL"):
+    text = re.sub(r";[^\n]*", "", text).lower()
     tokens = text.replace("(", " ( ").replace(")", " ) ").split()
     index = 0
 
     def parse():
         nonlocal index
         if index >= len(tokens):
-            raise ValueError(f"Unexpected EOF in {path}")
+            raise ValueError(f"Unexpected EOF in {context}")
 
         token = tokens[index]
         index += 1
         if token != "(":
             if token == ")":
-                raise ValueError(f"Unexpected ')' in {path}")
+                raise ValueError(f"Unexpected ')' in {context}")
             if token in {"when", "forall", "or", "exists", "imply"}:
                 raise NotImplementedError(
-                    f"Unsupported PDDL construct '{token}' in {path}"
+                    f"Unsupported PDDL construct '{token}' in {context}"
                 )
             return token
 
@@ -190,28 +81,73 @@ def parse_sexpr_file(path: Path):
         while index < len(tokens) and tokens[index] != ")":
             expression.append(parse())
         if index >= len(tokens):
-            raise ValueError(f"Missing ')' in {path}")
+            raise ValueError(f"Missing ')' in {context}")
         index += 1
         return expression
 
     root = parse()
     if index != len(tokens):
-        raise ValueError(f"Unparsed tokens remain in {path}")
+        raise ValueError(f"Unparsed tokens remain in {context}")
     return root
 
 
-def strip_types(items: list[str]) -> list[str]:
-    """Compatibility helper for historical experiment readers."""
-    result = []
-    skip_type = False
-    for item in items:
-        if item == "-":
-            skip_type = True
-        elif skip_type:
-            skip_type = False
+def validate_untyped_pddl(text: str) -> None:
+    """Reject typed declarations without rewriting the source model."""
+    def visit(node):
+        if not isinstance(node, list) or not node:
+            return
+        head = node[0]
+        if not isinstance(head, str):
+            raise ValueError("PDDL expression must start with a symbol")
+        if head == ":types" or (head == ":requirements" and ":typing" in node):
+            raise ValueError("Use unary category predicates instead of :types/:typing")
+        declarations = []
+        if head in {":parameters", ":objects", ":constants"}:
+            declarations = [node[1:]]
+        elif head == ":predicates":
+            declarations = [item[1:] for item in node[1:] if isinstance(item, list)]
+        elif head == ":action" and ":parameters" in node:
+            index = node.index(":parameters") + 1
+            if index >= len(node) or not isinstance(node[index], list):
+                raise ValueError("Action parameters must be a list")
+            declarations = [node[index]]
+        if any("-" in declaration for declaration in declarations):
+            raise ValueError("Typed declarations are not allowed; use unary category predicates")
+        for child in node:
+            visit(child)
+
+    root = parse_sexpr(text)
+    if not isinstance(root, list) or root[:1] != ["define"]:
+        raise ValueError("Expected a complete PDDL domain or problem")
+    visit(root)
+
+
+def format_action_conditions(text: str) -> str:
+    """Put each precondition/effect on one line without changing literal order."""
+    tokens = list(re.finditer(r";[^\n]*|[()]|[^()\s;]+", text))
+    edits = []
+    for index, token in enumerate(tokens):
+        if token.group().lower() not in {":precondition", ":effect"}:
+            continue
+        depth = 0
+        parts = []
+        for item in tokens[index + 1:]:
+            value = item.group()
+            if value.startswith(";"):
+                continue
+            if not parts and value != "(":
+                raise ValueError(f"{token.group()} must be a parenthesized expression")
+            parts.append(value)
+            depth += (value == "(") - (value == ")")
+            if depth == 0:
+                expression = " ".join(parts).replace("( ", "(").replace(" )", ")")
+                edits.append((token.end(), item.end(), " " + expression))
+                break
         else:
-            result.append(item)
-    return result
+            raise ValueError(f"Unclosed {token.group()} expression")
+    for start, end, replacement in reversed(edits):
+        text = text[:start] + replacement + text[end:]
+    return text
 
 
 def read_literals(expression) -> tuple[set[Literal], set[Literal]]:
@@ -246,76 +182,58 @@ def _sections(root, name: str) -> list[list]:
     ]
 
 
-def _validate_literal_types(
+def parse_symbols(items: list, *, variables: bool = False) -> list[str]:
+    pattern = r"\?[a-z][a-z0-9_-]*" if variables else r"[a-z][a-z0-9_-]*"
+    if any(not isinstance(item, str) or not re.fullmatch(pattern, item) for item in items):
+        raise ValueError("Expected untyped variables" if variables else "Expected untyped object names")
+    if len(set(items)) != len(items):
+        raise ValueError("Duplicate symbol in declaration")
+    return list(items)
+
+
+def _validate_literals(
     literals: set[Literal],
-    predicate_types: dict[str, tuple[str, ...]],
-    argument_types: dict[str, str],
-    hierarchy: TypeHierarchy,
+    predicate_arities: dict[str, int],
+    arguments: set[str] | frozenset[str],
     context: str,
 ) -> None:
     for literal in literals:
         if literal[0] == "=":
-            if len(literal) != 3:
-                raise ValueError(f"{context}: equality expects two arguments")
-            continue
-        if literal[0] not in predicate_types:
+            expected = 2
+        elif literal[0] not in predicate_arities:
             raise ValueError(f"{context}: undeclared predicate '{literal[0]}'")
-        expected = predicate_types[literal[0]]
-        if len(literal) - 1 != len(expected):
+        else:
+            expected = predicate_arities[literal[0]]
+        if len(literal) - 1 != expected:
             raise ValueError(
                 f"{context}: predicate '{literal[0]}' expects "
-                f"{len(expected)} arguments, got {len(literal) - 1}"
+                f"{expected} arguments, got {len(literal) - 1}"
             )
-        for argument, expected_type in zip(literal[1:], expected):
-            if argument not in argument_types:
+        for argument in literal[1:]:
+            if argument not in arguments:
                 raise ValueError(f"{context}: undeclared argument '{argument}'")
-            actual_type = argument_types[argument]
-            if not hierarchy.is_subtype(actual_type, expected_type):
-                raise ValueError(
-                    f"{context}: argument '{argument}' has type '{actual_type}', "
-                    f"expected '{expected_type}'"
-                )
 
 
 def parse_domain(path: Path) -> DomainSchemas:
-    normalize_domain_types(path)
-    root = parse_sexpr_file(path)
+    text = path.read_text(encoding="utf-8")
+    validate_untyped_pddl(text)
+    root = parse_sexpr(text, str(path))
     if not isinstance(root, list) or not root or root[0] != "define":
         raise ValueError(f"{path} is not a valid domain file")
-
-    type_sections = _sections(root, ":types")
-    if len(type_sections) > 1:
-        raise ValueError(f"{path}: duplicate :types section")
-    hierarchy = TypeHierarchy.from_declaration(type_sections[0][1:]) if type_sections else TypeHierarchy.object_only()
 
     predicate_sections = _sections(root, ":predicates")
     if len(predicate_sections) != 1:
         raise ValueError(f"{path}: expected exactly one :predicates section")
-    predicate_types: dict[str, tuple[str, ...]] = {}
+    predicate_arities: dict[str, int] = {}
     for declaration in predicate_sections[0][1:]:
         if not isinstance(declaration, list) or not declaration or not isinstance(declaration[0], str):
             raise ValueError(f"{path}: invalid predicate declaration")
-        params, param_types, _ = typed_symbol_map(
-            declaration[1:],
-            context=f"{path}: predicate {declaration[0]}",
-        )
-        if any(not param.startswith("?") for param in params):
-            raise ValueError(f"{path}: predicate parameters must be variables")
-        for type_name in param_types.values():
-            hierarchy.require(type_name, f"{path}: predicate {declaration[0]}")
-        signature = tuple(param_types[param] for param in params)
-        if declaration[0] in predicate_types:
-            if predicate_types[declaration[0]] != signature:
-                raise ValueError(
-                    f"{path}: conflicting predicate signature '{declaration[0]}'"
-                )
+        params = parse_symbols(declaration[1:], variables=True)
+        if declaration[0] in predicate_arities:
             raise ValueError(f"{path}: duplicate predicate '{declaration[0]}'")
-        predicate_types[declaration[0]] = signature
+        predicate_arities[declaration[0]] = len(params)
 
-    schemas = DomainSchemas(
-        type_hierarchy=hierarchy,
-        predicate_types=predicate_types,
-    )
+    schemas = DomainSchemas(predicate_arities=predicate_arities)
     for item in root[1:]:
         if not isinstance(item, list) or not item or item[0] != ":action":
             continue
@@ -334,22 +252,14 @@ def parse_domain(path: Path) -> DomainSchemas:
 
         if not isinstance(fields[":parameters"], list):
             raise ValueError(f"{path}: invalid parameters in action '{item[1]}'")
-        params, param_types, explicit_types = typed_symbol_map(
-            fields[":parameters"],
-            context=f"{path}: parameters of {item[1]}",
-        )
-        if any(not param.startswith("?") for param in params):
-            raise ValueError(f"{path}: action parameters must be variables")
-        for type_name in param_types.values():
-            hierarchy.require(type_name, f"{path}: parameters of {item[1]}")
+        params = parse_symbols(fields[":parameters"], variables=True)
 
         pre_pos, pre_neg = read_literals(fields[":precondition"])
         add_eff, del_eff = read_literals(fields[":effect"])
-        _validate_literal_types(
+        _validate_literals(
             pre_pos | pre_neg | add_eff | del_eff,
-            predicate_types,
-            param_types,
-            hierarchy,
+            predicate_arities,
+            set(params),
             f"{path}: action {item[1]}",
         )
         if (add_eff & del_eff):
@@ -361,9 +271,6 @@ def parse_domain(path: Path) -> DomainSchemas:
             pre_neg,
             add_eff,
             del_eff,
-            param_types,
-            explicit_types,
-            hierarchy,
         )
     return schemas
 
@@ -372,7 +279,9 @@ def parse_problem_model(
     path: Path,
     schemas: DomainSchemas | None = None,
 ) -> ProblemModel:
-    root = parse_sexpr_file(path)
+    text = path.read_text(encoding="utf-8")
+    validate_untyped_pddl(text)
+    root = parse_sexpr(text, str(path))
     if not isinstance(root, list) or not root or root[0] != "define":
         raise ValueError(f"{path} is not a valid problem file")
 
@@ -381,16 +290,7 @@ def parse_problem_model(
     goal_sections = _sections(root, ":goal")
     if len(object_sections) != 1 or len(init_sections) != 1 or len(goal_sections) != 1:
         raise ValueError(f"{path}: problem requires one :objects, :init, and :goal")
-    objects, object_types, _ = typed_symbol_map(
-        object_sections[0][1:],
-        context=f"{path}: objects",
-    )
-    if any(name.startswith("?") for name in objects):
-        raise ValueError(f"{path}: problem objects cannot be variables")
-
-    hierarchy = schemas.type_hierarchy if schemas is not None else TypeHierarchy.object_only()
-    for type_name in object_types.values():
-        hierarchy.require(type_name, f"{path}: objects")
+    objects = frozenset(parse_symbols(object_sections[0][1:]))
 
     init_state: set[Literal] = set()
     init_negative: set[Literal] = set()
@@ -409,15 +309,14 @@ def parse_problem_model(
     goal_positive, goal_negative = read_literals(goal_sections[0][1])
 
     if schemas is not None:
-        _validate_literal_types(
+        _validate_literals(
             init_state | init_negative | goal_positive | goal_negative,
-            schemas.predicate_types,
-            object_types,
-            hierarchy,
+            schemas.predicate_arities,
+            objects,
             str(path),
         )
     return ProblemModel(
-        object_types,
+        objects,
         init_state,
         init_negative,
         goal_positive,
@@ -455,7 +354,7 @@ def parse_plan(path: Path) -> tuple[list[tuple[str, list[str]]], list[str]]:
 def ground_plan(
     raw_plan: list[tuple[str, list[str]]],
     schemas: dict[str, ActionSchema],
-    object_types: dict[str, str] | None = None,
+    objects: frozenset[str] | None = None,
 ) -> list[GroundAction]:
     plan = []
     for name, args in raw_plan:
@@ -467,20 +366,10 @@ def ground_plan(
                 f"Arity mismatch for action {name}: "
                 f"expected {len(schema.params)}, got {len(args)}"
             )
-        if object_types is not None:
-            for parameter, argument in zip(schema.params, args):
-                if argument not in object_types:
-                    raise ValueError(
-                        f"Action {name} uses undeclared object '{argument}'"
-                    )
-                actual_type = object_types[argument]
-                expected_type = schema.param_types.get(parameter, "object")
-                if not schema.type_hierarchy.is_subtype(actual_type, expected_type):
-                    raise ValueError(
-                        f"Type mismatch for action {name}: object '{argument}' has "
-                        f"type '{actual_type}', parameter '{parameter}' expects "
-                        f"'{expected_type}'"
-                    )
+        if objects is not None:
+            for argument in args:
+                if argument not in objects:
+                    raise ValueError(f"Action {name} uses undeclared object '{argument}'")
 
         mapping = dict(zip(schema.params, args))
 
@@ -507,7 +396,6 @@ def ground_plan(
                 del_effects - add_effects,
                 equality_preconditions,
                 inequality_preconditions,
-                tuple(schema.param_types.get(parameter, "object") for parameter in schema.params),
             )
         )
     return plan

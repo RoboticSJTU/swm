@@ -130,23 +130,11 @@ def require_list(node: Node, context: str) -> list[Node]:
     return node
 
 
-def strip_typed_items(node: Node, context: str) -> list[str]:
+def read_names(node: Node, context: str) -> list[str]:
     items = require_list(node, context)
-    output: list[str] = []
-    index = 0
-    while index < len(items):
-        item = items[index]
-        if not isinstance(item, str):
-            raise ValueError(f"{context}: nested list in name sequence")
-        if item == "-":
-            raise ValueError(f"{context}: '-' has no preceding names")
-        output.append(item)
-        index += 1
-        if index < len(items) and items[index] == "-":
-            if index + 1 >= len(items) or not isinstance(items[index + 1], str):
-                raise ValueError(f"{context}: invalid type annotation")
-            index += 2
-    return output
+    if any(not isinstance(item, str) or item == "-" for item in items):
+        raise ValueError(f"{context}: expected untyped names")
+    return items
 
 
 def literal(node: Node, context: str) -> Literal:
@@ -211,6 +199,10 @@ def parse_domain(path: Path) -> DomainModel:
     root = require_list(parse_sexp(path.read_text(encoding="utf-8"), path), str(path))
     if not root or root[0] != "define":
         raise ValueError(f"{path}: expected (define ...)")
+    if any(isinstance(item, list) and item and (
+        item[0] == ":types" or item[0] == ":requirements" and ":typing" in item
+    ) for item in root[1:]):
+        raise ValueError(f"{path}: use unary category predicates instead of :types/:typing")
     name = named_declaration(root, "domain", path)
 
     predicate_sections = [
@@ -225,7 +217,7 @@ def parse_domain(path: Path) -> DomainModel:
         if not values or not isinstance(values[0], str):
             raise ValueError(f"{path}: invalid predicate declaration {index}")
         predicate_name = values[0]
-        arguments = strip_typed_items(values[1:], f"{path}: predicate {predicate_name}")
+        arguments = read_names(values[1:], f"{path}: predicate {predicate_name}")
         if any(not argument.startswith("?") for argument in arguments):
             raise ValueError(f"{path}: predicate '{predicate_name}' has a non-variable argument")
         if predicate_name in predicate_arities:
@@ -259,7 +251,7 @@ def parse_domain(path: Path) -> DomainModel:
                 f"{path}: action '{action_name}' fields: "
                 f"missing={sorted(missing_fields)}, unsupported={sorted(extra_fields)}"
             )
-        parameters = strip_typed_items(
+        parameters = read_names(
             fields[":parameters"], f"{path}: parameters of {action_name}"
         )
         if len(parameters) != len(set(parameters)):
@@ -333,7 +325,7 @@ def parse_problem(path: Path, domain: DomainModel) -> ProblemModel:
         )
 
     object_section = find_section(root, ":objects", path)
-    objects = strip_typed_items(object_section[1:], f"{path}: objects")
+    objects = read_names(object_section[1:], f"{path}: objects")
     if len(objects) != len(set(objects)):
         raise ValueError(f"{path}: duplicate object declaration")
     object_set = set(objects)

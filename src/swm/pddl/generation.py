@@ -3,6 +3,7 @@ from pathlib import Path
 
 from swm.llm import call_gpt_json
 from swm.pddl.planner import solve_pddl, summarize_solver_error
+from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 from swm.prompts import construct_prompt_with_feedback
 
 
@@ -81,6 +82,22 @@ def generate_pddl(
                 "PDDL output contract failed: expected non-empty string field(s): "
                 + ", ".join(invalid)
             ),
+        }
+
+    try:
+        validate_untyped_pddl(domain_str)
+        validate_untyped_pddl(problem_str)
+        domain_str = format_action_conditions(domain_str)
+    except (ValueError, NotImplementedError) as error:
+        domain_path.write_text(domain_str, encoding="utf-8")
+        problem_path.write_text(problem_str, encoding="utf-8")
+        return {
+            "ok": False,
+            "round_dir": round_dir,
+            "domain": domain_str,
+            "problem": problem_str,
+            "plan": "",
+            "solver_feedback": f"PDDL output contract failed: {error}",
         }
 
     domain_path.write_text(domain_str, encoding="utf-8")

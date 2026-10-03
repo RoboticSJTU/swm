@@ -526,7 +526,7 @@ def plan_reorder(
         goal_pos = problem.goal_positive
         goal_neg = problem.goal_negative
         raw_plan, comments = parse_plan(plan_path)
-        plan = ground_plan(raw_plan, schemas, problem.object_types)
+        plan = ground_plan(raw_plan, schemas, problem.objects)
 
         original_final = rollout(init_state, plan)
         assert_goals(

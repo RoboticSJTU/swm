@@ -4,11 +4,15 @@ import json
 import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
+from collections import Counter, defaultdict
 import traceback
 from swm.llm import call_gpt
-from swm.pddl.judge import judge_pddl, latest_round_problem
+from swm.pddl.judge import judge_pddl
 from swm.pddl.planner import solve_pddl
+from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
+from swm.simulator import verify_cross_domain_files
+from swm.simulator.alignment import VLMAlignmentAdvisor
+from swm.simulator.evaluation.gt_candidate import select_highest_round
 
 # =========================
 # 基本配置
@@ -146,6 +150,7 @@ def new_stats() -> dict:
         "judge_passed_tasks": [],
         "judge_fail": 0,
         "judge_failed_tasks": [],
+        "simulator": Counter(),
     }
 
 
@@ -280,8 +285,6 @@ def load_tasks() -> list[dict]:
 # 单任务生成
 # =========================
 def generate_one(task: dict):
-    task_name = task["task"]
-    episode_name = task["episode"]
     instruction = task["instruction"]
     image_path = task["image"]
 
@@ -308,6 +311,9 @@ def generate_one(task: dict):
 
         if eval_mode == "pddl":
             domain, problem = parse_pddl_output(output)
+            validate_untyped_pddl(domain)
+            validate_untyped_pddl(problem)
+            domain = format_action_conditions(domain)
 
             domain_file.write_text(domain, encoding="utf-8")
             problem_file.write_text(problem, encoding="utf-8")
@@ -368,13 +374,6 @@ def judge_one(task: dict):
             kf_actions=kf_actions,
             candidate_plan=candidate_plan,
             predicted_problem=(save_dir / "problem.pddl") if eval_mode == "pddl" else None,
-            ground_truth_problem=(
-                latest_round_problem(
-                    root_dir / "eval_results" / "gt" / task["dataset"] / task["episode"]
-                )
-                if eval_mode == "pddl"
-                else None
-            ),
             predicted_domain=(save_dir / "domain.pddl") if eval_mode == "pddl" else None,
             pddl_plan=(save_dir / "plan.txt") if eval_mode == "pddl" else None,
         )
@@ -391,10 +390,46 @@ def judge_one(task: dict):
         return task, False, False, str(e)
 
 
+def simulate_one(task: dict, alignment_advisor: VLMAlignmentAdvisor):
+    save_dir = get_save_dir(task)
+    result_file = save_dir / "simulator.json"
+    task_name = task["episode"] if task["flat"] else task["task"]
+    gt_dir = root_dir / "eval_results" / "gt" / task["dataset"] / task_name
+
+    try:
+        reference = select_highest_round(gt_dir)
+        result = verify_cross_domain_files(
+            reference / "domain.pddl",
+            reference / "problem.pddl",
+            save_dir / "domain.pddl",
+            save_dir / "problem.pddl",
+            save_dir / "plan.txt",
+            instruction=task["instruction"],
+            alignment_advisor=alignment_advisor,
+            image_path=task["image"],
+        )
+        status = result["result"]["status"]
+    except Exception as error:
+        status = "INPUT_ERROR"
+        result = {"result": {"status": status}, "error": f"{type(error).__name__}: {error}"}
+
+    result_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return task, status
+
+
 # =========================
 # 主流程
 # =========================
 def main():
+    advisor = (
+        VLMAlignmentAdvisor(
+            cache_dir=root_dir / ".cache" / "domain_logical_simulator" / "vlm_mapping_v5",
+            env_file=root_dir / ".env",
+            require_complete=True,
+        )
+        if eval_mode == "pddl"
+        else None
+    )
     all_tasks = load_tasks()
     total_all = len(all_tasks)
 
@@ -469,8 +504,31 @@ def main():
                 else:
                     print(f"❌ 生成失败: {info}")
 
+    if eval_mode == "pddl":
+        simulator_tasks = [task for task in all_tasks if generation_complete(task)]
+        print(f"阶段一完成，开始 Simulator 共 {len(simulator_tasks)} 个任务")
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(simulate_one, task, advisor) for task in simulator_tasks]
+            for i, future in enumerate(as_completed(futures), 1):
+                task, status = future.result()
+                stats[task["dataset"]]["simulator"][status] += 1
+                print(f"[Simulator {i}/{len(simulator_tasks)}] {task['dataset']}/{task['episode']}: {status}")
+
+        simulator_summary = {
+            dataset: {
+                status: stats[dataset]["simulator"][status]
+                for status in ("PASS", "FAIL", "UNKNOWN", "INPUT_ERROR")
+            }
+            for dataset in datasets
+        }
+        eval_root.mkdir(parents=True, exist_ok=True)
+        (eval_root / f"simulator_summary_{'_'.join(datasets)}.json").write_text(
+            json.dumps(simulator_summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     print("\n" + "=" * 80)
-    print(f"阶段一完成，开始 Judge 共 {len(judge_tasks)} 个任务")
+    print(f"开始 Judge 共 {len(judge_tasks)} 个任务")
 
     # =========================
     # 阶段二：先串行生成第一个 Judge，失败则立即退出
@@ -550,12 +608,8 @@ def main():
             set(s["failed_tasks"] + s["judge_failed_tasks"]),
             key=int,
         )
-        failed_all = len(failed_all_tasks)
-
         generation_rate = 100 * generation_success / dataset_total if dataset_total else 0.0
         judge_rate = 100 * judge_pass / dataset_total if dataset_total else 0.0
-        failed_rate = 100 * failed_all / dataset_total if dataset_total else 0.0
-
         block = [
             "=" * 80,
             f"数据集: {dataset_name}, 总任务数: {dataset_total}",
@@ -563,6 +617,14 @@ def main():
             f"通过: {judge_pass}, 率: {judge_pass}/{dataset_total} = {judge_rate:.1f}%, [{', '.join(s['judge_passed_tasks'])}]",
             f"未通过: [{', '.join(failed_all_tasks)}]",
         ]
+        if eval_mode == "pddl":
+            counts = s["simulator"]
+            block.append(
+                "Simulator: " + ", ".join(
+                    f"{status}={counts.get(status, 0)}"
+                    for status in ("PASS", "FAIL", "UNKNOWN", "INPUT_ERROR")
+                )
+            )
 
         report_lines.extend(block)
         report_lines.append("")

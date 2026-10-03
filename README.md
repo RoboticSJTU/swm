@@ -117,6 +117,13 @@ eval_results/<model>/<domain>/<task>/<episode>/
 | `scripts/clean_operator/validate_operator_cleanup.py` | 验证 operator 清洗结果 |
 | `scripts/clean_operator/audit_cleaned_operator_contracts.py` | 审计 operator contract 一致性 |
 
+PDDL 评测还会通过 `swm.simulator.verify_cross_domain_files` 使用 GT PDDL
+回放候选计划，结果单独写入 `simulator.json`；`judge.json` 保持原样。
+模拟器保留 `PASS`、`FAIL`、`UNKNOWN` 三态，缺少 GT 或无效输入记为
+`INPUT_ERROR`。PDDL 评测默认使用任务图像和 VLM 映射不同名称的物体，
+需要配置 `BOYUE_API_KEY`；映射服务或图像不可用时会明确报告输入错误，
+不会退回无映射模式。
+
 脚本大多采用“修改文件顶部配置后直接运行”的方式。例如：
 
 ```bash

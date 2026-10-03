@@ -1,73 +1,46 @@
-Convert the visible transitions in the current keyframe group into completed, task-relevant atomic actions.
-Infer changes only from the current images. Use the instruction and accepted history only to resolve labels, relevance, counts, and hand state; never use them to invent a transition.
+# Task
+Extract completed task-level manipulation events demonstrated in the current keyframe group, in order, with supporting adjacent frame pairs. Visual evidence determines occurrence and timing. The instruction and prior candidates guide attention and compatible identity resolution; they cannot override contrary evidence or predict later actions.
 
 # Inputs
+Instruction: {instruction}
+Current group: G{group} of G{last_group}
+Attached images, in order: {frame_order}
+Prior action candidates:
+{previous_actions}
 
-- Instruction: {instruction}
-- Previously accepted actions (context only; do not repeat or revise):
-{previous_history}
-- Current group: G{group} of G{last_group}. Ordered keyframes: {frame_order}
+# Pairwise evidence
+Return one `change` for every adjacent Ki->Ki+1. Record concrete before/after changes in actor, object/control, control ownership, direct support/containment, orientation, payload, surface, and device state.
 
-{retry_block}
+- Use the instruction as a checklist for every named object, relation, count, and effect, including subtle liquid, contents, residue, or device changes.
+- Keep identity stable through movement using visible attributes and position. Across a handoff, the payload remains the same object; do not rename it as its support/container.
+- Reconcile similar objects with the visible count and prior candidates. Do not create an extra instance or count one instance twice.
+- If control switches from object A to B at a shared boundary or next group, record how A's control ended and B's began.
+- Prefer the instruction's name only when visually compatible. If category is unnamed or uncertain, use stable visible color/form/package; never guess a product category.
+- Name the directly touched support/container as source or target, not an indirect surface. In successive stacking, each placed object becomes the next direct target; do not keep naming the lower base.
 
-# Procedure
+Record observations, not intentions or action labels. Prior candidates are context, not evidence.
 
-## 1. Record Changes
+# Actions
+Review all current images and changes. Use task-level actions such as Pick, Place, Open, Close, Fill, Pour, Wipe, Stir, Insert, Turn, Push, and Press.
 
-- Describe every adjacent pair K0->K1, K1->K2, and so on, in order.
-- For each visible change, name the object and hand, immediate source or target, support versus containment, and whether the object becomes held, remains held, is released, changes a task-relevant pose, or changes a device state.
-- For direct controls, name the control and visible motion direction.
-- Describe visible transitions even when they produce no task-relevant action.
+- For each changed object in `changes`, check whether it completes an action; put every completed acquisition, use, handoff, placement, or control effect in a separate Draft, even when two complete within one pair. Check counts, reversals, and final operations. Do not turn a changed pose into an action without a completed effect.
+- One continuous operation across pairs or a shared group boundary is one action unless stable release/reset followed by renewed actuation or a distinct new task result establishes another occurrence. Progress toward one result, such as rising fill during one uninterrupted pour, is not a new result. A no-result trial before the successful actuation is an incomplete fragment; keep the completed occurrence.
+- Pick completes only when the object itself loses direct support and moves under control; a grip while it stays supported is not Pick. Record a supported Grasp only when independent control persists through other task operations; otherwise contact before a Pick/Open/Press is incidental. If a visible source becomes empty and the object moves with the gripper, record Pick even when partly occluded. Place ends control on stable support/containment. Never hide an evidenced acquisition inside use or Place.
+- Before Pour, Brush, Insert, or another use, keep the object's completed acquisition as a separate Pick when it changed from supported to controlled; never absorb that Pick into the use.
+- A visible handoff that transfers control between hands is a completed action; preserve it between acquisition and placement.
+- If the episode begins with a task object already held and its first trajectory ends in placement, include its acquisition only when the instruction names it and a unique compatible source is visible; never invent the source.
+- If control switches to B while A is no longer held, include A's Place when its support is visible. If A leaves view and continued holding/handoff is impossible, use `Set down A` without inventing a location.
+- Track liquid, food, particles, residue, and other payload independently from its carrier. Once loading is established, carry it forward until observed unloading or contradiction. When payload is occluded, describe the carrier opening relative to the target mouth; nonvisibility alone is not evidence of no transfer. For an instructed transfer, alignment over the named target, opening-down orientation, then return upright or set-down establishes a small or sparsely sampled transfer unless incompatible geometry or later visible retained payload contradicts it. Keep the carrier's final Place separate. If later unloading proves payload was on a tool, include the earlier source-to-tool loading supported by source contact.
+- Repeated strokes, shakes, or dips with the same tool/material on the same target before another task result form one application action, not one action per motion. This merges only the application effect; keep its initial Pick and final Place/Set down separate.
+- Track doors and lids by whether the interior is exposed or covered, not by screen orientation. If a door/lid moves from fully exposing the interior to covering it before an exterior control is used, include the completed Close before that control action.
+- Count Press only with visible control motion or compatible device response. Mere panel contact is not Press.
+- Omit reaching, carrying, static holding, incidental contact, and unfinished motion. Pose or final state alone is insufficient. Return an empty array when nothing completes.
 
-## 2. Ground Claims
+Action text must be one concise sentence with the object/control and direct source/target when applicable. Never include G#, K#, img_#, or evidence text.
 
-- Read the instruction as a checklist of required objects and counts, specified hands, exact targets or spatial relations, final poses, and control or restoration states. Preserve these constraints in action wording when the images support the transition.
-- Visible evidence determines whether and when a change occurred. The instruction may resolve an ambiguous object label or goal only among visible candidates; it cannot supply an unseen action, handoff, target, or state change.
-- Resolve an uncertain local object label by its complete visible role. If it follows an unmet instruction role through a compatible acquisition, use, and target chain, prefer the instruction category. Do not relabel an object whose appearance or visible target clearly contradicts that role.
-- Do not equate screen side with left or right hand. Use the robot/anatomical arm identity and the instructed hand only to resolve a visually ambiguous side.
-- Preserve exact qualifiers and relations. Use `into` only when the target visibly contains the object's lower part; otherwise use `on`. State uncertainty when identity or relation remains unresolved.
-- For a stack, name the object directly beneath the moved object at that transition, not a lower shared base. Apply the same immediate-support rule when an object is picked up from a stack.
-- For `take/remove X out of Y`, completion requires X to end outside Y. Never describe the final effect as placing X back into Y.
-
-## 3. Select Actions
-
-- Output only completed effects that fulfill an instruction requirement or are causally necessary for one. Moving a blocker or cover, closing an overlapping compartment, and opening a required container are causal access effects even when that object is not named in the instruction. Ignore unrelated manipulation, reaching, contact alone, carrying, withdrawal, continuation, and unfinished motion. Do not exceed an instructed count.
-- Sparse frames may skip the carried pose. If adjacent frames show the same object supported at a source and then released at a different target, emit both pickup and placement; this is the only exception to the pickup rule below. If a group starts with a task object held after accepted history left that hand free, record the acquisition only when the current images or earlier visible state establish its source.
-- Keep acquisition, task use, release or placement, causal pose change, handoff, and distinct control-state changes separate when they complete in separate transitions.
-- Preserve the instruction's specific effect when visible; do not reduce wiping, stirring, pouring, stretching, locking, or another required effect to generic movement or placement.
-- Outside that sparse-transfer exception, a pickup requires the object to visibly leave its support and remain carried. Supported sliding, pushing, pulling, or contact is not pickup.
-- A placement normally requires the object to stop on or inside a support and the hand to visibly release and separate from it. Final-group exception: if this is G{last_group}, continued hand contact may complete a task effect only when the images themselves show the named target, object-target contact, and stable support or attachment. Ending in free space, merely moving toward the instructed goal, or naming a target only from the instruction is not completion. Do not apply this exception to a tool merely touching a payload target.
-- If K0 starts with a task object held and a later frame visibly releases it, output the completed placement even when acquisition occurred before this group. Do not repeat an effect already completed in accepted history.
-- Preserve a visible release needed before the same hand manipulates another task object. If the release is clear but its support is off-screen, use `Place [object] aside.`.
-- Treat a visible stream, indicator, latch, or other control changing from active to inactive as a completed stop/close effect even when the actuating finger is between sampled frames.
-- Keep a task-relevant pose or functional positioning only when it visibly enables later use or establishes a required final state. If release preserves a required pose established while held, include that pose in the placement wording.
-
-## 4. Separate Tools and Payloads
-
-- Track a held tool and its payload independently. A tool already loaded at K0 is a state, not a collection action.
-- Record collection only when an empty tool visibly gathers material. Record transfer when material visibly leaves the tool or the target visibly gains it.
-- When a loaded tool moves to a target, inspect payload transfer and tool support separately. Do not replace a payload transfer with placement of the tool, and do not call it tool placement unless the tool itself is visibly released and remains supported.
-- Name the held tool in every payload-transfer action, for example `Pour grounds into bowl with knife.`, so tool possession is not confused with holding the payload.
-
-## 5. Encode Hand State
-
-- `state_change` contains only `holding(hand,obj)` and `hand_free(hand)` changes, using lowercase snake_case.
-- Use only `left_hand` and `right_hand`. Use `right_hand` for an unlabeled single robot arm or gripper.
-- Pickup adds `holding` and removes `hand_free`; placement or insertion removes `holding` and adds `hand_free`. Use an empty list for actions that do not change what the hand holds.
-- When a held tool manipulates a payload, the hand continues holding the tool, so the payload action has an empty `state_change`.
-
-# Output Contract
-
-Return exactly this JSON object and no extra fields:
+# Output
+Return only:
 {{
-  "changes": "K0->K1: ... K1->K2: ...",
-  "actions": [
-    {{
-      "action": "Pick up cup from table.",
-      "state_change": [
-        "+ holding(right_hand,cup)",
-        "- hand_free(right_hand)"
-      ]
-    }}
-  ]
+  "changes": [{{"pair": "K0->K1", "change": "..."}}],
+  "actions": [{{"action": "Pick up the spoon from the red bowl.", "evidence": ["K0->K1"]}}]
 }}
