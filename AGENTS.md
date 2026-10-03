@@ -1,21 +1,14 @@
-# Project Working Style
+# Project Instructions
 
-Prefer minimal, direct, and easy-to-understand solutions.
+## Working Principles
 
-- Add only what is necessary. Prefer local changes over new abstractions, helpers, configuration, parameters, files, or pipeline stages.
-- Keep changes scoped to the request and preserve existing simple patterns. Do not generalize for hypothetical future needs.
-- Keep code, pipelines, and prompts as simple as possible. Add complexity only when a concrete failure demonstrates the need.
-
-## Mandatory Optimization Principles
-
-1. **Reason from first principles.** Prioritize identifying the core bottlenecks that truly affect accuracy and addressing systemic problems.
-2. **Keep the pipeline simple.** Do not keep adding modules, branches, or complex logic to fix a small number of errors.
-3. **Keep prompts concise, clean, and general.** Include only necessary, broadly applicable rules.
-4. **No case-by-case patches.** Do not add special-case rules for specific tasks, specific objects, or a handful of failure cases to improve test-set scores.
+1. **Find the main bottleneck.** Use evidence and first principles to identify the constraint whose resolution most advances the goal and eases other problems. Reassess when blocked or evidence changes; verify the goal at completion.
+2. **Make the smallest effective change.** Focus effort on that bottleneck, handle secondary issues as needed, and stay within the requested scope. Prefer local edits and existing simple patterns.
+3. **Keep solutions simple and general.** Keep code, pipelines, and prompts concise; add complexity only for a demonstrated need. Fix root causes without speculative abstractions or special-case patches for specific tasks, objects, or test-set scores.
+4. **Explain only what matters.** Lead with the main takeaway, then the core mechanism and necessary evidence. Match depth to the request, including paper and module explanations; avoid incidental details, exhaustive lists, and repetition.
 
 ## PDDL Artifact Consistency
 
-- After changing any `domain.pddl` or `problem.pddl`, solve the modified PDDL again and overwrite the corresponding `plan.txt` with the newly generated plan.
-- The new `plan.txt` must be logically equivalent to the episode's `kf_actions.txt`, i.e., it must accomplish the same task. Otherwise, the PDDL modification is invalid.
-- A PDDL change is complete only after solving succeeds and task equivalence is verified. Never manually rename actions in a stale plan.
-- Preserve the requested round scope when regenerating plans; do not update older rounds when only the maximum round is in scope.
+- After changing `domain.pddl` or `problem.pddl`, re-solve it and overwrite the corresponding `plan.txt` with the generated plan. Never manually rename actions in a stale plan.
+- A PDDL change is valid and complete only when solving succeeds and the new plan is verified to accomplish the same task as the episode's `kf_actions.txt`.
+- Regenerate only the requested rounds; when only the maximum round is in scope, leave older rounds untouched.

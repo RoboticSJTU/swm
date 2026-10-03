@@ -3,18 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from swm.llm import call_gpt_json
-from swm.pddl.init_state_precheck import (
-    implicit_running_device_start_conflicts,
-    unfinished_started_process_conflicts,
-)
 from swm.pddl.strips import (
-    goals_satisfied,
     ground_plan,
     parse_domain,
     parse_plan,
-    parse_problem_model,
     parse_sexpr_file,
-    rollout,
 )
 
 
@@ -77,10 +70,7 @@ def _evaluated_symbolic_trace(
         if not raw_plan:
             return "Candidate trace contains zero actions."
         schemas = parse_domain(predicted_domain)
-        objects = None
-        if isinstance(predicted_problem, Path):
-            objects = parse_problem_model(predicted_problem, schemas).objects
-        actions = ground_plan(raw_plan, schemas, objects)
+        actions = ground_plan(raw_plan, schemas)
         source_actions = {
             node[1]: dict(zip(node[2::2], node[3::2]))
             for node in parse_sexpr_file(predicted_domain)[2:]
@@ -147,57 +137,10 @@ def judge_pddl(
     capture: dict | None = None,
 ):
     candidate_plan = candidate_plan.strip()
-    if not candidate_plan:
-        raise ValueError("candidate_plan must be non-empty")
-
-    if all(isinstance(source, Path) for source in (predicted_domain, predicted_problem, pddl_plan)):
-        try:
-            schemas = parse_domain(predicted_domain)
-            problem = parse_problem_model(predicted_problem, schemas)
-            raw_plan = parse_plan(pddl_plan)[0]
-            if not raw_plan:
-                failure = "Candidate PDDL plan contains zero actions."
-            else:
-                actions = ground_plan(raw_plan, schemas, problem.objects)
-                final_state = rollout(problem.init_state, actions)
-                failure = None
-        except (OSError, KeyError, NotImplementedError, TypeError, ValueError) as error:
-            failure = f"Candidate PDDL plan is invalid: {error}"
-        if failure is None and not goals_satisfied(
-            final_state, problem.goal_positive, problem.goal_negative
-        ):
-            failure = "Candidate PDDL plan does not satisfy its own goal."
-        if failure is not None:
-            if capture is not None:
-                capture["decision_source"] = "candidate_symbolic_validation"
-            return {"reasoning": failure, "pass": False, "feedback": failure}
-
-        conflicts = unfinished_started_process_conflicts(
-            predicted_domain, predicted_problem, pddl_plan
-        )
-        if conflicts:
-            failure = "; ".join(conflicts)
-            if capture is not None:
-                capture["decision_source"] = "started_process_validation"
-            return {
-                "reasoning": "The Candidate leaves a task-started process active: " + failure,
-                "pass": False,
-                "feedback": "Stop the started process before completion. " + failure,
-            }
-
-    findings = []
-    if isinstance(predicted_domain, Path) and isinstance(pddl_plan, Path):
-        findings = [
-            f"- Device: {conflict}"
-            for conflict in implicit_running_device_start_conflicts(
-                predicted_domain, pddl_plan, predicted_problem
-            )
-        ]
     prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
     prompt = prompt_path.read_text(encoding="utf-8").format(
         instruction=instruction,
         kf_actions=kf_actions,
-        programmatic_findings="\n".join(findings) if findings else "None.",
         evaluated_symbolic_trace=_evaluated_symbolic_trace(
             candidate_plan, predicted_domain, pddl_plan, predicted_problem
         ),

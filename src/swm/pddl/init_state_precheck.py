@@ -572,56 +572,6 @@ def compare_initial_states(
     return PrecheckResult("defer", reason, contradictions, unmapped)
 
 
-def implicit_running_device_start_conflicts(
-    predicted_domain: Path,
-    predicted_plan: Path,
-    predicted_problem: Path | None = None,
-) -> list[str]:
-    """Reject a running-device use that instead starts the device from off.
-
-    An action explicitly named as using a running device cannot require that
-    same device to be off and make it on.  Starting the device is an
-    independently meaningful state transition, not an inherent effect of the
-    already-running use.
-    """
-    try:
-        schemas = parse_domain(predicted_domain)
-        objects = None
-        if predicted_problem is not None:
-            objects = parse_problem_model(
-                predicted_problem,
-                schemas,
-            ).objects
-        actions = ground_plan(
-            parse_plan(predicted_plan)[0],
-            schemas,
-            objects,
-        )
-    except (OSError, KeyError, NotImplementedError, ValueError):
-        return []
-
-    conflicts = []
-    for action in actions:
-        if "running" not in _tokenize(action.name):
-            continue
-        off_devices = {
-            literal[1]
-            for literal in action.pre_pos
-            if len(literal) == 2 and literal[0] == "is_off"
-        }
-        on_devices = {
-            literal[1]
-            for literal in action.add_eff
-            if len(literal) == 2 and literal[0] == "is_on"
-        }
-        for device in sorted(off_devices & on_devices):
-            conflicts.append(
-                f"action {action.to_line()} claims to use running {device} but "
-                f"requires it off and starts it as an effect"
-            )
-    return conflicts
-
-
 def unfinished_started_process_conflicts(
     predicted_domain: Path,
     predicted_problem: Path,

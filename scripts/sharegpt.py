@@ -28,12 +28,14 @@ from swm.pddl.strips import (
 )
 
 MODEL_NAME = "gpt-5.6-sol"
+ROBOT_CONFIGURATION = "single-arm"
+TASK_DOMAINS = ["human", "human_aug"]
+
 # ROBOT_CONFIGURATION = "single-arm"
-# TASK_DOMAINS = ["human", "human_aug"]
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
-ROBOT_CONFIGURATION = "dual-arm"
-TASK_DOMAINS = ["agibot", "agibot_aug"]
+# ROBOT_CONFIGURATION = "dual-arm"
+# TASK_DOMAINS = ["agibot", "agibot_aug"]
 PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION.replace("-", "_")
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"

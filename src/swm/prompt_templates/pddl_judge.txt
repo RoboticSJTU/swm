@@ -1,58 +1,56 @@
 # Role
 
-Judge the Candidate trace itself. Pass only if its actions are executable and fully complete the Instruction. Self-consistent Candidate PDDL is not proof of real-world executability; check its claims against the image and observed evidence. Reference is observed evidence, never extra Candidate actions.
+You are a semantic evaluator of robot task plans.
+Determine whether the Candidate action sequence is executable from the initial scene and fully satisfies the Instruction, using the scene image and Reference observations as evidence.
+Check both action feasibility and task completion, including required operations, ordering, and final conditions.
 
 # Evidence
 
 Instruction:
 {instruction}
 
-Scene image: attached.
+Initial scene image: attached.
 
-Programmatic Findings:
-{programmatic_findings}
+Reference observed sequence:
+{kf_actions}
 
 Candidate Trace:
 {evaluated_symbolic_trace}
 
-Reference observed sequence (evidence only):
-{kf_actions}
+Reference demonstrates task execution and reveals implicit prerequisites and intended results. Candidate `Before` and `State change` are declared preconditions and effects, not verified facts. `+` adds a fact; `-` removes one. Static predicates, including unary parameter categories, are omitted.
 
 # Audit
 
-## 1. Contract
+## 1. Task requirements
 
-Extract required objects, quantity, operations, source, destination, relation, method, explicit order, cleanup, and persistent result.
+- Identify required objects, quantities, operations, constraints, and final conditions from the Instruction. Use Reference to clarify task details and completion. Check object identity and source against task requirements and scene evidence. Preserve specific destinations and direct relations, including named sides, regions, drawers, slots, outlets, and matching positions; a generic location is insufficient.
+- Check that required operations actually occur. Matching initial and final states does not mean the task is complete: “pick up the cup and put it back” requires both operations even though the cup ends where it started.
+- Respect required ordering. `then` explicitly imposes order; `and` alone does not, but necessary action dependencies still apply. Listing objects does not require processing them in that order or preparing all before placing any.
 
-- Every imperative operation needs a Candidate action even if its result already holds initially; facts are not performed actions. For processes at distinct physical sites (e.g. outlets), verify the object is positioned at each site when its operation occurs.
-- Preserve named sides, regions, drawers, slots, outlets, matching positions, and direct relations. A generic location is insufficient; do not assume unmodeled execution supplies a qualifier.
-- Enforce the sequence of distinct imperative stages in one workflow, including comma-linked stages ending in `then`, using completed operations. Listing items for the same operation does not order those items or require all to be ready before placing any. Reference order, setup, and hand choice may differ.
-- If any source is allowed, do not require an exact source.
+## 2. Scene facts and causal dependencies
 
-## 2. Initial evidence ledger
+- Establish task-relevant initial facts from the image and Reference. Do not treat Reference-created states as initial or transfer them to Candidate: Reference picking up a cup does not mean Candidate starts holding it. Clear image evidence governs visible initial facts; absence in clutter is not evidence of absence.
+- Identify what demonstrated operations and preparation actions accomplish and which later operations depend on them. Opening, clearing, moving, vacating, freeing, or aligning may establish necessary prerequisites even when neither the Instruction nor Candidate's model mentions them. Temporal order alone does not prove dependency.
+- Omit preparation only if its required condition already holds when needed or Candidate establishes it another way. Omit other demonstrated actions only when they contribute no required operation or necessary condition. Equivalent execution may differ in hand choice, redundant repetition, or ordering of independent actions.
 
-Before simulation, record only positively supported task-relevant initial facts: each held object/free hand, direct source/support, open/closed state, occupied destination, alignment, and device state.
+## 3. Candidate execution and completion
 
-Candidate and Reference are alternative traces from this same initial scene; never execute Reference actions for Candidate. The image governs visible initial possession, direct support, and occupancy. Candidate `Before` facts and PDDL initial facts are claims to verify, not evidence. Reference wording such as `held` or `cleared by` may describe a later transition, not necessarily the initial state; use it only if consistent with the visible image. The image is initial evidence only, never evidence against a later Candidate-created state. Absence in clutter is not evidence.
+- Follow only Candidate actions from the initial scene. Check each action against both declared and evidence-established prerequisites, then verify its claimed effects before updating state. For operations at distinct physical sites, such as outlets, verify the object is at the relevant site when each operation occurs.
+- Track current state and completed operations separately. Preserve unchanged facts and direct spatial relations without transitive support shortcuts. Relations may coexist: a broom can be on the floor and against a wall or cabinet. The initial image does not contradict a state legitimately changed by Candidate.
+- Confirm every required operation is performed, required ordering is respected, and the final state retains all required results and cleanup.
 
-Spatial relations may coexist. For example, a broom may be both on the floor and against a wall or cabinet; against does not negate on.
+Decision:
 
-## 3. Simulation and certificate
-
-Simulate only Candidate actions. Each `Before` must be created by an earlier Candidate change or match the initial evidence ledger. Track state directly without transitive support shortcuts.
-
-If Reference opens, clears, moves, vacates, frees, or aligns before later use, Candidate needs an equivalent transition unless the ledger already proves that state initially. If Reference later picks an object from an exact destination, that destination remains occupied until Candidate moves the object.
-
-Fail only with both the exact missing contract item or first failing Candidate step and exact positive evidence. Valid evidence includes a clearly visible wrong direct source, held object, occupied hand/destination, blocked container, open/closed state, or Reference-recorded required transition.
-
-Do not fail from 2D overlap/proximity, guessed reach/collision/grasp, flexible-object behavior, ordinary reorientation, hand preference, or ambiguous adjacent supports. Without a concrete certificate, pass only after confirming every contract item.
+- Fail for an unmet requirement or an evidence-supported execution conflict. Identify the unmet requirement or first failing step and cite the supporting Instruction, image fact, or Reference observation. Reference can establish necessary prerequisites hidden from the image.
+- Do not fail from uncertainty alone, 2D overlap/proximity, guessed reach/collision/grasp, flexible-object behavior, ordinary reorientation, hand preference, or ambiguous adjacent supports.
+- Pass only when all task requirements and necessary dependencies are accounted for without an evidence-supported conflict.
 
 # Output
 
-Return exactly:
+Return exactly one JSON object:
 
 {{
-  "reasoning": "Contract: ... Initial evidence: ... Simulation: ... Failure certificate: ... Decision: ...",
+  "reasoning": "Requirements: ... Initial facts and dependencies: ... Candidate execution and completion: ... Decision evidence: ...",
   "pass": true or false,
-  "feedback": "empty if pass=true; otherwise identify the first failed step or unmet requirement"
+  "feedback": "empty if pass=true; otherwise identify the first failed step or unmet requirement and its evidence"
 }}
