@@ -1,10 +1,9 @@
-"""Export validated PDDL rounds and normalize each source PDDL layout."""
+"""Export approved PDDL rounds and normalize/prune their source PDDL."""
 
 import json
 import re
 import sys
 import tempfile
-from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -16,16 +15,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from swm.pddl.planner import solve_pddl
-from swm.pddl.strips import (
-    goals_satisfied,
-    ground_plan,
-    parse_domain,
-    parse_plan,
-    parse_problem_model,
-    rollout,
-    validate_untyped_pddl,
-)
+from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
 ROBOT_CONFIGURATION = "single-arm"
@@ -93,6 +83,8 @@ def predicate_name(expression):
 
 
 def format_domain(domain, problem, action_names, *, preserve_identity=False):
+    """裁剪动作和谓词；preserve_identity 仅控制是否保留 domain 名称。"""
+    action_heads = {":action", ":durative-action"}
     declarations = [
         predicate
         for section in domain[2:]
@@ -109,41 +101,34 @@ def format_domain(domain, problem, action_names, *, preserve_identity=False):
         name = expression_head(expression)
         if name in declared:
             referenced.add(name)
-        for child in expression[1:]:
+        for child in expression:
             collect(child)
 
     for section in domain[2:]:
         name = expression_head(section)
         if name != ":predicates" and (
-            name != ":action" or section[1].lower() in selected_names
+            name not in action_heads or section[1].lower() in selected_names
         ):
             collect(section)
     collect(problem)
 
-    if preserve_identity:
-        selected_actions = [
-            section
-            for section in domain[2:]
-            if expression_head(section) == ":action"
-        ]
-    else:
-        declarations = [
-            declaration
-            for declaration in declarations
-            if predicate_name(declaration) in referenced
-        ]
-        actions = {
-            section[1].lower(): section
-            for section in domain[2:]
-            if expression_head(section) == ":action"
-        }
-        selected_actions = [actions[name] for name in action_names]
+    declarations = [
+        declaration
+        for declaration in declarations
+        if predicate_name(declaration) in referenced
+    ]
+    actions = {
+        section[1].lower(): section
+        for section in domain[2:]
+        if expression_head(section) in action_heads
+    }
+    selected_actions = [actions[name] for name in action_names]
 
     domain_name = domain[1][1] if preserve_identity else PDDL_DOMAIN_NAME
     lines = [f"(define (domain {domain_name})"]
     for section in domain[2:]:
         name = expression_head(section)
-        if name == ":action":
+        if name in action_heads:
             continue
         if name == ":requirements":
             lines.append("  (:requirements " + " ".join(section[1:]) + ")")
@@ -157,7 +142,9 @@ def format_domain(domain, problem, action_names, *, preserve_identity=False):
     for action in selected_actions:
         if len(lines) > 1:
             lines.append("")
-        lines.append(f"  (:action {action[1]}")
+        if len(action[2:]) % 2:
+            raise ValueError(f"动作 {action[1]} 的字段不完整")
+        lines.append(f"  ({action[0]} {action[1]}")
         for key, value in zip(action[2::2], action[3::2]):
             lines.append(f"    {key} {pddl_line(value)}")
         lines.append("  )")
@@ -313,22 +300,6 @@ def inspect_init(problem):
     return [], []
 
 
-def validate_round(domain_path, problem_path, plan_path):
-    schemas = parse_domain(domain_path)
-    problem = parse_problem_model(problem_path, schemas)
-    raw_plan, _ = parse_plan(plan_path)
-    if not raw_plan:
-        raise ValueError("没有可用 action")
-    actions = ground_plan(raw_plan, schemas, problem.objects)
-    final_state = rollout(problem.init_state, actions)
-    if not goals_satisfied(
-        final_state,
-        problem.goal_positive,
-        problem.goal_negative,
-    ):
-        raise ValueError("plan 未达到 goal")
-
-
 # ============================================================
 # 生成 ShareGPT 数据
 # ============================================================
@@ -359,13 +330,17 @@ def prepare_round(item):
             round_dir / name
             for name in ("domain.pddl", "problem.pddl", "plan.txt")
         ]
-        domain_raw, problem_raw, plan_raw = (
-            path.read_text(encoding="utf-8") for path in source_paths
+        domain_raw, problem_raw = (
+            path.read_text(encoding="utf-8") for path in source_paths[:2]
         )
 
-        validate_untyped_pddl(domain_raw)
-        validate_untyped_pddl(problem_raw)
+        domain = parse_pddl(domain_raw)
         problem = parse_pddl(problem_raw)
+        raw_plan, _ = parse_plan(source_paths[2])
+        if not raw_plan:
+            raise ValueError("没有可用 action")
+        # 依赖已有评审和计划，只裁剪定义、调整排版，不重新求解或回放。
+        action_names = list(dict.fromkeys(name for name, _arguments in raw_plan))
         conflicts, hand_states = inspect_init(problem)
         review = None
         init_review = None
@@ -375,62 +350,21 @@ def prepare_round(item):
             review = "[INIT CONFLICT] " + message
             init_review = message
 
-        validate_round(*source_paths)
-        domain = parse_pddl(domain_raw)
         source_domain = format_domain(
             domain,
             problem,
-            [],
+            action_names,
             preserve_identity=True,
         ).strip() + "\n"
         source_problem = format_problem(problem, preserve_identity=True).strip() + "\n"
-        source_plan = plan_raw
-        source_changed = source_domain != domain_raw or source_problem != problem_raw
-        old_actions, _ = parse_plan(source_paths[2])
-        new_actions = old_actions
-        if source_changed:
-            with tempfile.TemporaryDirectory(prefix="sharegpt_source_pddl_") as directory:
-                temporary_dir = Path(directory)
-                temporary_domain = temporary_dir / "domain.pddl"
-                temporary_problem = temporary_dir / "problem.pddl"
-                temporary_domain.write_text(source_domain, encoding="utf-8")
-                temporary_problem.write_text(source_problem, encoding="utf-8")
-                if not solve_pddl(temporary_domain, temporary_problem):
-                    error = (temporary_dir / "error.log").read_text(encoding="utf-8")
-                    raise ValueError("PDDL 格式化后重新求解失败: " + error)
-                source_plan = (temporary_dir / "plan.txt").read_text(encoding="utf-8")
-                validate_round(
-                    temporary_domain,
-                    temporary_problem,
-                    temporary_dir / "plan.txt",
-                )
-                new_actions, _ = parse_plan(temporary_dir / "plan.txt")
-
-            old_steps = Counter((name, tuple(arguments)) for name, arguments in old_actions)
-            new_steps = Counter((name, tuple(arguments)) for name, arguments in new_actions)
-            if old_steps != new_steps:
-                raise ValueError("PDDL 格式化后的新 plan 与原 plan 动作不等价")
-
-        raw_plan = new_actions
-        if not raw_plan:
-            raise ValueError("没有可用 action")
-        # dict 保留 plan 首次出现顺序，同时去掉重复执行的 action 名。
-        action_names = list(dict.fromkeys(name for name, _arguments in raw_plan))
-        domain_text = format_domain(domain, problem, action_names)
         prepared = (
-            domain_text.strip() + "\n",
+            format_domain(domain, problem, action_names).strip() + "\n",
             format_problem(problem).strip() + "\n",
         )
 
-        with tempfile.TemporaryDirectory(prefix="sharegpt_pddl_") as directory:
-            export_paths = [Path(directory) / path.name for path in source_paths]
-            for path, text in zip(export_paths, (*prepared, source_plan)):
-                path.write_text(text, encoding="utf-8")
-            validate_round(*export_paths)
-
-        if source_changed:
-            atomic_write(source_paths[2], source_plan)
+        if source_problem != problem_raw:
             atomic_write(source_paths[1], source_problem)
+        if source_domain != domain_raw:
             atomic_write(source_paths[0], source_domain)
 
         if ROBOT_CONFIGURATION == "single-arm" and len(hand_states) > 1:

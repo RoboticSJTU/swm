@@ -1,20 +1,25 @@
-Given an instruction and image, generate complete PDDL files as a symbolic world model for high-level robotic planning.
+Given an instruction, an initial scene image, and a robot configuration, generate a compact, scene-grounded PDDL domain and problem for high-level robotic planning.
 
 Input
 - Instruction: {instruction}
-- Initial scene image
+- Initial scene image: attached
 - Robot configuration: {robot_configuration}
 
-Before writing PDDL, internally construct the task as a symbolic world model.
-1. Ground objects
-- Identify task-relevant objects from the image and instruction.
-2. Encode initial and goal states
-- Encode task-relevant facts from the image and instruction, including object types and states, spatial relations and action-enabling conditions.
-- Derive the required final facts as :goal from the image and instruction.
-3. Build causal transitions
-- Construct the causal action chain from :init to :goal, including intermediate actions needed to satisfy later action preconditions.
+Construct the task-relevant symbolic world model before writing PDDL.
 
-Output only in the following format
+1. Ground objects and the initial state
+- Identify task-relevant objects and their quantities, including tools, supports, obstacles, and hands.
+- Encode their categories, states, direct spatial relations, and hand occupancy in :init based on the image and the instruction's scene descriptions. Do not treat desired outcomes as initial facts or invent states to make the task solvable.
+
+2. Encode task requirements
+- Ground the instruction's required objects, operations, methods, ordering, and final conditions. Encode all required final conditions in :goal.
+
+3. Build causal state transitions
+- Construct a causal action chain from :init to :goal, including intermediate actions needed to satisfy later action preconditions.
+- Express each transition as an action schema whose preconditions capture what must hold before execution and whose effects capture its direct, task-relevant state changes.
+- Track these changes along the chain, ensuring that each action's preconditions hold in the current state and that the final state satisfies all goal conditions.
+
+Output only in the following format, without explanations or Markdown fences:
 <domain>
 [complete PDDL domain]
 </domain>

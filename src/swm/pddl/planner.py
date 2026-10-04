@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from swm.pddl.reorder import plan_reorder
-from swm.pddl.strips import validate_untyped_pddl
+from swm.pddl.strips import parse_sexpr, validate_untyped_pddl
 
 fast_downward_path = Path(__file__).parents[3] / "downward" / "fast-downward.py"
 _FAST_DOWNWARD_TIME_LIMIT_SECONDS = 60
@@ -163,7 +163,15 @@ def solve_pddl(domain_file, problem_file, *, reorder_plan=True, capture: dict | 
         "astar(lmcut())",
     ]
     try:
-        validate_untyped_pddl(domain_file.read_text(encoding="utf-8"))
+        domain_text = domain_file.read_text(encoding="utf-8")
+        requirements = next(
+            (section[1:] for section in parse_sexpr(domain_text)
+             if isinstance(section, list) and section[:1] == [":requirements"]),
+            [],
+        )
+        if ":universal-preconditions" in requirements:
+            cmd[-1] = "astar(blind())"
+        validate_untyped_pddl(domain_text)
         validate_untyped_pddl(problem_file.read_text(encoding="utf-8"))
         stdout, stderr = _run_fast_downward(cmd, domain_file.parent)
         if reorder_plan:

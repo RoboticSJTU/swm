@@ -71,7 +71,7 @@ def parse_sexpr(text: str, context: str = "PDDL"):
         if token != "(":
             if token == ")":
                 raise ValueError(f"Unexpected ')' in {context}")
-            if token in {"when", "forall", "or", "exists", "imply"}:
+            if token in {"when", "or", "exists", "imply"}:
                 raise NotImplementedError(
                     f"Unsupported PDDL construct '{token}' in {context}"
                 )
@@ -104,6 +104,10 @@ def validate_untyped_pddl(text: str) -> None:
         declarations = []
         if head in {":parameters", ":objects", ":constants"}:
             declarations = [node[1:]]
+        elif head == "forall":
+            if len(node) != 3 or not isinstance(node[1], list):
+                raise ValueError("Malformed universal condition")
+            declarations = [node[1]]
         elif head == ":predicates":
             declarations = [item[1:] for item in node[1:] if isinstance(item, list)]
         elif head == ":action" and ":parameters" in node:
@@ -157,6 +161,8 @@ def read_literals(expression) -> tuple[set[Literal], set[Literal]]:
         raise ValueError(f"Unexpected atom: {expression}")
     if not expression:
         raise ValueError("Empty logical expression")
+    if expression[0] == "forall":
+        raise NotImplementedError("Universal conditions are not supported by STRIPS plan reordering")
     if expression[0] == "and":
         positive = set()
         negative = set()

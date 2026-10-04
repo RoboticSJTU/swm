@@ -16,7 +16,7 @@ from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 
 
 # 只需要修改这里。
-DATASET = "human"
+DATASET = "human_aug"
 DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
 MAX_WORKERS = 20
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")

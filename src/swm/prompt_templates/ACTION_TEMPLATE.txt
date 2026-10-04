@@ -58,11 +58,11 @@
 :effect (and (not (in ?sp ?p)) (in ?sp ?s))
 )
 
-; Insert key ?k into drawer ?d with hand ?h.
-(:action insert_key_into_drawer
-:parameters (?h ?k ?d)
-:precondition (and (hand ?h) (key ?k) (drawer ?d) (holding ?h ?k))
-:effect (and (not (holding ?h ?k)) (hand_free ?h) (inserted ?k ?d))
+; Insert key ?k, held by hand ?h, into lock ?l of cabinet ?c.
+(:action insert_key_in_lock
+:parameters (?h ?k ?l ?c)
+:precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (holding ?h ?k) (lock_of ?l ?c))
+:effect (and (not (holding ?h ?k)) (hand_free ?h) (inserted ?k ?l))
 )
 
 ; Remove lid ?l from pot ?p to open the pot with hand ?h.
@@ -176,11 +176,18 @@
 :effect (and (not (closed ?k)) (open ?k))
 )
 
-; Lock drawer ?d with key ?k using hand ?h.
-(:action lock_drawer_with_key
-:parameters (?h ?d ?k)
-:precondition (and (hand ?h) (drawer ?d) (key ?k) (hand_free ?h) (closed ?d) (unlocked ?d) (inserted ?k ?d))
-:effect (and (not (unlocked ?d)) (locked ?d))
+; Turn key ?k already inserted in lock ?l to lock cabinet ?c with free hand ?h.
+(:action lock_cabinet_with_key
+:parameters (?h ?k ?l ?c)
+:precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (hand_free ?h) (inserted ?k ?l) (lock_of ?l ?c) (unlocked ?c))
+:effect (and (not (unlocked ?c)) (locked ?c))
+)
+
+; Turn key ?k already inserted in lock ?l to unlock cabinet ?c with free hand ?h.
+(:action unlock_cabinet_with_key
+:parameters (?h ?k ?l ?c)
+:precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (hand_free ?h) (inserted ?k ?l) (lock_of ?l ?c) (locked ?c))
+:effect (and (not (locked ?c)) (unlocked ?c))
 )
 
 ; Turn on microwave ?m to heat apple ?a inside with hand ?h.

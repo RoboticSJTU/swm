@@ -4,15 +4,14 @@ import json
 import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import Counter, defaultdict
+from collections import defaultdict
 import traceback
 from swm.llm import call_gpt
 from swm.pddl.judge import judge_pddl
 from swm.pddl.planner import solve_pddl
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
-from swm.simulator import verify_cross_domain_files
-from swm.simulator.alignment import VLMAlignmentAdvisor
-from swm.simulator.evaluation.gt_candidate import select_highest_round
+from swm.pddl.attribution import attribute_failure
+from swm.pddl.eval_report import render_dataset_report
 
 # =========================
 # 基本配置
@@ -21,6 +20,7 @@ root_dir = Path(__file__).resolve().parent.parent
 
 eval_model = "actor_hf"
 judge_model = "Qwen3.8-27B"  # Qwen3.8-27B
+attribution_model = "Qwen3.8-27B"
 ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_v2 unidomain
@@ -141,19 +141,6 @@ def generation_complete(task: dict) -> bool:
     )
 
 
-def new_stats() -> dict:
-    return {
-        "total": 0,
-        "generation_success": 0,
-        "failed_tasks": [],
-        "judge_pass": 0,
-        "judge_passed_tasks": [],
-        "judge_fail": 0,
-        "judge_failed_tasks": [],
-        "simulator": Counter(),
-    }
-
-
 def load_cached_status(task: dict):
     save_dir = get_save_dir(task)
     judge_file = save_dir / "judge.json"
@@ -161,7 +148,7 @@ def load_cached_status(task: dict):
 
     if judge_file.exists():
         result = json.loads(judge_file.read_text(encoding="utf-8"))
-        passed = bool(result["pass"]) if "pass" in result else False
+        passed = result.get("pass") is True
         return "judge", passed
 
     if error_file.exists():
@@ -311,12 +298,14 @@ def generate_one(task: dict):
 
         if eval_mode == "pddl":
             domain, problem = parse_pddl_output(output)
+            # 保留候选原文，语法错误也能进入后续 FD 归因。
+            domain_file.write_text(domain, encoding="utf-8")
+            problem_file.write_text(problem, encoding="utf-8")
+            plan_file.unlink(missing_ok=True)
             validate_untyped_pddl(domain)
             validate_untyped_pddl(problem)
             domain = format_action_conditions(domain)
-
             domain_file.write_text(domain, encoding="utf-8")
-            problem_file.write_text(problem, encoding="utf-8")
 
             if not solve_pddl(domain_file, problem_file):
                 return task, False, "pddl_unsolvable"
@@ -354,7 +343,7 @@ def judge_one(task: dict):
     try:
         if judge_file.exists():
             result = json.loads(judge_file.read_text(encoding="utf-8"))
-            passed = bool(result["pass"]) if "pass" in result else False
+            passed = result.get("pass") is True
             return task, True, passed, "cached"
 
         if image_path is None or not image_path.exists():
@@ -383,88 +372,83 @@ def judge_one(task: dict):
             encoding="utf-8",
         )
 
-        passed = bool(result["pass"]) if "pass" in result else False
+        passed = result.get("pass") is True
         return task, True, passed, "done"
 
     except Exception as e:
         return task, False, False, str(e)
 
 
-def simulate_one(task: dict, alignment_advisor: VLMAlignmentAdvisor):
-    save_dir = get_save_dir(task)
-    result_file = save_dir / "simulator.json"
-    task_name = task["episode"] if task["flat"] else task["task"]
-    gt_dir = root_dir / "eval_results" / "gt" / task["dataset"] / task_name
+def attribute_one(task: dict):
+    gt_dir = root_dir / "eval_results" / "gt" / task["dataset"]
+    if not task["flat"]:
+        gt_dir /= task["task"]
+    gt_dir /= task["episode"]
+    result = attribute_failure(
+        get_save_dir(task), gt_dir, task["instruction"], task["image"],
+        model=attribution_model, reasoning_effort="medium",
+    )
+    return task, result
 
-    try:
-        reference = select_highest_round(gt_dir)
-        result = verify_cross_domain_files(
-            reference / "domain.pddl",
-            reference / "problem.pddl",
-            save_dir / "domain.pddl",
-            save_dir / "problem.pddl",
-            save_dir / "plan.txt",
-            instruction=task["instruction"],
-            alignment_advisor=alignment_advisor,
-            image_path=task["image"],
+
+def write_summary(all_tasks: list[dict]) -> Path:
+    """Rebuild the report from saved task results, including attribution details."""
+    records = defaultdict(list)
+    for task in all_tasks:
+        save_dir = get_save_dir(task)
+        attribution_path = save_dir / "attribution.json"
+        result = None
+        if eval_mode == "pddl" and attribution_path.is_file():
+            try:
+                result = json.loads(attribution_path.read_text(encoding="utf-8"))
+                if not isinstance(result, dict):
+                    result = None
+            except (OSError, ValueError):
+                pass
+        identifier = str(number(task["episode"])) if task["flat"] else f"{task['task']}/{task['episode']}"
+        records[task["dataset"]].append({
+            "id": identifier, "directory": save_dir,
+            "solved": generation_complete(task), "passed": load_cached_status(task)[1],
+            "attribution": result,
+        })
+    blocks, attribution_summary = [], {}
+    for dataset in datasets:
+        block, counts = render_dataset_report(dataset, records[dataset], pddl=eval_mode == "pddl")
+        blocks.append(block)
+        attribution_summary[dataset] = counts
+    eval_root.mkdir(parents=True, exist_ok=True)
+    dataset_tag = "_".join(datasets)
+    report_path = eval_root / f"summary_{dataset_tag}.log"
+    report_text = "\n\n".join(blocks) + "\n"
+    report_path.write_text(report_text, encoding="utf-8")
+    if eval_mode == "pddl":
+        (eval_root / f"attribution_summary_{dataset_tag}.json").write_text(
+            json.dumps(attribution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
         )
-        status = result["result"]["status"]
-    except Exception as error:
-        status = "INPUT_ERROR"
-        result = {"result": {"status": status}, "error": f"{type(error).__name__}: {error}"}
-
-    result_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return task, status
+    print("\n" + report_text)
+    print(f"报告已保存到: {report_path}")
+    return report_path
 
 
 # =========================
 # 主流程
 # =========================
 def main():
-    advisor = (
-        VLMAlignmentAdvisor(
-            cache_dir=root_dir / ".cache" / "domain_logical_simulator" / "vlm_mapping_v5",
-            env_file=root_dir / ".env",
-            require_complete=True,
-        )
-        if eval_mode == "pddl"
-        else None
-    )
     all_tasks = load_tasks()
     total_all = len(all_tasks)
 
-    stats = defaultdict(new_stats)
     generation_tasks = []
     judge_tasks = []
     skipped = 0
 
     for task in all_tasks:
-        dataset_name = task["dataset"]
-        episode_name = task["episode"]
-        stats[dataset_name]["total"] += 1
+        cached_status, _ = load_cached_status(task)
 
-        cached_status, passed = load_cached_status(task)
-
-        if cached_status == "judge":
+        if cached_status in {"judge", "error"}:
             skipped += 1
-            stats[dataset_name]["generation_success"] += 1
-
-            if passed:
-                stats[dataset_name]["judge_pass"] += 1
-                stats[dataset_name]["judge_passed_tasks"].append(str(number(episode_name)))
-            else:
-                stats[dataset_name]["judge_fail"] += 1
-                stats[dataset_name]["judge_failed_tasks"].append(str(number(episode_name)))
-
-            continue
-
-        if cached_status == "error":
-            skipped += 1
-            stats[dataset_name]["failed_tasks"].append(str(number(episode_name)))
             continue
 
         if generation_complete(task):
-            stats[dataset_name]["generation_success"] += 1
             judge_tasks.append(task)
         else:
             generation_tasks.append(task)
@@ -493,39 +477,13 @@ def main():
             print(f"\n[生成 {i}/{generation_total}] {dataset_name}/{episode_name}")
 
             if ok:
-                stats[dataset_name]["generation_success"] += 1
                 judge_tasks.append(task)
                 print("✅ 可解")
             else:
-                stats[dataset_name]["failed_tasks"].append(str(number(episode_name)))
-
                 if info == "pddl_unsolvable":
                     print("⚠️ PDDL 不可解")
                 else:
                     print(f"❌ 生成失败: {info}")
-
-    if eval_mode == "pddl":
-        simulator_tasks = [task for task in all_tasks if generation_complete(task)]
-        print(f"阶段一完成，开始 Simulator 共 {len(simulator_tasks)} 个任务")
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = [executor.submit(simulate_one, task, advisor) for task in simulator_tasks]
-            for i, future in enumerate(as_completed(futures), 1):
-                task, status = future.result()
-                stats[task["dataset"]]["simulator"][status] += 1
-                print(f"[Simulator {i}/{len(simulator_tasks)}] {task['dataset']}/{task['episode']}: {status}")
-
-        simulator_summary = {
-            dataset: {
-                status: stats[dataset]["simulator"][status]
-                for status in ("PASS", "FAIL", "UNKNOWN", "INPUT_ERROR")
-            }
-            for dataset in datasets
-        }
-        eval_root.mkdir(parents=True, exist_ok=True)
-        (eval_root / f"simulator_summary_{'_'.join(datasets)}.json").write_text(
-            json.dumps(simulator_summary, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
 
     print("\n" + "=" * 80)
     print(f"开始 Judge 共 {len(judge_tasks)} 个任务")
@@ -549,12 +507,8 @@ def main():
             )
 
         if passed:
-            stats[dataset_name]["judge_pass"] += 1
-            stats[dataset_name]["judge_passed_tasks"].append(str(number(episode_name)))
             print("✅ Judge 通过")
         else:
-            stats[dataset_name]["judge_fail"] += 1
-            stats[dataset_name]["judge_failed_tasks"].append(str(number(episode_name)))
             print("⚠️ Judge 未通过")
 
     # 首个 Judge 成功说明在线服务可用，再并发处理其余任务。
@@ -572,13 +526,9 @@ def main():
 
             if ok:
                 if passed:
-                    stats[dataset_name]["judge_pass"] += 1
-                    stats[dataset_name]["judge_passed_tasks"].append(str(number(episode_name)))
                     print("✅ Judge 通过")
 
                 else:
-                    stats[dataset_name]["judge_fail"] += 1
-                    stats[dataset_name]["judge_failed_tasks"].append(str(number(episode_name)))
                     print("⚠️ Judge 未通过")
             else:
                 raise SystemExit(
@@ -587,58 +537,19 @@ def main():
                     "已生成的 PDDL 和 Judge 结果均已保留，重新运行将自动续传。"
                 )
 
-    # =========================
-    # 总结报告
-    # 保持原始 log 风格，只是每个 dataset 单独写一块
-    # =========================
-    report_lines = []
-
-    for dataset_name in datasets:
-        s = stats[dataset_name]
-
-        s["failed_tasks"].sort(key=int)
-        s["judge_passed_tasks"].sort(key=int)
-        s["judge_failed_tasks"].sort(key=int)
-
-        dataset_total = s["total"]
-        generation_success = s["generation_success"]
-        judge_pass = s["judge_pass"]
-        
-        failed_all_tasks = sorted(
-            set(s["failed_tasks"] + s["judge_failed_tasks"]),
-            key=int,
-        )
-        generation_rate = 100 * generation_success / dataset_total if dataset_total else 0.0
-        judge_rate = 100 * judge_pass / dataset_total if dataset_total else 0.0
-        block = [
-            "=" * 80,
-            f"数据集: {dataset_name}, 总任务数: {dataset_total}",
-            f"可解: {generation_success}, 率: {generation_rate:.1f}%",
-            f"通过: {judge_pass}, 率: {judge_pass}/{dataset_total} = {judge_rate:.1f}%, [{', '.join(s['judge_passed_tasks'])}]",
-            f"未通过: [{', '.join(failed_all_tasks)}]",
-        ]
-        if eval_mode == "pddl":
-            counts = s["simulator"]
-            block.append(
-                "Simulator: " + ", ".join(
-                    f"{status}={counts.get(status, 0)}"
-                    for status in ("PASS", "FAIL", "UNKNOWN", "INPUT_ERROR")
-                )
-            )
-
-        report_lines.extend(block)
-        report_lines.append("")
-
-    report_text = "\n".join(report_lines).rstrip()
-
-    eval_root.mkdir(parents=True, exist_ok=True)
-
-    dataset_tag = "_".join(datasets)
-    report_path = eval_root / f"summary_{dataset_tag}.log"
-    report_path.write_text(report_text + "\n", encoding="utf-8")
-
-    print("\n" + report_text)
-    print(f"\n报告已保存到: {report_path}")
+    # 只给非通过的 PDDL 任务归因；不可解、无 plan/无 judge 同样进入。
+    if eval_mode == "pddl":
+        attribution_tasks = [task for task in all_tasks if not load_cached_status(task)[1]]
+        print(f"开始错误归因，共 {len(attribution_tasks)} 个任务")
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(attribute_one, task) for task in attribution_tasks]
+            for i, future in enumerate(as_completed(futures), 1):
+                task, result = future.result()
+                if result is None:  # Judge was updated to pass in the meantime.
+                    continue
+                label = result["label"]
+                print(f"[归因 {i}/{len(attribution_tasks)}] {task['dataset']}/{task['episode']}: {label}")
+    write_summary(all_tasks)
 
 
 if __name__ == "__main__":

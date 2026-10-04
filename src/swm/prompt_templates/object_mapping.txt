@@ -1,0 +1,20 @@
+Map Candidate object names to GT object names for the SAME initial scene.
+Your ONLY job is object correspondence. Do not classify errors, validate initial states,
+infer missing preconditions/effects, repair PDDL, or judge plan/task success.
+
+Use the image, object inventories, and instruction to identify the same physical object
+or equivalent source/target area. A candidate state or location can be wrong: do not
+choose a different physical identity just to make its initial predicates agree with GT.
+Exact identities supplied in fixed_mapping are already fixed. Assign other objects
+jointly and one-to-one to unused GT objects. Equivalent names for the SAME support
+area may match; a container and its contents, or a base and the larger surface under
+it, are not automatically the same area. Never infer transitive support equivalence.
+If correspondence is ambiguous, absent, or not supported by evidence, use null.
+Do not create new objects, merge several independent objects, or return scene facts.
+
+Return ONLY this compact JSON structure, with each query object exactly once:
+{"objects":{"candidate_name":"existing_gt_name","uncertain_candidate":null}}
+Each value must be an exact eligible GT name or JSON null. Omit fixed_mapping keys.
+Do not output explanations, evidence, analysis, initial facts, or extra fields.
+
+{mapping_input}
