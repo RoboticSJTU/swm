@@ -363,7 +363,6 @@ def judge_one(task: dict):
             instruction=instruction,
             kf_actions=kf_actions,
             candidate_plan=candidate_plan,
-            predicted_problem=(save_dir / "problem.pddl") if eval_mode == "pddl" else None,
             predicted_domain=(save_dir / "domain.pddl") if eval_mode == "pddl" else None,
             pddl_plan=(save_dir / "plan.txt") if eval_mode == "pddl" else None,
         )

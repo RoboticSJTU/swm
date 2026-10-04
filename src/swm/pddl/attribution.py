@@ -277,8 +277,9 @@ def map_objects(candidate, gt, instruction, image_path, model, reasoning_effort,
     if not queries:
         evidence.update(mapping=fixed, unmapped=[])
         return fixed
-    if image_path is None or not Path(image_path).is_file():
-        raise ValueError("Object mapping requires the initial image")
+    images = list(image_path) if isinstance(image_path, (list, tuple)) else [image_path] if image_path is not None else []
+    if not images or any(not Path(path).is_file() for path in images):
+        raise ValueError("Object mapping requires all initial images")
     data = {"instruction": instruction, "fixed_mapping": fixed, "query_objects": queries,
             "eligible_gt_objects": targets, "candidate": object_payload(candidate), "gt": object_payload(gt)}
     template = Path(__file__).parents[1] / "prompt_templates/object_mapping.txt"
@@ -287,7 +288,7 @@ def map_objects(candidate, gt, instruction, image_path, model, reasoning_effort,
         capture = {"attempt": attempt}
         evidence["attempts"].append(capture)
         try:
-            value = call_gpt_json(model, prompt, [Path(image_path)], attempts=1,
+            value = call_gpt_json(model, prompt, [Path(path) for path in images], attempts=1,
                                   response_format={"type": "json_object"}, max_tokens=8192,
                                   reasoning_effort=reasoning_effort, temperature=0, capture=capture)
             mapping = validate_mapping(value, queries, set(targets), fixed)

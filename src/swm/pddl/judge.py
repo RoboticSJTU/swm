@@ -3,17 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from swm.llm import call_gpt_json
-from swm.pddl.strips import (
-    ground_plan,
-    parse_domain,
-    parse_plan,
-    parse_sexpr_file,
-)
+from swm.pddl.strips import parse_sexpr_file
 
 
 def _call_validated_judge(
-    model: str, prompt: str, first_img: Path, capture: dict | None = None
+    model: str, prompt: str, first_img: Path | list[Path], capture: dict | None = None
 ) -> dict:
+    if isinstance(first_img, (list, tuple)) and len(first_img) > 1:
+        prompt = "All attached images are views of the same initial scene. Use the complete set of views and preserve object identity across views.\n\n" + prompt
     last_error: Exception | None = None
     attempts = []
     for attempt in range(1, 4):
@@ -22,7 +19,8 @@ def _call_validated_judge(
             call_kwargs = {"attempts": 1}
             if capture is not None:
                 call_kwargs["capture"] = attempt_capture
-            result = call_gpt_json(model, prompt, [first_img], **call_kwargs)
+            images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
+            result = call_gpt_json(model, prompt, images, **call_kwargs)
             if not isinstance(result, dict):
                 raise ValueError("Judge response is not a JSON object")
             if set(result) != {"reasoning", "pass", "feedback"}:
@@ -56,85 +54,122 @@ def _call_validated_judge(
     )
 
 
+class SymbolicTraceError(ValueError):
+    """PDDL trace preparation failed; do not fall back to an NL judgment."""
+
+
 def _evaluated_symbolic_trace(
     candidate_plan: str,
     predicted_domain: str | Path | None,
     pddl_plan: str | Path | None,
-    predicted_problem: str | Path | None = None,
 ) -> str:
-    if not isinstance(predicted_domain, Path) or not isinstance(pddl_plan, Path):
-        return candidate_plan
+    if predicted_domain is None and pddl_plan is None:
+        return candidate_plan  # Explicit natural-language evaluation mode.
+    if predicted_domain is None or pddl_plan is None:
+        raise SymbolicTraceError("PDDL judging requires both domain and plan paths")
 
     try:
-        raw_plan, _ = parse_plan(pddl_plan)
+        domain_path, plan_path = Path(predicted_domain), Path(pddl_plan)
+        raw_plan = []
+        for line in plan_path.read_text(encoding="utf-8").splitlines():
+            line = line.split(";", 1)[0].strip()
+            if line and (not line.startswith("(") or not line.endswith(")")
+                         or "(" in line[1:] or ")" in line[:-1]):
+                raise ValueError(f"Malformed plan line: {line}")
+            if line:
+                parts = line[1:-1].lower().split()
+                if not parts:
+                    raise ValueError("Empty plan action")
+                raw_plan.append((parts[0], parts[1:]))
         if not raw_plan:
             return "Candidate trace contains zero actions."
-        schemas = parse_domain(predicted_domain)
-        actions = ground_plan(raw_plan, schemas)
+        root = parse_sexpr_file(domain_path)
         source_actions = {
             node[1]: dict(zip(node[2::2], node[3::2]))
-            for node in parse_sexpr_file(predicted_domain)[2:]
+            for node in root[1:]
             if isinstance(node, list) and node[:1] == [":action"]
         }
-    except (OSError, KeyError, ValueError, NotImplementedError) as error:
-        return f"{candidate_plan}\n\nSymbolic details unavailable: {error}"
+        derived = [node for node in root[1:] if isinstance(node, list) and node[:1] == [":derived"]]
 
-    dynamic_predicates = {
-        literal[0]
-        for schema in schemas.values()
-        for literals in (schema.add_eff, schema.del_eff)
-        for literal in literals
-    }
+        def effect_predicates(node):
+            if not node:
+                return set()
+            if node[0] == "and":
+                return set().union(*(effect_predicates(child) for child in node[1:]))
+            if node[0] in {"forall", "when"}:
+                return effect_predicates(node[2])
+            if node[0] == "not":
+                return {node[1][0]}
+            return {node[0]}
 
-    def format_literals(expression, bindings, *, effect=False) -> list[str]:
-        if expression[0] == "and":
-            return [
-                text
-                for child in expression[1:]
-                for text in format_literals(child, bindings, effect=effect)
-            ]
-        negative = expression[0] == "not"
-        atom = expression[1] if negative else expression
-        if atom[0] not in dynamic_predicates:
-            return []
-        prefix = ("-" if negative else "+") if effect else ("not " if negative else "")
-        arguments = ", ".join(bindings.get(argument, argument) for argument in atom[1:])
-        return [f"{prefix}{atom[0]}({arguments})"]
+        dynamic_predicates = {node[1][0] for node in derived}
+        for fields in source_actions.values():
+            dynamic_predicates.update(effect_predicates(fields[":effect"]))
 
-    lines = []
-    for index, action in enumerate(actions, start=1):
-        manipulators = [
-            argument
-            for argument in action.args
-            if any(part in {"arm", "hand", "gripper"} for part in argument.split("_"))
-        ]
-        objects = [argument for argument in action.args if argument not in manipulators]
-        bindings = dict(zip(schemas[action.name].params, action.args))
-        fields = source_actions[action.name]
-        before = format_literals(fields[":precondition"], bindings)
-        changes = format_literals(fields[":effect"], bindings, effect=True)
+        def sexpr(node, bindings):
+            if isinstance(node, str):
+                return bindings.get(node, node)
+            if node[0] in {"forall", "exists"}:
+                # Quantified variables shadow action parameters of the same name.
+                local = {key: value for key, value in bindings.items() if key not in node[1]}
+                return f"({node[0]} ({' '.join(node[1])}) {sexpr(node[2], local)})"
+            return "(" + " ".join(sexpr(child, bindings) for child in node) + ")"
 
-        action_text = f"{action.name}({', '.join(objects)})"
-        if manipulators:
-            action_text += f" with {' and '.join(manipulators)}"
-        lines.append(f"{index}. {action_text}")
-        if before:
-            lines.append(f"   Before: {', '.join(before)}")
-        if changes:
-            lines.append(f"   State change: {', '.join(changes)}")
-    return "\n".join(lines)
+        def format_literals(expression, bindings, *, effect=False):
+            if not expression:
+                return []
+            if expression[0] == "and":
+                return [text for child in expression[1:]
+                        for text in format_literals(child, bindings, effect=effect)]
+            negative = expression[0] == "not"
+            atom = expression[1] if negative else expression
+            if atom[0] in {"forall", "exists", "when", "or", "imply", "and"}:
+                # Preserve guards and logical structure, without reading candidate init.
+                return [sexpr(expression, bindings)]
+            if atom[0] not in dynamic_predicates and atom[0] != "=":
+                return []
+            prefix = ("-" if negative else "+") if effect else ("not " if negative else "")
+            arguments = ", ".join(sexpr(argument, bindings) for argument in atom[1:])
+            return [f"{prefix}{atom[0]}({arguments})"]
+
+        lines = []
+        if derived:
+            lines.append("Derived rules: " + " ".join(sexpr(node, {}) for node in derived))
+        for index, (name, args) in enumerate(raw_plan, start=1):
+            fields = source_actions[name]
+            parameters = [token for token in fields[":parameters"]
+                          if isinstance(token, str) and token.startswith("?")]
+            if len(args) != len(parameters):
+                raise ValueError(f"Arity mismatch for {name}: expected {len(parameters)}, got {len(args)}")
+            bindings = dict(zip(parameters, args))
+            manipulators = [arg for arg in args
+                            if any(part in {"arm", "hand", "gripper"} for part in arg.split("_"))]
+            objects = [arg for arg in args if arg not in manipulators]
+            before = format_literals(fields[":precondition"], bindings)
+            changes = format_literals(fields[":effect"], bindings, effect=True)
+            action_text = f"{name}({', '.join(objects)})"
+            if manipulators:
+                action_text += f" with {' and '.join(manipulators)}"
+            lines.append(f"{index}. {action_text}")
+            if before:
+                lines.append(f"   Before: {', '.join(before)}")
+            if changes:
+                lines.append(f"   State change: {', '.join(changes)}")
+        return "\n".join(lines)
+    except (OSError, KeyError, ValueError, NotImplementedError, IndexError, TypeError) as error:
+        raise SymbolicTraceError(f"Cannot prepare PDDL judge trace: {error}") from error
 
 
 def judge_pddl(
     model: str,
-    first_img: Path,
+    first_img: Path | list[Path],
     instruction: str,
     kf_actions: str,
     candidate_plan: str,
-    predicted_problem: str | Path | None = None,
     predicted_domain: str | Path | None = None,
     pddl_plan: str | Path | None = None,
     capture: dict | None = None,
+    scene_context: str = "",
 ):
     candidate_plan = candidate_plan.strip()
     prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
@@ -142,9 +177,11 @@ def judge_pddl(
         instruction=instruction,
         kf_actions=kf_actions,
         evaluated_symbolic_trace=_evaluated_symbolic_trace(
-            candidate_plan, predicted_domain, pddl_plan, predicted_problem
+            candidate_plan, predicted_domain, pddl_plan
         ),
     )
+    if scene_context:
+        prompt = "Official benchmark context:\n" + scene_context + "\n\n" + prompt
     if capture is not None:
         capture.update({"decision_source": "vlm", "model": model})
     return _call_validated_judge(model, prompt, first_img, capture)

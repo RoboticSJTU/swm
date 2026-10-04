@@ -6,7 +6,7 @@ from pathlib import Path
 
 from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
-from swm.pddl.judge import judge_pddl
+from swm.pddl.judge import SymbolicTraceError, judge_pddl
 from swm.pddl.strips import (
     assert_goals,
     format_action_conditions,
@@ -330,16 +330,22 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
 
         planning_success = True
         retry_state.solver_feedback = ""
-        judge_out = judge_pddl(
-            model=JUDGE_MODEL,
-            first_img=task_img,
-            instruction=task["instruction"],
-            kf_actions=numbered_steps,
-            candidate_plan=round_result["plan"],
-            predicted_domain=round_result["round_dir"] / "domain.pddl",
-            predicted_problem=round_result["round_dir"] / "problem.pddl",
-            pddl_plan=round_result["round_dir"] / "plan.txt",
-        )
+        try:
+            judge_out = judge_pddl(
+                model=JUDGE_MODEL,
+                first_img=task_img,
+                instruction=task["instruction"],
+                kf_actions=numbered_steps,
+                candidate_plan=round_result["plan"],
+                predicted_domain=round_result["round_dir"] / "domain.pddl",
+                pddl_plan=round_result["round_dir"] / "plan.txt",
+            )
+        except SymbolicTraceError as error:
+            retry_state.solver_feedback = str(error)
+            retry_state.judge_feedback = ""
+            retry_state.prev_plan = round_result["plan"]
+            (round_result["round_dir"] / "error.log").write_text(str(error), encoding="utf-8")
+            continue
         (round_result["round_dir"] / "judge.json").write_text(
             json.dumps(judge_out, ensure_ascii=False, indent=2),
             encoding="utf-8",

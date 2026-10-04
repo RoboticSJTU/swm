@@ -222,14 +222,14 @@
 (:action turn_off_faucet_after_rinsing_bowl
 :parameters (?h ?f ?b ?s)
 :precondition (and (hand ?h) (faucet ?f) (bowl ?b) (sink ?s) (hand_free ?h) (is_on ?f) (in ?b ?s))
-:effect (and (not (is_on ?f)) (is_off ?f) (rinsed ?b) (has_water ?b))
+:effect (and (not (is_on ?f)) (is_off ?f) (rinsed ?b) (not (empty ?b)) (has_water ?b))
 )
 
 ; Hold bowl ?b under running faucet ?f with hand ?h until rinsed.
 (:action hold_bowl_under_running_faucet_until_rinsed
 :parameters (?h ?b ?f)
 :precondition (and (hand ?h) (bowl ?b) (faucet ?f) (holding ?h ?b) (is_on ?f))
-:effect (and (rinsed ?b) (has_water ?b))
+:effect (and (rinsed ?b) (not (empty ?b)) (has_water ?b))
 )
 
 ; Hold sponge ?s under running faucet ?f with hand ?h until wet.

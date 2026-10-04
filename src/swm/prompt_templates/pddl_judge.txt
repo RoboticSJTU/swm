@@ -16,7 +16,7 @@ Reference observed sequence:
 
 Instruction defines task requirements. Reference clarifies intended results and necessary dependencies. The image establishes the current visible initial state and clarifies identities; it does not add task requirements.
 
-Candidate `Before` and `State change` are claims to verify, not established facts. `+` adds a fact; `-` removes one. Static predicates, including unary parameter categories, are omitted.
+Candidate `Before` and `State change` are claims to verify, not established facts. `+` adds a fact; `-` removes one. Standalone static predicates, including unary parameter categories, are omitted. Quantified, disjunctive, and conditional expressions retain their full logical structure and guards; conditional effects occur only when their conditions hold.
 
 # Audit
 

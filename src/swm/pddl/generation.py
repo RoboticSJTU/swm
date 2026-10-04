@@ -105,7 +105,7 @@ def generate_pddl(
 
     if not solve_pddl(domain_path, problem_path):
         error_log = (round_dir / "error.log").read_text(encoding="utf-8")
-        solver_feedback = summarize_solver_error(error_log)
+        solver_feedback = summarize_solver_error(error_log) + "\n\nPlanner diagnostics:\n" + error_log
         return {
             "ok": False,
             "round_dir": round_dir,

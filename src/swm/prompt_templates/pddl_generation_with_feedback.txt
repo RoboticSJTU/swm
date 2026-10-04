@@ -37,7 +37,7 @@ Your task is to diagnose why the previous PDDL domain and problem failed, use th
 (a) Failure diagnosis: identify the key issues in the previous attempt.
 (b) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
 (c) Domain construction: Based on the scene understanding and action templates, declare the necessary predicates and action definitions in causal execution order.
-(d) Problem construction: Encode all and only task-relevant objects and initial facts, including the hand state. Encode the instruction-required end states in goal, ordered by the causal order in which they become true during execution.
+(d) Problem construction: Encode all and only task-relevant objects and initial facts, including the hand state. Encode only instruction-required final states in goal, excluding temporary staging relations. Goal conjunct order does not impose execution order. Distinguish required operations from final states, and enforce explicitly required action ordering through causal preconditions; do not impose ordering on independent actions.
 
 Return exactly one valid JSON object and no Markdown code fence or surrounding text.
 {{

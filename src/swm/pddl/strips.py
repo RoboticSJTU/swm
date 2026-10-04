@@ -71,10 +71,6 @@ def parse_sexpr(text: str, context: str = "PDDL"):
         if token != "(":
             if token == ")":
                 raise ValueError(f"Unexpected ')' in {context}")
-            if token in {"when", "or", "exists", "imply"}:
-                raise NotImplementedError(
-                    f"Unsupported PDDL construct '{token}' in {context}"
-                )
             return token
 
         expression = []
@@ -104,9 +100,9 @@ def validate_untyped_pddl(text: str) -> None:
         declarations = []
         if head in {":parameters", ":objects", ":constants"}:
             declarations = [node[1:]]
-        elif head == "forall":
+        elif head in {"forall", "exists"}:
             if len(node) != 3 or not isinstance(node[1], list):
-                raise ValueError("Malformed universal condition")
+                raise ValueError("Malformed quantified expression")
             declarations = [node[1]]
         elif head == ":predicates":
             declarations = [item[1:] for item in node[1:] if isinstance(item, list)]
@@ -161,8 +157,10 @@ def read_literals(expression) -> tuple[set[Literal], set[Literal]]:
         raise ValueError(f"Unexpected atom: {expression}")
     if not expression:
         raise ValueError("Empty logical expression")
-    if expression[0] == "forall":
-        raise NotImplementedError("Universal conditions are not supported by STRIPS plan reordering")
+    if expression[0] in {"forall", "exists", "when", "or", "imply"}:
+        raise NotImplementedError(
+            f"STRIPS plan reordering does not support {expression[0]}; keep the solver plan"
+        )
     if expression[0] == "and":
         positive = set()
         negative = set()
@@ -174,6 +172,8 @@ def read_literals(expression) -> tuple[set[Literal], set[Literal]]:
     if expression[0] == "not":
         if len(expression) != 2 or not isinstance(expression[1], list):
             raise ValueError("Malformed negated literal")
+        if any(isinstance(item, list) for item in expression[1]):
+            raise NotImplementedError("STRIPS plan reordering requires atomic negation")
         return set(), {tuple(expression[1])}
     if any(not isinstance(token, str) for token in expression):
         raise ValueError(f"Nested term in literal: {expression}")
@@ -226,6 +226,9 @@ def parse_domain(path: Path) -> DomainSchemas:
     root = parse_sexpr(text, str(path))
     if not isinstance(root, list) or not root or root[0] != "define":
         raise ValueError(f"{path} is not a valid domain file")
+
+    if _sections(root, ":derived") or _sections(root, ":functions"):
+        raise NotImplementedError("STRIPS plan reordering does not support derived predicates or functions")
 
     predicate_sections = _sections(root, ":predicates")
     if len(predicate_sections) != 1:
