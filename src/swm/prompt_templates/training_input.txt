@@ -1,26 +1,23 @@
-Given an instruction, an initial scene image, and a robot configuration, generate a compact, scene-grounded PDDL domain and problem for high-level robotic planning.
+Given an instruction, an initial scene image, and a robot configuration, generate a task-relevant symbolic world model as a valid PDDL domain and problem for robotic planning.
 
 Input
 - Instruction: {instruction}
 - Initial scene image: attached
 - Robot configuration: {robot_configuration}
 
-Construct the task-relevant symbolic world model before writing PDDL.
-Declare every predicate used in actions, :init, and :goal in :predicates, with consistent names, argument counts, and argument order.
-
-1. Ground objects and the initial state
-- Identify task-relevant objects and their quantities, including tools, supports, obstacles, and hands.
-- Ground categories, current states (e.g., open/closed, is_on/is_off), direct in/on relations, and hand occupancy in the image and explicit scene descriptions. Encode these initial facts in :init, distinguishing current states and source areas from required final states and target areas.
-
-2. Encode task requirements
-- Ground the instruction's required objects, operations, methods, ordering, and final conditions. Encode all required final conditions in :goal.
-
-3. Build causal state transitions
-- Construct a causal action chain from :init to :goal, including intermediate actions needed to satisfy later action preconditions.
-- Express each transition as an action schema whose preconditions capture what must hold before execution and whose effects capture its direct, task-relevant state changes.
-- Construct a complete causal action chain from :init to :goal, including preparation and intermediate operations required by the scene, robot configuration, and task method.
-- Express each operation as an action schema whose preconditions and effects preserve these dependencies, so that required operations cannot be skipped.
-- Track these changes along the chain, ensuring that each action's preconditions hold in the current state and that the final state satisfies all goal conditions.
+Rules
+1. Symbolic representation
+- Use untyped PDDL with unary category predicates.
+- Declare every used predicate in :predicates, with consistent names, argument counts, and argument order.
+2. Objects and initial state
+- Ground task-relevant object instances, hands, and source/target areas in the scene. Encode their categories, current states (e.g., open/closed, is_on/is_off), and hand occupancy in :init from the image and explicit scene descriptions.
+- Encode spatial relations according to each predicate's meaning, without substituting indirect supports or containers for immediate ones. Do not infer initial facts from desired outcomes.
+3. Task requirements
+- Encode the instruction's required final conditions in :goal, grounded in the correct objects and target areas.
+- Preserve required operations, methods, and ordering in the action model.
+4. Operators and causal constraints
+- Include all operators needed for a valid plan from :init to :goal, including preparation and intermediate operations required by the scene, task, and robot configuration.
+- Model each operator as a robot operation with necessary preconditions and direct effects on states, locations, and hand occupancy. Preserve causal dependencies so that required operations cannot be bypassed.
 
 Output only in the following format, without explanations or Markdown fences:
 <domain>
