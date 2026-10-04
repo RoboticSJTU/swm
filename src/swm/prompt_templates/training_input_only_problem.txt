@@ -1,0 +1,27 @@
+Given an instruction, an initial scene image, a robot configuration, and a PDDL domain, generate a valid PDDL problem for completing the task with the given domain.
+
+Input
+- Instruction: {instruction}
+- Initial scene image: attached
+- Robot configuration: {robot_configuration}
+- PDDL domain:
+<domain>{domain}</domain>
+
+Rules
+1. Symbolic representation
+- Follow the given domain's untyped PDDL representation with unary category predicates.
+- Use the given domain name in :domain. Use only predicates declared in the domain, with consistent names, argument counts, and argument order. Do not redefine or modify the domain.
+2. Objects and initial state
+- Ground task-relevant object instances, hands, and source/target areas in the scene. Declare them in :objects unless already declared as domain constants. Encode their categories, current states (e.g., open/closed, is_on/is_off), and hand occupancy in :init from the image and explicit scene descriptions.
+- Encode spatial relations according to each predicate's meaning, without substituting indirect supports or containers for immediate ones. Do not infer initial facts from desired outcomes.
+3. Task requirements
+- Encode the instruction's required final conditions in :goal, grounded in the correct objects and target areas.
+- Use the given domain's predicates and causal dependencies to preserve required operations, methods, and ordering.
+4. Planning consistency
+- Ensure :objects, :init, and :goal are consistent with the given operators and robot configuration and allow a valid plan that completes the task, including required preparation and intermediate operations.
+- Respect the domain's preconditions and effects on states, locations, and hand occupancy. Do not mark required operations as already completed unless supported by the initial scene or explicit descriptions.
+
+Output only in the following format, without explanations or Markdown fences:
+<problem>
+[complete PDDL problem]
+</problem>

@@ -105,9 +105,10 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
         pass
 
 
-def _run_fast_downward(cmd: list[object], cwd: Path) -> tuple[str, str]:
+def _run_fast_downward(cmd: list[object], cwd: Path, *, timeout: float | None = None) -> tuple[str, str]:
     """Run Fast Downward under both an internal and process-tree wall guard."""
 
+    timeout = _SOLVER_WALL_TIMEOUT_SECONDS if timeout is None else timeout
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -117,13 +118,13 @@ def _run_fast_downward(cmd: list[object], cwd: Path) -> tuple[str, str]:
         start_new_session=(os.name == "posix"),
     )
     try:
-        stdout, stderr = process.communicate(timeout=_SOLVER_WALL_TIMEOUT_SECONDS)
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_process_tree(process)
         stdout, stderr = process.communicate()
         raise subprocess.TimeoutExpired(
             cmd,
-            _SOLVER_WALL_TIMEOUT_SECONDS,
+            timeout,
             output=stdout,
             stderr=stderr,
         )

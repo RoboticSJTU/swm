@@ -18,20 +18,22 @@ if str(SRC_DIR) not in sys.path:
 from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
-ROBOT_CONFIGURATION = "single-arm"
+ROBOT_CONFIGURATION = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
 
-# ROBOT_CONFIGURATION = "single-arm"
+# ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
-# ROBOT_CONFIGURATION = "dual-arm"
+# ROBOT_CONFIGURATION = "dual_arm"
 # TASK_DOMAINS = ["agibot", "agibot_aug"]
-PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION.replace("-", "_")
 
+PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
 PROMPT_PATH = ROOT_DIR / "src/swm/prompt_templates/training_input.txt"
+ONLY_PROBLEM_PROMPT_PATH = ROOT_DIR / "src/swm/prompt_templates/training_input_only_problem.txt"
 OUT_JSON_PATH = ROOT_DIR / f"eval_results/{MODEL_NAME}/data/{'_'.join(TASK_DOMAINS)}.json"
+ONLY_PROBLEM_OUT_JSON_PATH = OUT_JSON_PATH.with_name(OUT_JSON_PATH.stem + "_only_problem.json")
 ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 MAX_WORKERS = 100
@@ -381,7 +383,7 @@ def prepare_round(item):
         return key, None, "[PDDL SKIP] " + message, None, message
 
 
-def process_domain(task_domain, prompt_template):
+def process_domain(task_domain, prompt_template, only_problem_template):
     eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
     instruction_path = ROOT_DIR / f"tasks/instructions/instructions_{task_domain}.json"
     instructions = json.loads(instruction_path.read_text(encoding="utf-8"))
@@ -458,6 +460,7 @@ def process_domain(task_domain, prompt_template):
                 valid_rounds.pop(key)
 
     samples = []
+    only_problem_samples = []
     missing_episode = 0
     missing_image = 0
     for task_id, episode_id, instruction in records:
@@ -474,21 +477,26 @@ def process_domain(task_domain, prompt_template):
             continue
 
         domain_text, problem_text = prepared_rounds[key]
-        samples.append({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "<image>\n" + prompt_template.replace(
-                        "{instruction}", instruction
-                    ).replace("{robot_configuration}", ROBOT_CONFIGURATION),
-                },
-                {
-                    "role": "assistant",
-                    "content": f"<domain>\n{domain_text}\n</domain>\n<problem>\n{problem_text}\n</problem>",
-                },
-            ],
-            "images": [image_path],
-        })
+        problem_output = f"<problem>\n{problem_text}\n</problem>"
+        domain_output = f"<domain>\n{domain_text}\n</domain>"
+        for dataset, template, answer in (
+            (samples, prompt_template, domain_output + "\n" + problem_output),
+            (only_problem_samples, only_problem_template, problem_output),
+        ):
+            dataset.append({
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "<image>\n" + template.format(
+                            instruction=instruction,
+                            robot_configuration=ROBOT_CONFIGURATION,
+                            domain=f"\n{domain_text}\n",
+                        ),
+                    },
+                    {"role": "assistant", "content": answer},
+                ],
+                "images": [image_path],
+            })
 
     print(
         f"[{task_domain}] saved={len(samples)}/{len(records)}  "
@@ -497,31 +505,36 @@ def process_domain(task_domain, prompt_template):
         f"pddl_skip={len(pddl_errors)}"
     )
 
-    return samples, review_messages
+    return samples, only_problem_samples, review_messages
 
 
 def main():
     prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
+    only_problem_template = ONLY_PROBLEM_PROMPT_PATH.read_text(encoding="utf-8")
     samples = []
+    only_problem_samples = []
     review_messages = []
     for task_domain in TASK_DOMAINS:
-        domain_samples, domain_reviews = process_domain(task_domain, prompt_template)
+        domain_samples, domain_only_problem_samples, domain_reviews = process_domain(
+            task_domain, prompt_template, only_problem_template,
+        )
         samples.extend(domain_samples)
+        only_problem_samples.extend(domain_only_problem_samples)
         review_messages.extend(domain_reviews)
 
-    OUT_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON_PATH.write_text(
-        json.dumps(samples, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    for path, dataset in (
+        (OUT_JSON_PATH, samples),
+        (ONLY_PROBLEM_OUT_JSON_PATH, only_problem_samples),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[done] samples={len(dataset)} -> {path}")
 
     if review_messages:
         ERROR_LOG_PATH.write_text("\n".join(review_messages) + "\n", encoding="utf-8")
         print(f"[review] {len(review_messages)} issue(s) -> {ERROR_LOG_PATH}")
     else:
         ERROR_LOG_PATH.unlink(missing_ok=True)
-
-    print(f"[done] samples={len(samples)} -> {OUT_JSON_PATH}")
 
 
 if __name__ == "__main__":

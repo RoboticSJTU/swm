@@ -1,3 +1,5 @@
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -5,6 +7,31 @@ from swm.llm import call_gpt_json
 from swm.pddl.planner import solve_pddl, summarize_solver_error
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 from swm.prompts import construct_prompt_with_feedback
+
+
+def strip_code_block(text: str) -> str:
+    text = text.strip()
+    m = re.match(r"^```(?:\w+)?\s*\n?(.*?)\n?```$", text, flags=re.S)
+    return m.group(1).strip() if m else text
+
+
+def parse_pddl_output(output: str) -> tuple[str, str]:
+    output = output.strip()
+
+    for domain_tag, problem_tag in [("domain", "problem"), ("domain_pddl", "problem_pddl")]:
+        domain_match = re.search(rf"<{domain_tag}>\s*(.*?)\s*</{domain_tag}>", output, flags=re.S)
+        problem_match = re.search(rf"<{problem_tag}>\s*(.*?)\s*</{problem_tag}>", output, flags=re.S)
+
+        if domain_match and problem_match:
+            domain = strip_code_block(domain_match.group(1))
+            problem = strip_code_block(problem_match.group(1))
+            return domain, problem
+
+    data = json.loads(strip_code_block(output))
+    if "domain" in data and "problem" in data:
+        return str(data["domain"]).strip(), str(data["problem"]).strip()
+
+    raise ValueError("cannot parse PDDL output")
 
 
 @dataclass
