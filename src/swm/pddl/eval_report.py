@@ -73,8 +73,10 @@ def describe_error(result, directory):
     if label == "operator_missing":
         candidate = parse_domain(directory / "domain.pddl")
         gt = parse_domain(Path(result["gt_directory"]) / "domain.pddl")
-        return (f"Candidate ({len(candidate)})：[{', '.join(candidate)}]\n"
-                f"GT ({len(gt)})：[{', '.join(gt)}]")
+        candidate_only = [name for name in candidate if name not in gt]
+        gt_only = [name for name in gt if name not in candidate]
+        return (f"Candidate 独有 ({len(candidate_only)})：[{', '.join(candidate_only)}]\n"
+                f"GT 独有 ({len(gt_only)})：[{', '.join(gt_only)}]")
     if label == "operator_semantics":
         plans = checks["plans"]
         return ("action 名称及次数一致，但顺序不同；"

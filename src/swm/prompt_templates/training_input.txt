@@ -6,10 +6,11 @@ Input
 - Robot configuration: {robot_configuration}
 
 Construct the task-relevant symbolic world model before writing PDDL.
+Declare every predicate used in actions, :init, and :goal in :predicates, with consistent names, argument counts, and argument order.
 
 1. Ground objects and the initial state
 - Identify task-relevant objects and their quantities, including tools, supports, obstacles, and hands.
-- Encode their categories, states, direct spatial relations, and hand occupancy in :init based on the image and the instruction's scene descriptions. Do not treat desired outcomes as initial facts or invent states to make the task solvable.
+- Ground categories, current states (e.g., open/closed, is_on/is_off), direct in/on relations, and hand occupancy in the image and explicit scene descriptions. Encode these initial facts in :init, distinguishing current states and source areas from required final states and target areas.
 
 2. Encode task requirements
 - Ground the instruction's required objects, operations, methods, ordering, and final conditions. Encode all required final conditions in :goal.
@@ -17,6 +18,8 @@ Construct the task-relevant symbolic world model before writing PDDL.
 3. Build causal state transitions
 - Construct a causal action chain from :init to :goal, including intermediate actions needed to satisfy later action preconditions.
 - Express each transition as an action schema whose preconditions capture what must hold before execution and whose effects capture its direct, task-relevant state changes.
+- Construct a complete causal action chain from :init to :goal, including preparation and intermediate operations required by the scene, robot configuration, and task method.
+- Express each operation as an action schema whose preconditions and effects preserve these dependencies, so that required operations cannot be skipped.
 - Track these changes along the chain, ensuring that each action's preconditions hold in the current state and that the final state satisfies all goal conditions.
 
 Output only in the following format, without explanations or Markdown fences:
