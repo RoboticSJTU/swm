@@ -18,13 +18,14 @@ from swm.pddl.eval_report import render_dataset_report
 # =========================
 root_dir = Path(__file__).resolve().parent.parent
 
-eval_model = "actor_hf"
+eval_model = "9B_sft_full"
 judge_model = "Qwen3.8-27B"  # Qwen3.8-27B
 attribution_model = "Qwen3.8-27B"
 ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_v2 unidomain
-datasets = ["swm_v2"]
+# datasets = ["swm_v2"]
+datasets = ["swm", "unidomain"]
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
 
@@ -425,7 +426,6 @@ def write_summary(all_tasks: list[dict]) -> Path:
         (eval_root / f"attribution_summary_{dataset_tag}.json").write_text(
             json.dumps(attribution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
         )
-    print("\n" + report_text)
     print(f"报告已保存到: {report_path}")
     return report_path
 
@@ -548,7 +548,7 @@ def main():
                 if result is None:  # Judge was updated to pass in the meantime.
                     continue
                 label = result["label"]
-                print(f"[归因 {i}/{len(attribution_tasks)}] {task['dataset']}/{task['episode']}: {label}")
+                # print(f"[归因 {i}/{len(attribution_tasks)}] {task['dataset']}/{task['episode']}: {label}")
     write_summary(all_tasks)
 
 

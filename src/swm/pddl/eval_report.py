@@ -7,7 +7,7 @@ from pathlib import Path
 from unicodedata import east_asian_width
 
 from swm.pddl.attribution import LABELS, OPPOSITES, SPATIAL, load_world
-from swm.pddl.planner import summarize_solver_error
+from swm.pddl.strips import parse_domain
 
 
 def compact_ids(values):
@@ -44,7 +44,25 @@ def _solver_reason(directory):
     match = re.search(r"Expected logical operator or predicate name\s*\nGot:\s*([^\n]+)", log)
     if match:
         return f"{where} 使用了未声明谓词 {match[1].strip()}。"
-    return summarize_solver_error(log)
+    match = re.search(r"Predicate '([^']+)' of arity (\d+) used\s+with (\d+) arguments", log, re.I)
+    if match:
+        return f"{where} 的谓词 {match[1]} 参数数量错误：应有 {match[2]} 个，实际 {match[3]} 个。"
+    match = re.search(
+        r"Expected a non-empty block starting with any of the following words:\s*([^\n]+)\n"
+        r"(?:Syntax:[^\n]*\n)?Got:\s*\(([^()\s]+)(?:\s+([^()\s]+))?", log,
+    )
+    if match:
+        expected, actual, following = match.groups()
+        if ":action" in expected.split(", ") and following in {":parameters", ":precondition", ":effect"}:
+            return f"动作声明格式错误：{actual} 应为 :action，且缺少动作名。"
+        return f"PDDL 结构错误：此处应以 {expected} 开头，实际为 {actual}。"
+    if "Missing ')'" in log:
+        return "PDDL 括号不配对：缺少右括号 )。"
+    if "Tokens remaining after parsing:" in log:
+        return "PDDL 主体结束后仍有多余内容，请检查括号和文件末尾。"
+    if "Non-ASCII character outside comment:" in log:
+        return "PDDL 包含不支持的非 ASCII 字符，请检查对象、谓词或动作名称。"
+    return f"Fast Downward 无法处理 PDDL（返回码 {solver.get('returncode', '未知')}）；详见 attribution_solver/result.json。"
 
 
 def describe_error(result, directory):
@@ -53,39 +71,23 @@ def describe_error(result, directory):
     if label == "pddl_invalid":
         return _solver_reason(directory)
     if label == "operator_missing":
-        counts = checks["operator_counts"]
-        return f"operator 数量不足：Candidate {counts['candidate']} < GT {counts['gt']}。"
+        candidate = parse_domain(directory / "domain.pddl")
+        gt = parse_domain(Path(result["gt_directory"]) / "domain.pddl")
+        return (f"Candidate ({len(candidate)})：[{', '.join(candidate)}]\n"
+                f"GT ({len(gt)})：[{', '.join(gt)}]")
     if label == "operator_semantics":
         plans = checks["plans"]
         return ("action 名称及次数一致，但顺序不同；"
                 f"Candidate [{', '.join(plans['candidate_names'])}]；GT [{', '.join(plans['gt_names'])}]。")
     if label == "else":
-        if checks.get("mapping_error"):
-            return "对象映射失败，待人工复查。"
-        if checks.get("input_error"):
-            return f"输入不可用：{checks['input_error']}；待人工复查。"
-        solver = checks.get("fast_downward", {})
-        if solver.get("returncode") in {20, 21, 22, 23, 24}:
-            return f"Fast Downward 超时或内存受限（返回码 {solver['returncode']}），待人工复查。"
-        if solver.get("error") or (solver.get("returncode") or 0) < 0:
-            return f"Fast Downward 未正常完成（{solver.get('error') or solver['returncode']}），待人工复查。"
-        if result.get("reason") == "init_not_confirmed":
-            return "init 证据不足，未命中现有归因规则，待人工复查。"
-        return "未命中现有归因规则，待人工复查。"
+        return ""
 
     world = load_world(directory)
     inverse = {target: source for source, target in checks.get("object_mapping", {}).get("mapping", {}).items()}
 
     def gt_name(name):
-        return inverse.get(name, f"{name}（GT）")
-
-    def gt_area(name):
-        source = inverse.get(name)
-        if source == name:
-            return name
-        if source:
-            return f"{name}（GT；对应 Candidate {source}）"
-        return f"{name}（GT）"
+        # Keep the GT identity visible when no candidate counterpart is mapped.
+        return inverse.get(name, f"{name}[GT]")
 
     def fact_text(fact, negative=False):
         predicate, *args = fact
@@ -114,20 +116,22 @@ def describe_error(result, directory):
                                   (actual[0] == OPPOSITES.get(predicate) and not is_negative))) or (
                         not positive and actual[0] == predicate and not is_negative):
                     expected = [predicate, actual[1]]
-                    return f"{fact_text(actual, is_negative)} → 应为 {fact_text(expected, not positive)}。"
+                    return f"{fact_text(actual, is_negative)} → {fact_text(expected, not positive)}"
             return "初始显式状态与 GT 相矛盾；详见 attribution.json。"
         mapping = checks["object_mapping"]["mapping"]
         area = next(a for a in item["candidate_areas"] if a in mapping and mapping[a] not in item["gt_areas"])
         actual = next(f for f in sorted(world.facts) if len(f) == 3 and f[0] in SPATIAL
                       and f[1:] == (item["candidate_object"], area))
-        return f"{fact_text(actual)} → 所在区域应为 {', '.join(gt_area(a) for a in item['gt_areas'])}。"
+        expected = [fact_text([*actual[:2], gt_name(a)]) for a in item["gt_areas"]]
+        return f"{fact_text(actual)} → {' / '.join(expected)}"
     if label == "goal_error":
         item = checks["goal_error"]["matches"][0]
-        actual = fact_text(item["candidate_goal"])
+        actual = item["candidate_goal"]
         if item["kind"] == "reversed_arguments":
             expected = [item["gt_goal"][0], *(gt_name(a) for a in item["gt_goal"][1:])]
-            return f"{actual} → 应为 {fact_text(expected)}。"
-        return f"{actual} → 目标区域应为 {', '.join(gt_area(a) for a in item['gt_areas'])}。"
+            return f"{fact_text(actual)} → {fact_text(expected)}"
+        expected = [fact_text([*actual[:2], gt_name(a)]) for a in item["gt_areas"]]
+        return f"{fact_text(actual)} → {' / '.join(expected)}"
     return "尚未生成有效归因结果。"
 
 
@@ -161,6 +165,10 @@ def render_dataset_report(dataset, records, *, pddl=True):
         if not groups[label]:
             continue
         lines += ["", f"[{label}]"]
+        if label == "else":
+            lines.append(textwrap.fill(compact_ids(row["id"] for row in groups[label]), width=100,
+                                       break_on_hyphens=False))
+            continue
         reasons = defaultdict(list)
         for row in groups[label]:
             try:
@@ -169,6 +177,10 @@ def render_dataset_report(dataset, records, *, pddl=True):
                 reason = "归因证据不完整或不可读取，详见 attribution.json。"
             reasons[reason].append(row["id"])
         for reason, ids in reasons.items():
-            lines.append(textwrap.fill(f"{compact_ids(ids)}：{reason}", width=100, subsequent_indent="  ",
-                                       break_long_words=False, break_on_hyphens=False))
+            if "\n" in reason:
+                lines.append(f"{compact_ids(ids)}：")
+                lines.extend(f"  {detail}" for detail in reason.splitlines())
+            else:
+                lines.append(textwrap.fill(f"{compact_ids(ids)}：{reason}", width=100, subsequent_indent="  ",
+                                           break_long_words=False, break_on_hyphens=False))
     return "\n".join(lines), {label: len(groups[label]) for label in labels}
