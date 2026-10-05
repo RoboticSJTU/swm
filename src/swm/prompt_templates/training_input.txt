@@ -1,11 +1,11 @@
-Given an instruction, an initial scene image, and a robot configuration, generate a task-relevant symbolic world model as a valid PDDL domain and problem for robotic planning.
+Given an initial scene image, an instruction and a robot configuration, generate a task-relevant symbolic world model as a valid PDDL domain and problem for robotic planning.
 
 Input
-- Instruction: {instruction}
 - Initial scene image: attached
+- Instruction: {instruction}
 - Robot configuration: {robot_configuration}
 
-Rules
+PDDL requirements
 1. Symbolic representation
 - Use untyped PDDL with unary category predicates.
 - Declare every used predicate in :predicates, with consistent names, argument counts, and argument order.

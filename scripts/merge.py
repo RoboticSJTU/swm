@@ -1,11 +1,13 @@
 """Merge the latest episode domains into one deduplicated operator library."""
 
 import json
+import os
 import re
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Union
 
 
@@ -18,7 +20,7 @@ from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 # 只需要修改这里。
 DATASET = "human_aug"
 DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
-MAX_WORKERS = 20
+MAX_WORKERS = 100
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")
 
 PddlNode = Union[str, list["PddlNode"]]
@@ -128,19 +130,33 @@ def canonical_signature(
     effect = parse_sexp(effect_text)
     usage = {variable: [] for variable in param_vars}
 
-    def collect_usage(node: PddlNode, prefix: str) -> None:
+    def collect_usage(
+        node: PddlNode, prefix: str, bound: frozenset[str] = frozenset()
+    ) -> None:
         if not isinstance(node, list) or not node or not isinstance(node[0], str):
             return
         head = node[0].lower()
         if head in {"and", "or"}:
             for child in node[1:]:
-                collect_usage(child, prefix)
+                collect_usage(child, prefix, bound)
         elif head == "not":
             if len(node) == 2:
-                collect_usage(node[1], prefix + ":not")
+                collect_usage(node[1], prefix + ":not", bound)
+        elif head in {"forall", "exists"}:
+            collect_usage(
+                node[2], prefix + ":" + head,
+                bound | frozenset(variable.lower() for variable in node[1]),
+            )
+        elif head in {"when", "imply"}:
+            collect_usage(node[1], prefix + ":" + head + ":condition", bound)
+            collect_usage(node[2], prefix + ":" + head + ":body", bound)
         else:
             for index, argument in enumerate(node[1:]):
-                if isinstance(argument, str) and argument.startswith("?"):
+                if (
+                    isinstance(argument, str)
+                    and argument.startswith("?")
+                    and argument.lower() not in bound
+                ):
                     variable = argument.lower()
                     usage.setdefault(variable, []).append(f"{prefix}:{head}:{index}")
 
@@ -154,9 +170,14 @@ def canonical_signature(
         variable: f"?v{index}" for index, variable in enumerate(ordered_vars)
     }
 
-    def canon(node: PddlNode) -> str:
+    def canon(
+        node: PddlNode, bound: dict[str, str] | None = None, depth: int = 0
+    ) -> str:
+        bound = {} if bound is None else bound
         if isinstance(node, str):
             token = node.lower()
+            if token in bound:
+                return bound[token]
             if token.startswith("?"):
                 if token not in var_map:
                     var_map[token] = f"?v{len(var_map)}"
@@ -168,6 +189,16 @@ def canonical_signature(
             raise ValueError("非法 PDDL 表达式：head 是 list")
 
         head = node[0].lower()
+        if head in {"forall", "exists"}:
+            local = dict(bound)
+            variables = [variable.lower() for variable in node[1]]
+            names = [f"?q{depth + index}" for index in range(len(variables))]
+            local.update(zip(variables, names))
+            return (
+                f"({head} ({' '.join(names)}) "
+                + canon(node[2], local, depth + len(variables))
+                + ")"
+            )
         if head in {"and", "or"}:
             children = []
             for child in node[1:]:
@@ -177,12 +208,14 @@ def canonical_signature(
                     and isinstance(child[0], str)
                     and child[0].lower() == head
                 ):
-                    children.extend(canon(grandchild) for grandchild in child[1:])
+                    children.extend(
+                        canon(grandchild, bound, depth) for grandchild in child[1:]
+                    )
                 else:
-                    children.append(canon(child))
+                    children.append(canon(child, bound, depth))
             children.sort()
         else:
-            children = [canon(child) for child in node[1:]]
+            children = [canon(child, bound, depth) for child in node[1:]]
         return "(" + " ".join([head, *children]) + ")"
 
     signature = (
@@ -192,42 +225,74 @@ def canonical_signature(
     return len(param_vars), signature
 
 
-def find_domain_files(root_dir: Path) -> list[Path]:
-    """Find the highest numbered round containing a domain for every episode."""
+def find_task_domain_files(task_dir: str) -> list[Path]:
+    """Scan one task, keeping episode order and the latest available round."""
+    round_pattern = re.compile(r"roun(?:d)?[_\-]?(\d+)", re.IGNORECASE)
+    with os.scandir(task_dir) as entries:
+        episode_dirs = sorted(
+            entry.path for entry in entries
+            if entry.name.startswith("episode_") and entry.is_dir()
+        )
+
     domain_files = []
-    for episode_dir in sorted(root_dir.glob("task_*/episode_*")):
-        if not episode_dir.is_dir():
-            continue
-
+    for episode_dir in episode_dirs:
         candidates = []
-        for round_dir in sorted(
-            episode_dir.iterdir(), key=lambda path: path.name.lower()
-        ):
-            match = re.fullmatch(
-                r"roun(?:d)?[_\-]?(\d+)", round_dir.name, re.IGNORECASE
-            )
-            domain_path = round_dir / "domain.pddl"
-            if not round_dir.is_dir() or not match or not domain_path.exists():
-                continue
-            key = (
-                int(match.group(1)),
-                int(round_dir.name.lower().startswith("round")),
-            )
-            candidates.append((key, domain_path))
+        with os.scandir(episode_dir) as entries:
+            for entry in entries:
+                match = round_pattern.fullmatch(entry.name)
+                if not match or not entry.is_dir():
+                    continue
+                key = (
+                    -int(match.group(1)),
+                    -int(entry.name.lower().startswith("round")),
+                    entry.name.lower(),
+                )
+                candidates.append((key, entry.path))
 
-        if candidates:
-            domain_files.append(max(candidates, key=lambda item: item[0])[1])
+        # Only probe older rounds when the latest round has no domain.
+        for _, round_dir in sorted(candidates, key=lambda item: item[0]):
+            domain_path = Path(round_dir) / "domain.pddl"
+            if domain_path.exists():
+                domain_files.append(domain_path)
+                break
     return domain_files
 
 
+def find_domain_files(root_dir: Path) -> list[Path]:
+    """Find the highest numbered round containing a domain for every episode."""
+    try:
+        with os.scandir(root_dir) as entries:
+            task_dirs = sorted(
+                entry.path for entry in entries
+                if entry.name.startswith("task_") and entry.is_dir()
+            )
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    if not task_dirs:
+        return []
+
+    # Overlap shared-filesystem metadata latency; ordered map keeps output stable.
+    with ProcessPoolExecutor(max_workers=min(32, MAX_WORKERS, len(task_dirs))) as executor:
+        return [
+            path
+            for paths in executor.map(find_task_domain_files, task_dirs)
+            for path in paths
+        ]
+
+
 def parse_domain_file(domain_path: Path):
-    """Parse one domain without letting a malformed file stop the full merge."""
+    """Extract domain content, reporting input issues without discarding the file."""
+    source = str(domain_path)
+    predicates = []
+    actions = []
+    warnings = []
     try:
         text = domain_path.read_text(encoding="utf-8")
-        source = str(domain_path)
-        validate_untyped_pddl(text)
+        try:
+            validate_untyped_pddl(text)
+        except ValueError as error:
+            warnings.append(f"检查未通过，继续提取：{error}")
 
-        predicates = []
         pred_start = find_token(text, "(:predicates")
         if pred_start == -1:
             raise ValueError("没有找到 :predicates 块")
@@ -280,12 +345,15 @@ def parse_domain_file(domain_path: Path):
             ):
                 raise ValueError(f"无法解析 predicate: {expr}")
             name = declaration[0]
-            argument_names = declaration[1:]
+            argument_names = [
+                argument for argument in declaration[1:]
+                if isinstance(argument, str) and argument.startswith("?")
+            ]
             predicates.append(
                 PredicateItem(
                     name=name,
                     arity=len(argument_names),
-                    expr="(" + " ".join([name, *argument_names]) + ")",
+                    expr="(" + " ".join(declaration) + ")",
                     leading_comments=leading_comments,
                     inline_comment=inline_comment,
                     sources=[source],
@@ -293,7 +361,6 @@ def parse_domain_file(domain_path: Path):
                 )
             )
 
-        actions = []
         position = 0
         while True:
             action_start = find_token(text, "(:action", position)
@@ -319,61 +386,74 @@ def parse_domain_file(domain_path: Path):
             action_name = action_match.group(1).strip()
 
             fields = {}
-            for keyword in (":parameters", ":precondition", ":effect"):
-                field_match = re.search(
-                    rf"{re.escape(keyword)}\b", clean_action, re.IGNORECASE
-                )
-                if not field_match:
-                    raise ValueError(f"{action_name} 没有找到 {keyword}")
-                field_start = field_match.end()
-                while (
-                    field_start < len(clean_action)
-                    and clean_action[field_start].isspace()
-                ):
-                    field_start += 1
-                if field_start == len(clean_action) or clean_action[field_start] != "(":
-                    raise ValueError(
-                        f"{action_name} 的 {keyword} 后面不是括号表达式"
+            try:
+                for keyword in (":parameters", ":precondition", ":effect"):
+                    field_match = re.search(
+                        rf"{re.escape(keyword)}\b", clean_action, re.IGNORECASE
                     )
-                field_end = find_matching_paren(clean_action, field_start)
-                fields[keyword] = clean_action[field_start : field_end + 1].strip()
+                    if not field_match:
+                        raise ValueError(f"{action_name} 没有找到 {keyword}")
+                    field_start = field_match.end()
+                    while (
+                        field_start < len(clean_action)
+                        and clean_action[field_start].isspace()
+                    ):
+                        field_start += 1
+                    if field_start == len(clean_action) or clean_action[field_start] != "(":
+                        raise ValueError(
+                            f"{action_name} 的 {keyword} 后面不是括号表达式"
+                        )
+                    field_end = find_matching_paren(clean_action, field_start)
+                    fields[keyword] = clean_action[field_start : field_end + 1].strip()
 
-            param_arity, signature = canonical_signature(
-                fields[":parameters"],
-                fields[":precondition"],
-                fields[":effect"],
-            )
+                param_arity, signature = canonical_signature(
+                    fields[":parameters"],
+                    fields[":precondition"],
+                    fields[":effect"],
+                )
+                block_text = format_action_conditions(action_block)
+            except (ValueError, TypeError, IndexError) as error:
+                warnings.append(f"{action_name}：{error}；保留原始动作")
+                param_arity = sum(
+                    token.startswith("?")
+                    for token in TOKEN_RE.findall(fields.get(":parameters", ""))
+                )
+                signature = "raw=" + " ".join(TOKEN_RE.findall(clean_action)).lower()
+                block_text = action_block
             actions.append(
                 ActionItem(
                     name=action_name,
                     param_arity=param_arity,
                     signature=signature,
-                    block_text=format_action_conditions(action_block),
+                    block_text=block_text,
                     leading_comments=leading_comments,
                     sources=[source],
                 )
             )
             position = action_end + 1
 
-        return True, source, predicates, actions, ""
+        return True, source, predicates, actions, "；".join(warnings)
     except Exception as error:
-        return False, str(domain_path), [], [], str(error)
+        warnings.append(
+            f"无法继续提取：{error}；已保留 {len(predicates)} 个谓词、{len(actions)} 个动作"
+        )
+        return False, source, predicates, actions, "；".join(warnings)
 
 
 def merge_predicates(predicates: list[PredicateItem]) -> list[PredicateItem]:
-    merged: dict[str, tuple[PredicateItem, set[str]]] = {}
+    merged: dict[tuple[str, int], tuple[PredicateItem, set[str]]] = {}
 
     for item in predicates:
-        key = item.name.lower()
+        if item.name == "=":
+            if item.arity != 2:
+                raise ValueError("built-in equality must have two arguments")
+            continue
+        key = (item.name.lower(), item.arity)
         if key not in merged:
             merged[key] = item, set(item.sources)
             continue
 
         old, seen_sources = merged[key]
-        if old.arity != item.arity:
-            raise ValueError(
-                f"predicate arity conflicts require semantic cleanup: {item.name}"
-            )
         if not (old.leading_comments or old.inline_comment) and (
             item.leading_comments or item.inline_comment
         ):
@@ -395,7 +475,7 @@ def resolve_predicate_arity_collisions(
     predicates: list[PredicateItem],
     actions: list[ActionItem],
 ) -> dict[str, list[int]]:
-    """Reject predicate overloading, which classic PDDL does not support."""
+    """Warn about predicate overloading without rewriting source semantics."""
     arities_by_name: dict[str, set[int]] = {}
     for item in predicates:
         arities_by_name.setdefault(item.name.lower(), set()).add(item.arity)
@@ -408,41 +488,31 @@ def resolve_predicate_arity_collisions(
     if not conflicts:
         return {}
 
-    sources_by_name: dict[str, dict[str, set[int]]] = {}
-    for item in predicates:
-        name = item.name.lower()
-        if name in conflicts:
-            for source in item.sources:
-                sources_by_name.setdefault(name, {}).setdefault(source, set()).add(
-                    item.arity
-                )
-    within_source = [
-        name
-        for name, sources in sources_by_name.items()
-        if any(len(arities) > 1 for arities in sources.values())
-    ]
-    if within_source:
-        raise ValueError(
-            "单个 source 内 predicate arity 冲突: "
-            + ", ".join(sorted(within_source))
-        )
-    raise ValueError(
-        "predicate arity conflicts require semantic cleanup: "
-        + ", ".join(sorted(conflicts))
+    examples = ", ".join(
+        f"{name}={arities}" for name, arities in sorted(conflicts.items())[:3]
     )
+    print(
+        f"[WARN] 谓词元数冲突 {len(conflicts)} 个（示例：{examples}）；"
+        "保留各元数声明，标准 PDDL 求解前仍需清理"
+    )
+    return conflicts
 
 
 def merge_actions(actions: list[ActionItem]) -> list[tuple[str, ActionItem]]:
     """Merge equivalent schemas and number same-name contract variants."""
     grouped: dict[str, list[ActionItem]] = {}
     display_names: dict[str, str] = {}
+    numeric_suffix_names = set()
 
     for item in actions:
         if re.search(r"(?:_|-)\d+$", item.name):
-            print(f"[WARN] numeric action suffix: {item.name} from {item.sources[:3]}")
+            numeric_suffix_names.add(item.name.lower())
         group_key = item.name.lower()
         display_names.setdefault(group_key, item.name)
         grouped.setdefault(group_key, []).append(item)
+
+    if numeric_suffix_names:
+        print(f"[WARN] 输入中已有数字后缀的 action 名称：{len(numeric_suffix_names)} 个")
 
     final_actions = []
     for group_key, variants in grouped.items():
@@ -472,9 +542,14 @@ def write_outputs(
     output_path: Path,
     source_json_path: Path,
 ) -> None:
+    uses_adl = any(
+        re.search(r"\(\s*(?:forall|exists|when|or|imply)\b", item.block_text, re.IGNORECASE)
+        for _, item in actions
+    )
+    requirements = ":adl" if uses_adl else ":strips :negative-preconditions :equality"
     lines = [
         f"(define (domain {domain_name})",
-        "  (:requirements :strips :negative-preconditions :equality)",
+        f"  (:requirements {requirements})",
         "  (:predicates",
     ]
 
@@ -517,16 +592,20 @@ def write_outputs(
 
 
 def main() -> None:
+    started = perf_counter()
     root_dir = DATASET_ROOT / DATASET
     output_path = root_dir / "unified_domain.pddl"
     source_json_path = root_dir / "unified_operator_sources.json"
+    print(f"[INFO] 数据集：{DATASET}", flush=True)
     domain_files = find_domain_files(root_dir)
+    scan_seconds = perf_counter() - started
     if not domain_files:
         raise FileNotFoundError(f"在 {root_dir} 下没有找到 domain.pddl")
 
-    print(f"[INFO] ROOT_DIR: {root_dir}")
-    print(f"[INFO] DOMAIN_NAME: {DATASET}")
-    print(f"[INFO] 找到 {len(domain_files)} 个最大 round 的 domain.pddl")
+    print(
+        f"[INFO] 找到 {len(domain_files)} 个 domain",
+        flush=True,
+    )
 
     # 边解析边去重，避免大数据集在内存中保留每个重复对象。
     predicate_index: dict[
@@ -537,21 +616,21 @@ def main() -> None:
     ] = {}
     raw_predicate_count = 0
     raw_action_count = 0
-    parsed_count = 0
-    skipped_count = 0
+    processed_count = 0
+    warning_count = 0
+    warning_examples = []
 
     with ProcessPoolExecutor(
         max_workers=min(MAX_WORKERS, len(domain_files))
     ) as executor:
         results = executor.map(parse_domain_file, domain_files, chunksize=50)
-        for ok, path, predicates, actions, error in results:
-            if not ok:
-                skipped_count += 1
-                print(f"[WARN] 跳过解析失败文件: {path}")
-                print(f"       原因: {error}")
-                continue
+        for _, path, predicates, actions, warning in results:
+            if warning:
+                warning_count += 1
+                if len(warning_examples) < 3:
+                    warning_examples.append((path, warning))
 
-            parsed_count += 1
+            processed_count += 1
             raw_predicate_count += len(predicates)
             for item in predicates:
                 key = (item.name.lower(), item.arity)
@@ -585,15 +664,18 @@ def main() -> None:
                         seen_sources.add(source)
                         existing.sources.append(source)
 
-    if not predicate_index and not action_index:
-        raise RuntimeError("所有 domain.pddl 都解析失败，无法生成 unified domain")
+    parse_seconds = perf_counter() - started - scan_seconds
+    if warning_count:
+        print(f"[WARN] 输入检查或提取警告：{warning_count} 个文件（最多显示 3 个示例）")
+        for path, warning in warning_examples:
+            print(f"[WARN] {Path(path).relative_to(root_dir)}：{' '.join(warning.split())}")
 
-    print("[INFO] 开始合并")
+    if not predicate_index and not action_index:
+        print("[WARN] 未提取到谓词或动作，将输出空算子库")
+
     all_predicates = [item for item, _ in predicate_index.values()]
     all_actions = [item for item, _ in action_index.values()]
-    predicate_arity_renames = resolve_predicate_arity_collisions(
-        all_predicates, all_actions
-    )
+    resolve_predicate_arity_collisions(all_predicates, all_actions)
     merged_predicates = merge_predicates(all_predicates)
     merged_actions = merge_actions(all_actions)
 
@@ -613,20 +695,19 @@ def main() -> None:
         source_json_path,
     )
 
-    print()
-    print(f"[INFO] 成功解析 domain 文件数: {parsed_count}")
-    print(f"[INFO] 跳过解析失败文件数: {skipped_count}")
-    print(f"[INFO] 原始 predicate 数: {raw_predicate_count}")
-    print(f"[INFO] 合并后 predicate 数: {len(merged_predicates)}")
-    print(f"[WARN] predicate arity 冲突名数: {len(predicate_arity_renames)}")
-    for name, arities in sorted(predicate_arity_renames.items()):
-        print(f"[WARN]   {name}: arity={arities}")
-    print(f"[INFO] 原始 action 数: {raw_action_count}")
-    print(f"[INFO] 合并后 action 数: {len(merged_actions)}")
-    print(f"[INFO] 同名多合同 action 名数: {len(action_conflicts)}")
-    print(f"[INFO] 数字后缀 action 变体数: {sum(action_conflicts)}")
-    print(f"[INFO] unified domain 已保存到: {output_path}")
-    print(f"[INFO] operator 来源 json 已保存到: {source_json_path}")
+    total_seconds = perf_counter() - started
+    print(
+        f"[INFO] 完成：处理 domain {processed_count}/{len(domain_files)}；"
+        f"predicate {raw_predicate_count} → {len(merged_predicates)}；"
+        f"action {raw_action_count} → {len(merged_actions)}"
+    )
+    print(
+        f"[INFO] 同名 action 多版本：{len(action_conflicts)} 个名称、"
+        f"{sum(action_conflicts)} 个变体；耗时 {total_seconds:.1f}s"
+        f"（扫描 {scan_seconds:.1f}s，解析去重 {parse_seconds:.1f}s，"
+        f"合并写出 {total_seconds - scan_seconds - parse_seconds:.1f}s）"
+    )
+    print(f"[INFO] 输出：    {output_path}\n[INFO] 来源：    {source_json_path}")
 
 
 if __name__ == "__main__":

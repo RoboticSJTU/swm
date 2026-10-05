@@ -19,7 +19,7 @@ from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
 ROBOT_CONFIGURATION = "single_arm"
-TASK_DOMAINS = ["human", "human_aug"]
+TASK_DOMAINS = ["swm", "swm_v2", "unidomain"]
 
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]

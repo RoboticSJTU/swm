@@ -6,7 +6,13 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import traceback
+import sys
+
+root_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root_dir / "src"))
+
 from swm.llm import call_gpt
+from swm.pddl.generation import parse_pddl_output, strip_code_block
 from swm.pddl.judge import judge_pddl
 from swm.pddl.planner import solve_pddl
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
@@ -16,23 +22,22 @@ from swm.pddl.eval_report import render_dataset_report
 # =========================
 # 基本配置
 # =========================
-root_dir = Path(__file__).resolve().parent.parent
-
-eval_model = "9B_sft_full"
+eval_model = "9B_3e_full"
 judge_model = "Qwen3.8-27B"  # Qwen3.8-27B
 attribution_model = "Qwen3.8-27B"
 ROBOT_CONFIGURATION = "single-arm"
 
 # swm swm_v2 unidomain
-# datasets = ["swm_v2"]
-datasets = ["swm", "unidomain"]
+datasets = ["swm", "unidomain","swm_v2"]
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
 
 prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input.txt"
+# prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input_only_problem.txt"
 # prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "vlm_cot.txt"
 
-if prompt_path.name == "training_input.txt":
+problem_only = prompt_path.name == "training_input_only_problem.txt"
+if prompt_path.name in {"training_input.txt", "training_input_only_problem.txt"}:
     eval_mode = "pddl"
 elif prompt_path.name == "vlm_cot.txt":
     eval_mode = "nl"
@@ -40,6 +45,8 @@ else:
     raise ValueError(f"未知 prompt 文件名，无法判断评测模式: {prompt_path.name}")
 
 eval_root = root_dir / "eval_results" / eval_model
+if problem_only:
+    eval_root /= "only_problem"
 
 
 # =========================
@@ -50,12 +57,6 @@ def number(name: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def strip_code_block(text: str) -> str:
-    text = text.strip()
-    m = re.match(r"^```(?:\w+)?\s*\n?(.*?)\n?```$", text, flags=re.S)
-    return m.group(1).strip() if m else text
-
-
 def steps_to_text(raw_steps) -> str:
     if isinstance(raw_steps, list):
         return "\n".join(str(x) for x in raw_steps)
@@ -64,25 +65,6 @@ def steps_to_text(raw_steps) -> str:
     if raw_steps is None:
         return ""
     return str(raw_steps)
-
-
-def parse_pddl_output(output: str) -> tuple[str, str]:
-    output = output.strip()
-
-    for domain_tag, problem_tag in [("domain", "problem"), ("domain_pddl", "problem_pddl")]:
-        domain_match = re.search(rf"<{domain_tag}>\s*(.*?)\s*</{domain_tag}>", output, flags=re.S)
-        problem_match = re.search(rf"<{problem_tag}>\s*(.*?)\s*</{problem_tag}>", output, flags=re.S)
-
-        if domain_match and problem_match:
-            domain = strip_code_block(domain_match.group(1))
-            problem = strip_code_block(problem_match.group(1))
-            return domain, problem
-
-    data = json.loads(strip_code_block(output))
-    if "domain" in data and "problem" in data:
-        return str(data["domain"]).strip(), str(data["problem"]).strip()
-
-    raise ValueError("cannot parse PDDL output")
 
 
 def parse_nl_output(output: str) -> tuple[str, str]:
@@ -262,6 +244,20 @@ def load_tasks() -> list[dict]:
 
     for dataset_name in datasets:
         dataset_tasks = load_tasks_one(dataset_name)
+        if problem_only:
+            for task in dataset_tasks:
+                gt_dir = root_dir / "eval_results" / "gt" / dataset_name
+                if not task["flat"]:
+                    gt_dir /= task["task"]
+                gt_dir /= task["episode"]
+                rounds = [p for p in gt_dir.glob("round*") if p.is_dir() and re.fullmatch(r"round\d+", p.name)]
+                round_dir = max(rounds, key=lambda p: number(p.name), default=None)
+                if round_dir is None:
+                    raise FileNotFoundError(f"No GT round directory in {gt_dir}")
+                task["gt_domain"] = (round_dir / "domain.pddl").read_text(encoding="utf-8")
+                task["kf_actions"] = (gt_dir / "kf_actions.txt").read_text(encoding="utf-8")
+                if not task["gt_domain"].strip() or not task["kf_actions"].strip():
+                    raise ValueError(f"Empty GT domain or reference actions in {gt_dir}")
         print(f"数据集: {dataset_name}")
         print(f"任务总数: {len(dataset_tasks)}")
         all_tasks.extend(dataset_tasks)
@@ -294,19 +290,30 @@ def generate_one(task: dict):
         prompt = prompt_path.read_text(encoding="utf-8").format(
             instruction=instruction,
             robot_configuration=ROBOT_CONFIGURATION,
+            domain=f"\n{task['gt_domain']}\n" if problem_only else "",
         )
         output = call_gpt(eval_model, prompt, [image_path])
 
         if eval_mode == "pddl":
-            domain, problem = parse_pddl_output(output)
+            if problem_only:
+                domain = task["gt_domain"]
+                match = re.search(r"<problem>\s*(.*?)\s*</problem>", output, flags=re.S)
+                if match is None:
+                    raise ValueError("cannot parse problem-only PDDL output")
+                problem = strip_code_block(match.group(1))
+                if not problem:
+                    raise ValueError("empty problem-only PDDL output")
+            else:
+                domain, problem = parse_pddl_output(output)
             # 保留候选原文，语法错误也能进入后续 FD 归因。
             domain_file.write_text(domain, encoding="utf-8")
             problem_file.write_text(problem, encoding="utf-8")
             plan_file.unlink(missing_ok=True)
             validate_untyped_pddl(domain)
             validate_untyped_pddl(problem)
-            domain = format_action_conditions(domain)
-            domain_file.write_text(domain, encoding="utf-8")
+            if not problem_only:
+                domain = format_action_conditions(domain)
+                domain_file.write_text(domain, encoding="utf-8")
 
             if not solve_pddl(domain_file, problem_file):
                 return task, False, "pddl_unsolvable"

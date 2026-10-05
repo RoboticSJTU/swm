@@ -1,0 +1,26 @@
+Given the initial scene image and an abstract game's instruction and rules, generate a task-relevant symbolic world model as a valid PDDL domain and problem for game planning.
+
+Input
+- Initial scene image: attached
+- Instruction: {instruction}
+
+PDDL requirements
+1. Symbolic representation
+- Use untyped PDDL with unary category predicates. Declare every used predicate with consistent names, argument counts and argument order. Include :requirements for the PDDL constructs you use.
+2. Objects and initial state
+- Use visible object IDs and symbols defined by the game rules. Ground the entities and locations needed for the task, and encode their categories and depicted initial states in :init.
+- Interpret the image using the meanings and conventions stated in the game rules. Derive any additional initial facts only from the depicted state and those rules, never from the desired goal.
+3. Task goal
+- Encode all required final conditions in :goal, grounded in the correct objects and locations.
+4. Game operators
+- Use only allowed game operations, preserving their supplied names and parameter order. Include the operations needed for a valid plan from :init to :goal.
+- Model each operation's preconditions and effects faithfully. Preserve the game rules' constraints and causal dependencies, including any required preparation or ordering.
+- Do not add entities, operations or constraints unsupported by the scene and game rules.
+
+Output only in the following format, without explanations or Markdown fences:
+<domain>
+[complete PDDL domain]
+</domain>
+<problem>
+[complete PDDL problem]
+</problem>

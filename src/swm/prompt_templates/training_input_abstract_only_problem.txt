@@ -1,0 +1,26 @@
+Given the initial scene image, an abstract game's instruction and rules, and a PDDL domain, generate a valid PDDL problem for completing the task with the given domain.
+
+Input
+- Initial scene image: attached
+- Instruction: {instruction}
+- PDDL domain:
+<domain>
+{domain}
+</domain>
+
+PDDL requirements
+1. Symbolic representation
+- Follow the given domain's untyped representation and category predicates. Use its name in :domain and only its declared predicates, preserving their names, argument counts and argument order. Do not modify the domain.
+2. Objects and initial state
+- Use visible object IDs and symbols defined by the game rules. Declare the entities and locations needed for the task in :objects, except those already declared as domain constants.
+- Encode their categories and depicted initial states in :init. Interpret the image using the conventions stated in the game rules. Derive additional initial facts only from the depicted state and those rules, never from the desired goal.
+3. Task goal
+- Encode all required final conditions in :goal, grounded in the correct objects and locations using the domain's predicates.
+4. Planning consistency
+- Respect the given operators' preconditions, effects and constraints. The problem must allow a valid plan from :init to :goal, including any required preparation or ordering.
+- Do not add entities or facts unsupported by the scene and game rules.
+
+Output only in the following format, without explanations or Markdown fences:
+<problem>
+[complete PDDL problem]
+</problem>

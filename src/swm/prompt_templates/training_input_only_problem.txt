@@ -1,13 +1,13 @@
-Given an instruction, an initial scene image, a robot configuration, and a PDDL domain, generate a valid PDDL problem for completing the task with the given domain.
+Given an initial scene image, an instruction, a robot configuration, and a PDDL domain, generate a valid PDDL problem for completing the task with the given domain.
 
 Input
-- Instruction: {instruction}
 - Initial scene image: attached
+- Instruction: {instruction}
 - Robot configuration: {robot_configuration}
 - PDDL domain:
 <domain>{domain}</domain>
 
-Rules
+PDDL requirements
 1. Symbolic representation
 - Follow the given domain's untyped PDDL representation with unary category predicates.
 - Use the given domain name in :domain. Use only predicates declared in the domain, with consistent names, argument counts, and argument order. Do not redefine or modify the domain.

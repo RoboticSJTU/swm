@@ -1,42 +1,37 @@
 #!/usr/bin/env python3
-"""Evaluate abstract-game PDDL with shared SWM model calls and planning utilities."""
+"""Generate PDDL, align identities with a VLM, then evaluate with fixed rules."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-# Use this checkout even when another SWM checkout is installed.
 sys.path.insert(0, str(ROOT / 'src'))
-
-from swm.llm import call_gpt
+from swm.llm import call_gpt, call_gpt_json
 from swm.pddl.generation import parse_pddl_output
-from swm.pddl.eval_report import ABSTRACT_STATUS_LABELS as STATUS_LABELS, render_abstract_report
-from swm.pddl.planner import _run_fast_downward, fast_downward_path as FD
-from swm.pddl.strips import parse_sexpr
+from swm.pddl.planner import _run_fast_downward, fast_downward_path as FD, _output_text
+from swm.pddl.strips import validate_untyped_pddl
+from swm.abstract_planning.model import parse_sexpr, section, fields, condition, apply_effect, verify_invariants
+from swm.abstract_planning import novel_games
 
-DEFAULT_MANIFEST = ROOT / 'tasks/meta/abstract_planning_test_v1/manifest.jsonl'
-PROMPT = ROOT / 'src/swm/prompt_templates/abstract_input.txt'
-VAL = ROOT / 'downloads/visual_pddl_v1/VAL/build/bin/Validate'
-
-# 只在这里修改关键配置，直接运行脚本即可。
+# 固定路径；只保留模型、数据集、并发这些实验配置。
 eval_model = '9B_3e_full'
+mapping_model = 'Qwen3.8-27B'
 datasets = ['abs_a_id', 'abs_a_scale', 'abs_b_base', 'abs_b_rule']
-generation_max_workers = 200
-eval_root = ROOT / 'eval_results' / eval_model
-
-DIRS = {'north': (-1, 0), 'east': (0, 1), 'south': (1, 0), 'west': (0, -1)}
-OPPOSITE = {'north': 'south', 'east': 'west', 'south': 'north', 'west': 'east'}
+max_workers = 200
+MANIFEST = ROOT / 'tasks/meta/abstract_planning_test_v2/manifest.jsonl'
+PROMPT = ROOT / 'src/swm/prompt_templates/training_input_abstract.txt'
+VAL = ROOT / 'downloads/visual_pddl_v1/VAL/build/bin/Validate'
+eval_root = ROOT / 'eval_results' / eval_model / 'abstract_planning_test_v2'
+UNRESOLVED = {'generation_error', 'mapping_error', 'mapping_incomplete', 'solver_timeout',
+              'solver_memory_limit', 'search_incomplete', 'unsupported_pddl', 'infrastructure_error'}
 
 
 def sha(value):
@@ -66,614 +61,383 @@ def read_plan(path):
     return actions
 
 
-def solve_files(domain, problem, timeout=60):
-    """Use one search policy for references and predictions; discard stale plans."""
-    domain, problem = Path(domain).resolve(), Path(problem).resolve()
-    directory = domain.parent
+def solve_files(directory, game):
     for path in [directory / 'plan.txt', *directory.glob('plan.txt.[0-9]*')]:
         path.unlink(missing_ok=True)
-    cmd = [sys.executable, str(FD), '--overall-time-limit', f'{timeout}s',
-           '--overall-memory-limit', '2G', '--plan-file', str(directory / 'plan.txt'),
-           '--sas-file', str(directory / 'output.sas'), '--alias', 'lama-first', str(domain), str(problem)]
-    returncode, timed_out = 0, False
+    cmd = [sys.executable, str(FD), '--overall-time-limit', '60s', '--overall-memory-limit', '2G',
+           '--plan-file', str(directory / 'plan.txt'), '--sas-file', str(directory / 'output.sas')]
+    inputs = [str(directory / 'domain.pddl'), str(directory / 'problem.pddl')]
+    cmd += inputs + ['--search', 'astar(lmcut())'] if game == 'sliding_puzzle' else ['--alias', 'lama-first', *inputs]
+    code = 0
     try:
-        stdout, stderr = _run_fast_downward(cmd, directory, timeout=timeout + 5)
+        stdout, stderr = _run_fast_downward(cmd, directory, timeout=65)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        returncode = getattr(error, 'returncode', None)
-        timed_out = isinstance(error, subprocess.TimeoutExpired)
+        code = getattr(error, 'returncode', None)
         stdout, stderr = error.stdout or '', error.stderr or ''
-    (directory / 'solver.log').write_text(stdout + stderr)
-    plans = sorted(directory.glob('plan.txt.[0-9]*'), key=lambda p: int(p.name.rsplit('.', 1)[1]))
+    (directory / 'solver.log').write_text(_output_text(stdout) + _output_text(stderr))
+    plans = sorted(directory.glob('plan.txt.[0-9]*'), key=lambda p: int(p.suffix[1:]))
     if plans:
         (directory / 'plan.txt').write_bytes(plans[-1].read_bytes())
     found = (directory / 'plan.txt').is_file()
-    return {'solved': found, 'timeout': timed_out or returncode in {21, 23, 24},
-            'returncode': returncode, 'command': cmd}
+    for p in [directory / 'output.sas', *plans]: p.unlink(missing_ok=True)
+    status = {10:'candidate_unsolvable', 11:'candidate_unsolvable', 12:'search_incomplete',
+              20:'solver_memory_limit', 22:'solver_memory_limit', 21:'solver_timeout',
+              23:'solver_timeout', 24:'solver_timeout', 31:'invalid_pddl', 33:'invalid_pddl',
+              36:'invalid_pddl', 34:'unsupported_pddl', 37:'unsupported_pddl'}.get(code, 'solver_error')
+    return {'solved':found, 'returncode':code, 'status':'solved' if found else 'solver_timeout' if code is None else status}
 
 
-def validate_files(domain, problem, plan):
-    domain, problem, plan = (Path(path).resolve() for path in [domain, problem, plan])
-    completed = subprocess.run([str(VAL), '-v', '-a', str(domain), str(problem), str(plan)],
-                               cwd=plan.parent, capture_output=True, text=True, timeout=30)
-    log = completed.stdout + completed.stderr
-    return {'pass': 'Plan valid' in log and completed.returncode == 0,
-            'returncode': completed.returncode, 'log': log}
+def validate_files(domain, problem, plan, log_path):
+    run = subprocess.run([str(VAL), '-v', str(domain), str(problem), str(plan)], capture_output=True, text=True, timeout=30)
+    log_path.write_text(run.stdout + run.stderr)
+    return run.returncode == 0 and 'Plan valid' in run.stdout
 
 
-def loc(r, c):
-    return f'r{r + 1:02d}c{c + 1:02d}'
+def machine(domain, problem):
+    validate_untyped_pddl(domain); validate_untyped_pddl(problem)
+    d, p = parse_sexpr(domain), parse_sexpr(problem)
+    operators = {}
+    for a in d:
+        if isinstance(a, list) and a[:1] == [':action']:
+            if a[1] in operators: raise ValueError('Duplicate action: ' + a[1])
+            operators[a[1]] = fields(a)
+    initial = section(p, ':init')[1:]
+    if any(not isinstance(a, list) or any(not isinstance(x, str) for x in a) for a in initial):
+        raise ValueError('Initial state must contain positive Boolean ground facts')
+    return {'objects':sorted(set(section(p, ':objects', [':objects'])[1:] + section(d, ':constants', [':constants'])[1:])),
+            'init':{tuple(a) for a in initial}, 'goal':section(p, ':goal')[1], 'ops':operators}
 
 
-def rc(cell):
-    match = re.fullmatch(r'r(\d+)c(\d+)', cell)
-    if not match:
-        raise ValueError('Invalid cell ID: ' + cell)
-    return tuple(int(x) - 1 for x in match.groups())
+def step(model, state, act):
+    if act[0] not in model['ops']: raise ValueError('Unknown action: ' + act[0])
+    op = model['ops'][act[0]]
+    if len(act)-1 != len(op[':parameters']) or not set(act[1:]) <= set(model['objects']):
+        raise ValueError('Invalid action arguments: ' + ' '.join(act))
+    binding = dict(zip(op[':parameters'], act[1:]))
+    if not condition(op[':precondition'], state, binding, model['objects']):
+        raise ValueError('Precondition fails: ' + ' '.join(act))
+    add, delete = set(), set()
+    apply_effect(op[':effect'], state, binding, model['objects'], add, delete)
+    return (state - delete) | add
 
 
-def neighbor(cell, direction):
-    r, c = rc(cell)
-    dr, dc = DIRS[direction]
-    return loc(r + dr, c + dc)
-
-
-def legal_actions(spec, world):
-    """Independent game rules: no PDDL operator or generated predicate is consulted."""
-    game, actions = spec['domain'], []
-    allowed = set(spec['allowed_actions'])
-    positions = world.get('at', {})
-    current = world.get('agent', positions.get('player'))
-    edge_list = spec.get('edges', [])
-    adjacent = [(b, d) for a, b, d in edge_list if a == current]
-    if game == 'frozenlake_v1':
-        actions = [(f'move_{d}', current, b) for b, d in adjacent if b in spec['safe']]
-    elif game in {'maze_v1', 'package_v1', 'printer_v1'}:
-        facing = world['facing']
-        directions = list(DIRS)
-        index = directions.index(facing)
-        actions += [('turn_left', facing, directions[(index - 1) % 4]),
-                    ('turn_right', facing, directions[(index + 1) % 4])]
-        front = [(b, d) for b, d in adjacent if d == facing]
-        occupied = set(positions.values()) if game != 'maze_v1' else set()
-        actions += [('move_forward', current, b, d) for b, d in front if b not in occupied]
-        if game == 'package_v1':
-            actions += [('open_package', p, current, b, d) for b, d in front for p in spec['packages']
-                        if positions[p] == b and p not in world['open']]
-        if game == 'printer_v1':
-            if world['holding'] is None:
-                actions += [('pick_up_printer', p, current, b, d, 'hand1') for b, d in front
-                            for p in spec['printers'] if positions.get(p) == b]
-            for b, d in front:
-                for table in spec['tables']:
-                    if positions[table] != b:
-                        continue
-                    if world['holding'] is not None:
-                        actions.append(('put_on_table', world['holding'], table, current, b, d, 'hand1'))
-                    actions += [('power_on', p, table, current, b, d) for p in spec['printers']
-                                if world['on'].get(p) == table and p not in world['powered']]
-    elif game == 'sokoban_v1':
-        occupied = set(positions.values())
-        for b, direction in adjacent:
-            d = {'north': 'dir-up', 'east': 'dir-right', 'south': 'dir-down', 'west': 'dir-left'}[direction]
-            if b not in occupied:
-                actions.append(('move', 'player', current, b, d))
-            for stone in spec['stones']:
-                if positions[stone] != b:
-                    continue
-                target = neighbor(b, direction)
-                if [b, target, direction] in edge_list and target not in occupied:
-                    name = 'push_to_goal' if target in spec['goal_cells'] else 'push_to_nongoal'
-                    actions.append((name, 'player', stone, current, b, target, d))
-    elif game == 'overcooked_v1':
-        actions += [('move', current, b) for b, _ in adjacent]
-        held = world['holding']
-        if held is None:
-            actions += [('pickup_ingredient', food, current, 'hand1') for food in ['tomato1', 'onion1']
-                        if positions.get(food) == current]
-            if world['ready'] and positions.get('plate1') == current:
-                actions.append(('pickup_plate', 'plate1', current, 'hand1'))
-        elif held in ['tomato1', 'onion1']:
-            if current == spec['board'] and held not in world['chopped']:
-                actions.append(('chop', held, current, 'hand1'))
-            if held in world['chopped'] and positions.get('plate1') == current:
-                actions.append(('put_on_plate', held, 'plate1', current, 'hand1'))
-        elif held == 'plate1' and world['ready'] and current == spec['delivery']:
-            actions.append(('deliver', 'plate1', current, 'hand1'))
-        if set(world['on_plate']) == {'tomato1', 'onion1'}:
-            actions.append(('combine_salad', 'tomato1', 'onion1', 'plate1'))
-    elif game == 'pddlgym_blocks_medium':
-        supports = world['supports']
-        held = world['holding']
-        clear = set(spec['blocks']) - set(supports.values()) - ({held} if held else set())
-        if held is None:
-            for block in sorted(clear):
-                support = supports[block]
-                actions.append(('pick_up', block, 'hand1') if support == 'table'
-                               else ('unstack', block, support, 'hand1'))
-        else:
-            actions.append(('put_down', held, 'hand1'))
-            actions += [('stack', held, block, 'hand1') for block in sorted(clear)]
-    elif game == 'pddlgym_hanoi_operator_actions':
-        supports = world['supports']
-        clear = set(spec['disks'] + spec['pegs']) - set(supports.values())
-        for disk in spec['disks']:
-            if disk not in clear:
-                continue
-            for target in sorted(clear):
-                if target in spec['pegs'] or int(target[1:]) > int(disk[1:]):
-                    actions.append(('move', disk, supports[disk], target))
-    elif game == 'pddlgym_slidetile':
-        bx, by = world['blank']
-        for tile, (x, y) in positions.items():
-            if x == bx and abs(int(y[1:]) - int(by[1:])) == 1:
-                name = 'move_down' if int(by[1:]) < int(y[1:]) else 'move_up'
-                actions.append((name, tile, x, y, by))
-            if y == by and abs(int(x[1:]) - int(bx[1:])) == 1:
-                name = 'move_right' if int(bx[1:]) < int(x[1:]) else 'move_left'
-                actions.append((name, tile, x, y, bx))
-    elif game == 'pddlgym_tsp_operator_actions':
-        actions += [('move', current, target) for target in spec['nodes']]
-    elif game == 'phase_gates':
-        phase = world['phase']
-        red_phase = spec['rule_version']
-        for b, _ in adjacent:
-            needed = red_phase if b in spec['red'] else 1 - red_phase if b in spec['blue'] else None
-            if needed is None or needed == phase:
-                actions.append(('move', current, b))
-        if current in spec['consoles']:
-            actions.append(('toggle', current))
-    elif game == 'energy_route':
-        for b, _ in adjacent:
-            cost = spec['rough_cost'] if b in spec['rough'] else 1
-            if world['energy'] >= cost:
-                actions.append(('move', current, b))
-        if current in spec['chargers']:
-            actions.append(('recharge', current))
-    elif game == 'fragile_bridges':
-        actions += [('move', current, b) for b, _ in adjacent if b not in world['collapsed']]
-        actions += [('collect', marker, current) for marker, cell in spec['markers'].items()
-                    if cell == current and marker not in world['collected']]
-    elif game == 'coupled_tokens':
-        edge_set = {tuple(e) for e in edge_list}
-        for direction in DIRS:
-            a, b = positions['a'], positions['b']
-            aa, bb = neighbor(a, direction), neighbor(b, OPPOSITE[direction])
-            if (a, aa, direction) in edge_set and (b, bb, OPPOSITE[direction]) in edge_set and aa != bb:
-                actions.append((f'step_{direction}', a, aa, b, bb))
-    else:
-        raise ValueError('Unknown game: ' + game)
-    return sorted({tuple(a) for a in actions if a[0] in allowed})
-
-
-def transition(spec, world, action):
-    action = tuple(action)
-    if action not in legal_actions(spec, world):
-        raise ValueError('Illegal environment action: ' + ' '.join(action))
-    result = copy.deepcopy(world)
-    game, name, args = spec['domain'], action[0], action[1:]
-    if game == 'frozenlake_v1':
-        result['at']['player'] = args[1]
-    elif game in {'maze_v1', 'package_v1', 'printer_v1'}:
-        if name.startswith('turn_'):
-            result['facing'] = args[1]
-        elif name == 'move_forward':
-            result['agent'] = args[1]
-            if game == 'maze_v1':
-                result['at']['player'] = args[1]
-        elif name == 'open_package':
-            result['open'].append(args[0])
-        elif name == 'pick_up_printer':
-            result['holding'] = args[0]
-            del result['at'][args[0]]
-        elif name == 'put_on_table':
-            result['on'][args[0]] = args[1]
-            result['holding'] = None
-        elif name == 'power_on':
-            result['powered'].append(args[0])
-    elif game == 'sokoban_v1':
-        if name == 'move':
-            result['at']['player'] = args[2]
-        else:
-            result['at']['player'], result['at'][args[1]] = args[3], args[4]
-    elif game == 'overcooked_v1':
-        if name == 'move':
-            result['agent'] = args[1]
-        elif name.startswith('pickup_'):
-            result['holding'] = args[0]
-            del result['at'][args[0]]
-        elif name == 'chop':
-            result['chopped'].append(args[0])
-        elif name == 'put_on_plate':
-            result['on_plate'].append(args[0])
-            result['holding'] = None
-        elif name == 'combine_salad':
-            result['ready'] = True
-        elif name == 'deliver':
-            result['delivered'] = True
-            result['holding'] = None
-    elif game == 'pddlgym_blocks_medium':
-        block = args[0]
-        if name in {'pick_up', 'unstack'}:
-            del result['supports'][block]
-            result['holding'] = block
-        else:
-            result['supports'][block] = 'table' if name == 'put_down' else args[1]
-            result['holding'] = None
-    elif game == 'pddlgym_hanoi_operator_actions':
-        result['supports'][args[0]] = args[2]
-    elif game == 'pddlgym_slidetile':
-        old = result['at'][args[0]]
-        result['at'][args[0]], result['blank'] = result['blank'], old
-    elif game == 'pddlgym_tsp_operator_actions':
-        result['agent'] = args[1]
-        result['visited'] = sorted(set(result['visited']) | {args[1]})
-    elif game == 'phase_gates':
-        if name == 'toggle':
-            result['phase'] = 1 - result['phase']
-        else:
-            result['agent'] = args[1]
-    elif game == 'energy_route':
-        if name == 'recharge':
-            result['energy'] = 4
-        else:
-            result['agent'] = args[1]
-            result['energy'] -= spec['rough_cost'] if args[1] in spec['rough'] else 1
-    elif game == 'fragile_bridges':
-        if name == 'collect':
-            result['collected'].append(args[0])
-        else:
-            if args[0] in spec['fragile']:
-                result['collapsed'] = sorted(set(result['collapsed']) | {args[0]})
-            result['agent'] = args[1]
-    elif game == 'coupled_tokens':
-        result['at']['a'], result['at']['b'] = args[1], args[3]
-    return result
-
-
-def goal_reached(spec, world):
-    goal, game = spec['goal'], spec['domain']
-    if game in {'frozenlake_v1', 'maze_v1'}:
-        return world['at']['player'] == goal['agent']
-    if game in {'phase_gates', 'energy_route'}:
-        return world['agent'] == goal['agent']
-    if game == 'sokoban_v1':
-        return all(world['at'][stone] in spec['goal_cells'] for stone in spec['stones'])
-    if game == 'package_v1':
-        return set(goal['open']) <= set(world['open'])
-    if game == 'printer_v1':
-        return world['on'].get('printer1') == 'table1' and 'printer1' in world['powered']
-    if game == 'overcooked_v1':
-        return world['delivered']
-    if game in {'pddlgym_blocks_medium', 'pddlgym_hanoi_operator_actions'}:
-        return all(world['supports'].get(item) == support for item, support in goal['supports'].items())
-    if game == 'pddlgym_slidetile':
-        return all(world['at'].get(tile) == xy for tile, xy in goal['at'].items())
-    if game == 'pddlgym_tsp_operator_actions':
-        return set(goal['visited']) <= set(world['visited'])
-    if game == 'fragile_bridges':
-        return world['agent'] == goal['agent'] and set(spec['markers']) <= set(world['collected'])
-    if game == 'coupled_tokens':
-        return world['at'] == goal['at']
-    raise ValueError(game)
-
-
-def simulate(spec, actions):
-    world = copy.deepcopy(spec['world'])
-    trace = [copy.deepcopy(world)]
-    for index, action in enumerate(actions):
-        try:
-            world = transition(spec, world, action)
+def execute(model, actions):
+    state = model['init']; trace = [state]
+    for index, act in enumerate(actions, 1):
+        try: state = step(model, state, act)
         except ValueError as error:
-            return {'pass': False, 'executable': False, 'goal_reached': False,
-                    'failed_step': index + 1, 'action': list(action), 'error': str(error), 'trace': trace}
-        trace.append(copy.deepcopy(world))
-    reached = goal_reached(spec, world)
-    return {'pass': reached, 'executable': True, 'goal_reached': reached, 'trace': trace}
+            return {'executable':False, 'goal_reached':False, 'failed_step':index,
+                    'action':list(act), 'error':str(error), 'trace':trace}
+        trace.append(state)
+    return {'executable':True, 'goal_reached':condition(model['goal'], state, {}, model['objects']), 'trace':trace}
 
 
-def operation_signatures(domain):
-    node = parse_sexpr(domain)
-    if node[:1] != ['define']:
-        raise ValueError('Expected a PDDL definition')
-    signatures = {}
-    for action in node:
-        if not isinstance(action, list) or action[:1] != [':action']:
-            continue
-        name = action[1]
-        if name in signatures:
-            raise ValueError('Duplicate operation: ' + name)
-        parameters = action[action.index(':parameters') + 1]
-        signatures[name] = sum(isinstance(p, str) and p.startswith('?') for p in parameters)
-    return signatures
+def distance(a, b):
+    if re.fullmatch(r'r\d+c\d+', a) and re.fullmatch(r'r\d+c\d+', b):
+        return (0, abs(int(a[1:3])-int(b[1:3])) + abs(int(a[4:6])-int(b[4:6])), b)
+    prefix = lambda x: re.sub(r'\d+$', '', x)
+    return (int(prefix(a) != prefix(b)), 0, b)
 
 
-def val_behavior(domain, problem, actions, directory):
-    """VAL distinguishes a legal prefix with an unmet goal from an illegal plan."""
-    plan = directory / 'probe_plan.txt'
-    plan.write_text('\n'.join('(' + ' '.join(a) + ')' for a in actions) + '\n')
-    result = validate_files(domain, problem, plan)
-    log = result['log']
-    if 'Plan executed successfully - checking goal' in log:
-        return {'executable': True, 'goal_reached': result['pass'], 'log': log}
-    if 'Plan failed to execute' in log:
-        steps = re.findall(r'Checking next happening \(time (\d+)\)', log)
-        return {'executable': False, 'goal_reached': False,
-                'failed_step': int(steps[-1]) if steps else None, 'log': log}
-    if 'Error: Bad operator in plan!' in log:
-        return {'executable': False, 'goal_reached': False, 'bad_operator': True, 'log': log}
-    # Parse/type errors must not be mistaken for correctly rejected illegal moves.
-    return {'executable': None, 'goal_reached': None, 'error': 'VAL could not evaluate this trace', 'log': log}
+def prepare_probes(row):
+    oracle, reference = row['_oracle'], row['_reference_plan']
+    trace = execute(oracle, reference)['trace']
+    probes, seen, failure_patterns = [], set(), set()
+    def add(kind, actions):
+        key = tuple(tuple(a) for a in actions)
+        if (kind, key) in seen: return
+        expected = execute(oracle, key)
+        probes.append({'kind':kind, 'actions':[list(a) for a in key], **{k:v for k,v in expected.items() if k != 'trace'}})
+        seen.add((kind,key))
+    add('initial_goal', []); add('reference_plan', reference)
+    indices = defaultdict(list)
+    for i, act in enumerate(reference): indices[act[0]].append(i)
+    for occurrences in indices.values():
+        for i in occurrences:
+            act, state = reference[i], trace[i]
+            representative = i in {occurrences[0],occurrences[-1]}
+            if representative: add('legal_action', reference[:i+1])
+            op = oracle['ops'][act[0]]; pre = op[':precondition']
+            parts = pre[1:] if pre[0] == 'and' else [pre]
+            for position in range(1, len(act)):
+                alternatives = []
+                for other in oracle['objects']:
+                    if other == act[position]: continue
+                    changed = (*act[:position], other, *act[position+1:])
+                    binding = dict(zip(op[':parameters'], changed[1:]))
+                    violations = tuple(j for j,part in enumerate(parts) if not condition(part, state, binding, oracle['objects']))
+                    alternatives.append((len(violations), distance(act[position],other), violations, changed))
+                alternatives.sort(key=lambda item:(item[0],item[1]))
+                legal = next((a[-1] for a in alternatives if a[0] == 0), None)
+                if legal and representative: add('alternative_legal_action', [*reference[:i],legal])
+                masks = set()
+                for count, _, mask, changed in alternatives:
+                    if not count or mask in masks: continue
+                    pattern = (act[0],position,mask)
+                    if pattern not in failure_patterns:
+                        add('illegal_action', [*reference[:i],changed])
+                        failure_patterns.add(pattern)
+                    masks.add(mask)
+                    if len(masks) == 2: break
+    if row.get('_paired_reference'): add('rule_difference', row['_paired_reference'])
+    return probes
 
 
-def evaluate_probes(domain, problem, probes, directory):
-    results, observed = [], set()
-    for expected in probes:
-        actual = val_behavior(domain, problem, expected['actions'], directory)
-        passed = (actual['executable'] == expected['executable'] and
-                  actual['goal_reached'] == expected['goal_reached'])
-        if not expected['executable'] and actual.get('failed_step') is not None:
-            passed = passed and actual['failed_step'] == expected['failed_step']
-        if expected['executable']:
-            observed.update(a[0] for a in expected['actions'])
-        results.append({'kind': expected['kind'], 'mechanic': expected.get('mechanic'), 'pass': passed,
-                        'expected': {k: expected[k] for k in ['executable', 'goal_reached']},
-                        'actual': {k: v for k, v in actual.items() if k != 'log'}})
-    return {'pass': bool(results) and all(r['pass'] for r in results),
-            'passed': sum(r['pass'] for r in results), 'total': len(results),
-            'observed_operations': sorted(observed), 'results': results}
+def load_tasks(manifest=MANIFEST, selected_datasets=None):
+    source = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
+    rows = [r.copy() for r in source if selected_datasets is None or r['dataset'] in selected_datasets]
+    if not rows: raise ValueError('No selected tasks')
+    inputs, steps = {}, {}
+    for row in rows:
+        dataset = row['dataset']; row['id'] = '/'.join([dataset,row['task'],row['episode']])
+        row['split'] = {'abs_a_id':'A-ID','abs_a_scale':'A-scale','abs_b_base':'B-base','abs_b_rule':'B-rule'}[dataset]
+        if dataset not in inputs:
+            inputs[dataset] = json.loads((ROOT/'tasks/instructions'/f'instructions_{dataset}.json').read_text())
+            steps[dataset] = json.loads((ROOT/'tasks/steps'/f'steps_{dataset}.json').read_text())
+        prompt = inputs[dataset][row['task']][row['episode']]
+        if prompt != row['instruction'] or sha(Path(row['image']).read_bytes()) != row['hashes']['initial.png']:
+            raise ValueError('Input differs from manifest: ' + row['id'])
+        reference_steps = steps[dataset][row['task']][row['episode']]; gt = Path(row['gt'])
+        if '\n'.join(reference_steps)+'\n' != (gt/'kf_actions.txt').read_text(): raise ValueError('Steps differ from reference: ' + row['id'])
+        for name in ['domain.pddl','problem.pddl','plan.txt']:
+            if sha((gt/'round1'/name).read_bytes()) != row['hashes'][name]: raise ValueError('Reference hash mismatch: ' + row['id'])
+        scenario = json.loads((Path(row['metadata'])/'scenario.json').read_text())
+        row['_scenario'] = scenario; row['_oracle'] = machine(scenario['domain'],scenario['problem'])
+        row['_reference_plan'] = read_plan(gt/'round1/plan.txt')
+        expected = execute(row['_oracle'],row['_reference_plan'])
+        if not expected['executable'] or not expected['goal_reached']: raise ValueError('Invalid reference: ' + row['id'])
+        if scenario['game'] in novel_games.GAMES: novel_games.simulate(scenario,row['_reference_plan'])
+    if len({r['id'] for r in rows}) != len(rows): raise ValueError('Duplicate task IDs')
+    by_id = {'/'.join([r['dataset'],r['task'],r['episode']]):r for r in source}
+    for row in rows:
+        if pair := row.get('paired_with'):
+            paired = by_id['/'.join([pair['dataset'],pair['task'],pair['episode']])]
+            row['_paired_reference'] = read_plan(Path(paired['gt'])/'round1/plan.txt')
+        row['_probes'] = prepare_probes(row)
+    return rows
+
+
+def validate_mapping(value, source, targets, fixed):
+    if not isinstance(value,dict) or set(value) != {'objects'} or not isinstance(value['objects'],dict):
+        raise ValueError('Mapping must contain only an objects dictionary')
+    aliases = value['objects']
+    if set(aliases) != set(source)-set(fixed): raise ValueError('Incomplete/extra mapping keys')
+    mapping = dict(fixed)
+    for name,target in aliases.items():
+        if target is None: continue
+        if not isinstance(target,str) or target not in targets: raise ValueError('Unknown mapping target')
+        if target in mapping.values(): raise ValueError('Object mapping must be one-to-one')
+        mapping[name] = target
+    return mapping
+
+
+def align_objects(row, candidate, directory):
+    source, target = set(candidate['objects']), set(row['_oracle']['objects'])
+    fixed = {x:x for x in source & target}
+    identity = {'model':mapping_model, 'candidate_sha256':sha([(directory/n).read_text() for n in ['domain.pddl','problem.pddl']]),
+                'image_sha256':row['hashes']['initial.png'], 'oracle_sha256':sha(row['_scenario']['problem']), 'instruction_sha256':sha(row['instruction'])}
+    capture, evidence = {}, {'source':'identity', 'objects':fixed}
+    if source-set(fixed):
+        path = directory/'mapping.json'; saved = json.loads(path.read_text()) if path.exists() else {}
+        if saved.get('identity') == identity and 'response' in saved and not saved.get('error'):
+            response = saved['response']; capture = saved.get('capture',{})
+        else:
+            data = {'instruction':row['instruction'],'candidate_objects':sorted(source-set(fixed)),
+                    'eligible_visible_ids':sorted(target-set(fixed.values())), 'fixed_identity':fixed,
+                    'candidate_initial_facts':[list(a) for a in sorted(candidate['init'])]}
+            prompt = ('Map candidate aliases to visible scene IDs or numeric symbols defined by the rules. '
+                      'Use the image, labels and initial facts; preserve fixed identities. Each target may be used once. '
+                      'Use null for unsupported or ambiguous identities. Return only JSON {"objects":{"candidate_alias":"visible_id_or_null"}}.\n'
+                      + json.dumps(data,ensure_ascii=False))
+            try:
+                response = call_gpt_json(mapping_model,prompt,[Path(row['image'])],response_format={'type':'json_object'},attempts=1,temperature=0,capture=capture)
+            except Exception as error:
+                write_json(path,{'source':'vlm','identity':identity,'objects':fixed,'capture':capture,'error':f'{type(error).__name__}: {error}'})
+                raise
+        try:
+            aligned = validate_mapping(response,source,target,fixed)
+        except ValueError as error:
+            write_json(path,{'source':'vlm','identity':identity,'objects':fixed,'response':response,'capture':capture,'error':str(error)})
+            raise
+        evidence = {'source':'vlm','objects':aligned,'response':response,'capture':capture}
+    evidence['identity'] = identity; evidence['unmapped'] = sorted(source-set(evidence['objects']))
+    write_json(directory/'mapping.json',evidence)
+    return evidence
+
+
+def evaluate_probes(candidate, probes, mapping):
+    inverse = {v:k for k,v in mapping.items()}; cache = {():{'executable':True,'state':candidate['init']}}
+    results = []
+    for probe in probes:
+        if any(x not in inverse for a in probe['actions'] for x in a[1:]):
+            results.append({'kind':probe['kind'],'pass':False,'status':'unmapped_probe'}); continue
+        actions = tuple((a[0],*(inverse[x] for x in a[1:])) for a in probe['actions']); prefix = ()
+        for index,act in enumerate(actions,1):
+            previous, prefix = cache[prefix], (*prefix,act)
+            if prefix in cache: continue
+            if not previous['executable']: cache[prefix] = previous; continue
+            try: cache[prefix] = {'executable':True,'state':step(candidate,previous['state'],act)}
+            except ValueError as error: cache[prefix] = {'executable':False,'failed_step':index,'error':str(error)}
+        actual = cache[prefix]
+        reached = actual['executable'] and condition(candidate['goal'],actual['state'],{},candidate['objects'])
+        passed = actual['executable'] == probe['executable'] and reached == probe['goal_reached']
+        if not probe['executable']: passed = passed and actual.get('failed_step') == probe['failed_step']
+        results.append({'kind':probe['kind'],'pass':passed, 'expected':{k:probe[k] for k in ['executable','goal_reached']},
+                        'actual':{'executable':actual['executable'],'goal_reached':reached,
+                                  **{k:actual[k] for k in ['failed_step','error'] if k in actual}}})
+    return {'pass':bool(results) and all(p['pass'] for p in results), 'passed':sum(p['pass'] for p in results),
+            'total':len(results),'results':results,'scope':'Finite behavioral probes, not complete domain equivalence.'}
 
 
 def evaluate_candidate(row, raw_output, directory):
-    """Always solve the submitted PDDL afresh, then execute in the real game."""
-    directory.mkdir(parents=True, exist_ok=True)
-    for old in [directory / name for name in ['plan.txt', 'domain.pddl', 'problem.pddl', 'solver.log',
-                'candidate_val.log', 'reference_val.log', 'environment_trace.json', 'probe_plan.txt', 'output.sas']
-                ] + list(directory.glob('plan.txt.[0-9]*')) + list(directory.glob('probe_*_failure.log')):
-        old.unlink(missing_ok=True)
-    result = {'id': row['id'], 'split': row['split'], 'domain': row['domain'],
-              'group_id': row['group_id'], 'paired_with': row['paired_with'],
-              'task_success': False, 'behavior_success': False, 'status': 'invalid_output'}
-    probes = json.loads(Path(row['probes_path']).read_text())
-    result['probes'] = {'pass': False, 'passed': 0, 'total': len(probes),
-                        'observed_operations': [], 'results': []}
+    directory.mkdir(parents=True,exist_ok=True)
+    for name in ['plan.txt','canonical_plan.txt','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','domain.pddl','problem.pddl']:
+        (directory/name).unlink(missing_ok=True)
+    result = {k:row[k] for k in ['id','dataset','split','game','task','episode']}
+    result.update(task_success=False,behavior_success=False,status='invalid_output',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
     try:
-        dtext, ptext = parse_pddl_output(raw_output)
-        if not isinstance(parse_sexpr(ptext), list):
-            raise ValueError('Expected a PDDL expression')
-        actual = operation_signatures(dtext)
-        result['interface_ok'] = actual == row['operation_signatures']
-        result['operation_signatures'] = actual
-        domain, problem = directory / 'domain.pddl', directory / 'problem.pddl'
-        domain.write_text(dtext + '\n')
-        problem.write_text(ptext + '\n')
-    except (ValueError, KeyError, TypeError, IndexError) as error:
-        result['error'] = str(error)
-        return result
-    result['probes'] = evaluate_probes(domain, problem, probes, directory)
-    result['unobserved_operations'] = sorted(set(row['operation_signatures']) - set(result['probes']['observed_operations']))
-    solved = solve_files(domain, problem)
-    result['solver'] = solved
-    if not solved['solved']:
-        # Fast Downward's documented exit codes distinguish malformed models,
-        # proven unsolvability, incomplete search and resource limits.
-        result['status'] = ('solver_timeout' if solved['timeout'] else {
-            10: 'candidate_unsolvable', 11: 'candidate_unsolvable', 12: 'search_incomplete',
-            20: 'solver_memory_limit', 22: 'solver_memory_limit',
-            31: 'invalid_pddl', 33: 'invalid_pddl', 36: 'invalid_pddl',
-            34: 'unsupported_pddl', 37: 'unsupported_pddl',
-        }.get(solved['returncode'], 'solver_error'))
-        result['error'] = '\n'.join((directory / 'solver.log').read_text().splitlines()[-12:])
-        return result
+        domain,problem = parse_pddl_output(raw_output)
+        (directory/'domain.pddl').write_text(domain+'\n'); (directory/'problem.pddl').write_text(problem+'\n')
+        candidate = machine(domain,problem)
+    except (ValueError,KeyError,TypeError,IndexError) as error:
+        (directory/'mapping.json').unlink(missing_ok=True)
+        result['error'] = str(error); return result
+    expected = {name:len(op[':parameters']) for name,op in row['_oracle']['ops'].items()}
+    actual = {name:len(op[':parameters']) for name,op in candidate['ops'].items()}
+    result['interface_ok'] = bool(actual) and all(expected.get(name) == count for name,count in actual.items())
+    result['missing_operations'] = sorted(set(expected)-set(actual))
+    result['solver'] = solve_files(directory,row['game'])
+    if not result['solver']['solved']:
+        result['status'] = result['solver']['status']; result['error'] = '\n'.join((directory/'solver.log').read_text().splitlines()[-12:]); return result
+    plan = read_plan(directory/'plan.txt'); result['plan_length'] = len(plan)
+    own = validate_files(directory/'domain.pddl',directory/'problem.pddl',directory/'plan.txt',directory/'candidate_val.log')
+    result['candidate_val_pass'] = own
+    if not own: result['status'] = 'candidate_plan_invalid'; return result
     try:
-        actions = read_plan(directory / 'plan.txt')
-    except ValueError as error:
-        result.update(status='invalid_plan', error=str(error))
-        return result
-    own = validate_files(domain, problem, directory / 'plan.txt')
-    oracle = validate_files(row['gt_domain_path'], row['gt_problem_path'], directory / 'plan.txt')
-    spec = json.loads(Path(row['state_path']).read_text())
-    simulation = simulate(spec, actions)
-    result.update(plan_length=len(actions), candidate_val_pass=own['pass'],
-                  reference_val_pass=oracle['pass'],
-                  environment={k: v for k, v in simulation.items() if k != 'trace'})
-    if own['pass'] and oracle['pass'] != simulation['pass']:
-        result['status'] = 'oracle_disagreement'
-        return result
-    result['task_success'] = result['interface_ok'] and own['pass'] and oracle['pass'] and simulation['pass']
+        alignment = align_objects(row,candidate,directory); mapping = alignment['objects']
+        required = {x for a in plan for x in a[1:]}
+        if required-set(mapping):
+            result.update(status='mapping_incomplete',error='Unmapped plan objects: '+', '.join(sorted(required-set(mapping)))); return result
+    except Exception as error:
+        result.update(status='mapping_error',error=f'{type(error).__name__}: {error}'); return result
+    result['mapping_source'] = alignment['source']
+    canonical = [(a[0],*(mapping[x] for x in a[1:])) for a in plan]
+    (directory/'canonical_plan.txt').write_text('\n'.join('('+' '.join(a)+')' for a in canonical)+'\n')
+    oracle = execute(row['_oracle'],canonical)
+    reference = validate_files(Path(row['gt'])/'round1/domain.pddl',Path(row['gt'])/'round1/problem.pddl',directory/'canonical_plan.txt',directory/'reference_val.log')
+    result['reference_val_pass'] = reference; result['environment'] = {k:v for k,v in oracle.items() if k != 'trace'}
+    write_json(directory/'environment_trace.json',[[list(a) for a in sorted(s)] for s in oracle['trace']])
+    if row['game'] in novel_games.GAMES:
+        try: novel_games.simulate(row['_scenario'],canonical); independent = True
+        except ValueError: independent = False
+        result['independent_game_pass'] = independent
+        if independent != (oracle['executable'] and oracle['goal_reached']):
+            result.update(status='infrastructure_error',error='Independent rules disagree with reference PDDL'); return result
+    elif oracle['executable']: verify_invariants(row['_scenario'],canonical,oracle['trace'])
+    if reference != (oracle['executable'] and oracle['goal_reached']):
+        result.update(status='infrastructure_error',error='VAL and reference interpreter disagree'); return result
+    result['probes'] = evaluate_probes(candidate,row['_probes'],mapping)
+    write_json(directory/'probes.json',{'definitions':row['_probes'],**result['probes']})
+    result['task_success'] = result['interface_ok'] and own and reference
     result['behavior_success'] = result['task_success'] and result['probes']['pass']
     result['status'] = ('success' if result['task_success'] else 'interface_mismatch' if not result['interface_ok']
-                        else 'candidate_plan_invalid' if not own['pass']
-                        else 'illegal_environment_action' if not simulation['executable'] else 'real_goal_not_reached')
+                        else 'illegal_environment_action' if not oracle['executable'] else 'real_goal_not_reached')
     return result
 
 
-def generation_identity(row, template):
-    prompt = template.format(instruction=row['instruction'], robot_configuration='single-arm')
-    return prompt, {'model': eval_model,
-                    'prompt_sha256': sha(prompt), 'image_sha256': row['image_sha256'], 'temperature': 0}
+def save_result(directory,result):
+    write_json(directory/'result.json',result); probes = result['probes']
+    lines = [f"任务：{result['id']}", f"游戏：{result['game']}", f"状态：{result['status']}",
+             f"真实任务完成：{'是' if result['task_success'] else '否'}", f"规则探针：{probes['passed']}/{probes['total']}（有限覆盖）"]
+    if result.get('error'): lines.append('错误：'+result['error'])
+    links = [f'[{name}]({name})' for name in ['raw_output.txt','domain.pddl','problem.pddl','plan.txt','mapping.json','canonical_plan.txt','probes.json','result.json'] if (directory/name).exists()]
+    (directory/'result.md').write_text('\n\n'.join(lines+[' · '.join(links)])+'\n')
 
 
-def load_tasks(manifest, selected_datasets=None):
-    rows = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
-    if len({r['id'] for r in rows}) != len(rows):
-        raise ValueError('Duplicate manifest IDs')
-    selected = [r for r in rows if selected_datasets is None or r['dataset'] in selected_datasets]
-    if not selected:
-        raise ValueError('No selected tasks')
-    cache = {}
-    for row in selected:
-        # Read the same standard files as eval_planning.py; metadata is an oracle.
-        tasks_root = Path(row['image_path']).parents[3]
-        key = str(tasks_root), row['dataset']
-        if key not in cache:
-            cache[key] = tuple(json.loads((tasks_root / folder / f'{prefix}_{row["dataset"]}.json').read_text())
-                               for folder, prefix in [('instructions', 'instructions'), ('steps', 'steps')])
-        instructions, steps = cache[key]
-        instruction = instructions[row['task']][row['episode']]
-        reference_steps = steps[row['task']][row['episode']]
-        if sha(instruction) != row['instruction_sha256'] or sha(Path(row['image_path']).read_bytes()) != row['image_sha256']:
-            raise ValueError('Input hash mismatch: ' + row['id'])
-        if '\n'.join(reference_steps).strip() != Path(row['kf_actions_path']).read_text().strip():
-            raise ValueError('Standard steps / reference mismatch: ' + row['id'])
-        for field, hash_field in [('state_path', 'state_sha256'), ('gt_domain_path', 'domain_sha256'),
-                                  ('gt_problem_path', 'problem_sha256'), ('gt_plan_path', 'plan_sha256')]:
-            value = json.loads(Path(row[field]).read_text()) if field == 'state_path' else Path(row[field]).read_bytes()
-            if sha(value) != row[hash_field]:
-                raise ValueError('Oracle hash mismatch: ' + row['id'] + ' ' + field)
-        spec = json.loads(Path(row['state_path']).read_text())
-        for probe in json.loads(Path(row['probes_path']).read_text()):
-            expected = simulate(spec, probe['actions'])
-            if any(probe[k] != expected[k] for k in ['executable', 'goal_reached']):
-                raise ValueError('Probe oracle mismatch: ' + row['id'])
-        row['instruction'] = instruction
-    return selected
-
-
-def save_result(directory, result, cache):
-    """Keep a readable result and one cache; remove superseded runtime files."""
-    stored = {k: v for k, v in result.items() if k != 'generation'}
-    if 'solver' in stored:
-        stored['solver'] = {k: v for k, v in stored['solver'].items() if k != 'command'}
-    cache = dict(cache)
-    cache.pop('fingerprint', None)
-    cache['result'] = stored
-    write_json(directory / '.cache.json', cache)
-
-    probes = result['probes']
-    reason = ('无' if result['behavior_success'] else
-              '任务已完成，但部分规则检查未通过' if result['task_success'] else
-              STATUS_LABELS.get(result['status'], result['status']))
-    lines = [f'任务：{result["id"]}', f'游戏：{result["domain"]}',
-             f'任务完成：{"成功" if result["task_success"] else "失败"}',
-             f'全部规则检查通过：{"是" if probes["pass"] else "否"}（{probes["passed"]}/{probes["total"]}）',
-             f'说明：{reason}']
-    if 'plan_length' in result:
-        lines.append(f'计划长度：{result["plan_length"]} 步')
-    environment = result.get('environment', {})
-    if environment.get('failed_step') is not None:
-        lines.append(f'失败动作：第 {environment["failed_step"]} 步，`' +
-                     ' '.join(environment.get('action', [])) + '`')
-    if result.get('error'):
-        lines.append('<details>\n<summary>错误详情（点击展开）</summary>\n\n```text\n' +
-                     result['error'] + '\n```\n\n</details>')
-    links = [f'[{label}]({name})' for name, label in
-             [('domain.pddl', '动作模型'), ('problem.pddl', '初始状态与目标'), ('plan.txt', '求解计划')]
-             if (directory / name).is_file()]
-    if links:
-        lines.append('相关文件：' + ' · '.join(links))
-    (directory / 'result.md').write_text('\n\n'.join(lines) + '\n')
-    obsolete = ['result.json', 'generation.json', 'output.txt', 'solver.log', 'error.log',
-                'candidate_val.log', 'reference_val.log', 'environment_trace.json', 'probe_plan.txt', 'output.sas']
-    for path in [directory / name for name in obsolete] + list(directory.glob('plan.txt.[0-9]*')) + list(directory.glob('probe_*_failure.log')):
-        path.unlink(missing_ok=True)
-
-
-def run_one(row, template, code_hash):
-    start = time.monotonic()
-    directory = eval_root / row['dataset'] / row['task'] / row['episode']
-    directory.mkdir(parents=True, exist_ok=True)
-    for name in ['domain.pddl', 'problem.pddl', 'plan.txt']:
-        (directory / name).unlink(missing_ok=True)
-    prompt, identity = generation_identity(row, template)
-    cache = {}
+def run_one(row,template,code_hash):
+    directory = eval_root/row['dataset']/row['task']/row['episode']; directory.mkdir(parents=True,exist_ok=True)
+    prompt = template.format(instruction=row['instruction'],robot_configuration='single-arm')
+    identity = {'model':eval_model,'prompt_sha256':sha(prompt),'image_sha256':row['hashes']['initial.png']}
+    start = time.monotonic(); stage = 'generation_error'
     try:
-        saved = json.loads((directory / '.cache.json').read_text()) if (directory / '.cache.json').is_file() else {}
-        cache = saved
-        matches = bool(saved) and all(saved.get('identity', {}).get(k) == v for k, v in identity.items())
-        if matches and isinstance(saved.get('raw_output'), str) and saved.get('output_sha256') == sha(saved['raw_output']):
-            raw = saved['raw_output']
-            capture = saved['capture']
+        saved = json.loads((directory/'generation.json').read_text()) if (directory/'generation.json').exists() else {}
+        raw_path = directory/'raw_output.txt'
+        if saved.get('identity') == identity and raw_path.exists() and saved.get('output_sha256') == sha(raw_path.read_bytes()): raw = raw_path.read_text()
         else:
-            cache = {'identity': identity}
-            capture = {}
-            raw = call_gpt(eval_model, prompt, [Path(row['image_path'])], temperature=0, capture=capture)
-        cache = {'identity': identity, 'raw_output': raw, 'output_sha256': sha(raw), 'capture': capture}
-        with tempfile.TemporaryDirectory(prefix='.eval-', dir=directory) as temporary:
-            work = Path(temporary)
-            result = evaluate_candidate(row, raw, work)
-            for name in ['domain.pddl', 'problem.pddl', 'plan.txt']:
-                if (work / name).is_file():
-                    shutil.copy2(work / name, directory / name)
-        result['generation'] = capture
+            for name in ['raw_output.txt','generation.json','domain.pddl','problem.pddl','plan.txt','canonical_plan.txt','mapping.json','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log']:
+                (directory/name).unlink(missing_ok=True)
+            capture = {}; raw = call_gpt(eval_model,prompt,[Path(row['image'])],temperature=0,capture=capture)
+            raw_path.write_text(raw); write_json(directory/'generation.json',{'identity':identity,'output_sha256':sha(raw),'capture':capture})
+        stage = 'infrastructure_error'; result = evaluate_candidate(row,raw,directory)
     except Exception as error:
-        if 'raw_output' not in cache:
-            cache = {'identity': identity, 'error': str(error)[:1000]}
-        result = {'id': row['id'], 'split': row['split'], 'domain': row['domain'],
-                  'group_id': row['group_id'], 'paired_with': row['paired_with'],
-                  'task_success': False, 'behavior_success': False,
-                  'status': 'infrastructure_error', 'error': str(error)[:1000],
-                  'probes': {'pass': False, 'passed': 0, 'total': len(json.loads(Path(row['probes_path']).read_text())), 'results': []}}
-    result.update(elapsed_seconds=round(time.monotonic() - start, 3), evaluator_sha256=code_hash)
-    save_result(directory, result, cache)
-    return result
+        result = {k:row[k] for k in ['id','dataset','split','game','task','episode']}
+        result.update(task_success=False,behavior_success=False,status=stage,error=f'{type(error).__name__}: {error}',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
+    result.update(model=eval_model,elapsed_seconds=round(time.monotonic()-start,3),evaluator_sha256=code_hash)
+    save_result(directory,result); return result
 
 
 def aggregate(results):
-    n = len(results)
-    probe_total = sum(r.get('probes', {}).get('total', 0) for r in results)
-    probe_pass = sum(r.get('probes', {}).get('passed', 0) for r in results)
-    return {'total': n, 'task_success': sum(r['task_success'] for r in results),
-            'task_success_rate': sum(r['task_success'] for r in results) / n,
-            'behavior_success': sum(r['behavior_success'] for r in results),
-            'behavior_success_rate': sum(r['behavior_success'] for r in results) / n,
-            'probe_passed': probe_pass, 'probe_total': probe_total,
-            'probe_agreement_rate': probe_pass / probe_total if probe_total else None,
-            'statuses': dict(Counter(r['status'] for r in results))}
+    evaluated = [r for r in results if r['status'] not in UNRESOLVED]
+    successes = sum(r['task_success'] for r in evaluated); behavior = sum(r['behavior_success'] for r in evaluated)
+    return {'total':len(results),'evaluated':len(evaluated),'unresolved':len(results)-len(evaluated),
+            'task_success':successes,'task_success_rate':successes/len(evaluated) if evaluated else None,
+            'behavior_success':behavior,'behavior_success_rate':behavior/len(evaluated) if evaluated else None,
+            'probe_passed':sum(r['probes']['passed'] for r in results),'probe_total':sum(r['probes']['total'] for r in results),
+            'statuses':dict(Counter(r['status'] for r in results))}
 
 
-def summarize(results):
-    summary = {'model': eval_model, 'manifest_sha256': sha(DEFAULT_MANIFEST.read_bytes()),
-               'overall': aggregate(results), 'by_split': {}, 'by_domain': {}, 'pairs': []}
-    for key in ['split', 'domain']:
+def summarize(results,rows):
+    summary = {'model':eval_model,'mapping_model':mapping_model,'manifest_sha256':sha(MANIFEST.read_bytes()),
+               'overall':aggregate(results),'by_split':{},'by_game':{},'pairs':[], 'decision_source':'program; VLM supplies object identity aliases only'}
+    for field,label in [('split','by_split'),('game','by_game')]:
         groups = defaultdict(list)
-        for result in results:
-            groups[result[key]].append(result)
-        summary['by_' + key] = {k: aggregate(v) for k, v in groups.items()}
-    by_id = {r['id']: r for r in results}
-    for changed in results:
-        base = by_id.get(changed['paired_with'])
-        if base:
-            summary['pairs'].append({'base': base['id'], 'variant': changed['id'],
-                'both_tasks_pass': base['task_success'] and changed['task_success'],
-                'both_behaviors_pass': base['behavior_success'] and changed['behavior_success'],
-                'rule_difference_correct': all(p['pass'] for r in [base, changed]
-                                               for p in r.get('probes', {}).get('results', []) if p['kind'] == 'rule_difference')
-                    and all(any(p['kind'] == 'rule_difference' for p in r.get('probes', {}).get('results', [])) for r in [base, changed])})
-    write_json(eval_root / 'summary_abs.json', summary)
-    tasks = {row['id']: row for row in (
-        json.loads(line) for line in DEFAULT_MANIFEST.read_text().splitlines() if line.strip())}
-    report = render_abstract_report(summary, results, tasks, eval_root)
-    (eval_root / 'report_abs.md').write_text(report)
-    return summary
+        for result in results: groups[result[field]].append(result)
+        summary[label] = {key:aggregate(group) for key,group in groups.items()}
+        if field == 'split':
+            for key,group in groups.items():
+                games = {r['game'] for r in group}
+                rates = [aggregate([r for r in group if r['game']==g])['task_success_rate'] for g in games]
+                rates = [rate for rate in rates if rate is not None]
+                summary[label][key]['macro_game_success_rate'] = sum(rates)/len(rates) if rates else None
+    macro = [x['task_success_rate'] for x in summary['by_game'].values() if x['task_success_rate'] is not None]
+    summary['macro_game_success_rate'] = sum(macro)/len(macro) if macro else None
+    by_id = {r['id']:r for r in results}
+    for row in rows:
+        if row['dataset'] != 'abs_b_rule' or not row.get('paired_with'): continue
+        pair = row['paired_with']; base_id = '/'.join([pair['dataset'],pair['task'],pair['episode']])
+        if base_id not in by_id: continue
+        a,b = by_id[base_id],by_id[row['id']]
+        summary['pairs'].append({'base':base_id,'variant':row['id'],
+                                 'evaluated':a['status'] not in UNRESOLVED and b['status'] not in UNRESOLVED,
+                                 'both_tasks_pass':a['task_success'] and b['task_success'], 'both_behaviors_pass':a['behavior_success'] and b['behavior_success']})
+    evaluated_pairs = [p for p in summary['pairs'] if p['evaluated']]
+    summary['pairs_evaluated'] = len(evaluated_pairs)
+    summary['pairs_unresolved'] = len(summary['pairs'])-len(evaluated_pairs)
+    summary['pair_success_rate'] = sum(p['both_tasks_pass'] for p in evaluated_pairs)/len(evaluated_pairs) if evaluated_pairs else None
+    write_json(eval_root/'summary_abs.json',summary)
+    lines = [f'# 抽象规划评测：{eval_model}', 'VLM 仅映射对象身份，程序判定任务与规则；API/映射/资源限制另列为未完成评测。',
+             '| 分类 | 总数 | 已评测 | 未完成 | 真实任务成功 | 成功且规则探针全通过 |', '| --- | ---: | ---: | ---: | ---: | ---: |']
+    for split,s in summary['by_split'].items(): lines.append(f"| {split} | {s['total']} | {s['evaluated']} | {s['unresolved']} | {s['task_success']} | {s['behavior_success']} |")
+    lines += ['', f"规则配对成功：{sum(p['both_tasks_pass'] for p in evaluated_pairs)}/{len(evaluated_pairs)}；未完成：{summary['pairs_unresolved']}", '', '| 任务 | 游戏 | 状态 | 任务完成 | 规则探针 |', '| --- | --- | --- | --- | --- |']
+    for r in sorted(results,key=lambda r:r['id']):
+        p=r['probes']; lines.append(f"| [{r['id']}]({r['id']}/result.md) | {r['game']} | {r['status']} | {'是' if r['task_success'] else '否'} | {p['passed']}/{p['total']} |")
+    lines += ['', '规则探针只覆盖已检查行为；已知游戏以参考 PDDL 为规则基准，新游戏另有独立几何模拟器。']
+    (eval_root/'report_abs.md').write_text('\n'.join(lines)+'\n'); return summary
 
 
 def main():
-    eval_root.mkdir(parents=True, exist_ok=True)
-    rows = load_tasks(DEFAULT_MANIFEST, datasets)
-    template = PROMPT.read_text()
-    code_hash = sha([sha(Path(path).read_bytes()) for path in [
-        __file__, call_gpt.__code__.co_filename, parse_pddl_output.__code__.co_filename,
-        parse_sexpr.__code__.co_filename, _run_fast_downward.__code__.co_filename, VAL, FD]])
-    print(f'开始评测：{eval_model}，共 {len(rows)} 个任务。', flush=True)
+    eval_root.mkdir(parents=True,exist_ok=True); rows = load_tasks(MANIFEST,datasets); template = PROMPT.read_text()
+    code_hash = sha([sha(Path(__file__).read_bytes()),sha(MANIFEST.read_bytes()),sha(Path(novel_games.__file__).read_bytes())])
+    print(f'开始评测：{eval_model}，{len(rows)} 条；映射模型 {mapping_model}。',flush=True)
     results = []
-    with ThreadPoolExecutor(max_workers=generation_max_workers) as pool:
-        futures = [pool.submit(run_one, row, template, code_hash) for row in rows]
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(run_one,row,template,code_hash) for row in rows]
         for future in as_completed(futures):
-            results.append(future.result())
-    results.sort(key=lambda r: r['id'])
-    summary = summarize(results)
-    stats = summary['overall']
-    failures = '；'.join(
-        f'{STATUS_LABELS.get(status, status)} {count} 个'
-        for status, count in sorted(stats['statuses'].items(), key=lambda item: -item[1])
-        if status != 'success'
-    )
-    print('\n评测完成：\n'
-          f'任务成功：{stats["task_success"]}/{stats["total"]}（{stats["task_success_rate"]:.1%}）\n'
-          f'任务成功且全部规则检查通过：{stats["behavior_success"]}/{stats["total"]}'
-          f'（{stats["behavior_success_rate"]:.1%}）\n'
-          f'任务失败原因：{failures or "无"}\n'
-          f'详细结果：   {eval_root / "report_abs.md"}', flush=True)
+            result = future.result(); results.append(result)
+            print(f"{result['id']}: {result['status']} ({len(results)}/{len(rows)})",flush=True)
+    summary = summarize(results,rows)
+    print(json.dumps(summary['overall'],ensure_ascii=False,indent=2),flush=True)
+    print(f'详细结果：{eval_root / "report_abs.md"}',flush=True)
 
 
 if __name__ == '__main__':
