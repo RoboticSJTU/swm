@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -15,6 +16,7 @@ from swm.llm import call_gpt
 from swm.pddl.generation import parse_pddl_output, strip_code_block
 from swm.pddl.judge import judge_pddl
 from swm.pddl.planner import solve_pddl
+from swm.pddl.postprocess import repair_pddl
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 from swm.pddl.attribution import attribute_failure
 from swm.pddl.eval_report import render_dataset_report
@@ -31,6 +33,7 @@ ROBOT_CONFIGURATION = "single-arm"
 datasets = ["swm", "unidomain","swm_v2"]
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
+rule_postprocess = True  # 原始评测结束后，另存规则补全后的评测结果。
 
 prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input.txt"
 # prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input_only_problem.txt"
@@ -98,6 +101,8 @@ def parse_nl_output(output: str) -> tuple[str, str]:
 
 
 def get_save_dir(task: dict) -> Path:
+    if "save_dir" in task:
+        return Path(task["save_dir"])
     dataset_name = task["dataset"]
     task_name = task["task"]
     episode_name = task["episode"]
@@ -398,8 +403,9 @@ def attribute_one(task: dict):
     return task, result
 
 
-def write_summary(all_tasks: list[dict]) -> Path:
+def write_summary(all_tasks: list[dict], report_root: Path | None = None) -> Path:
     """Rebuild the report from saved task results, including attribution details."""
+    report_root = eval_root if report_root is None else report_root
     records = defaultdict(list)
     for task in all_tasks:
         save_dir = get_save_dir(task)
@@ -423,17 +429,74 @@ def write_summary(all_tasks: list[dict]) -> Path:
         block, counts = render_dataset_report(dataset, records[dataset], pddl=eval_mode == "pddl")
         blocks.append(block)
         attribution_summary[dataset] = counts
-    eval_root.mkdir(parents=True, exist_ok=True)
+    report_root.mkdir(parents=True, exist_ok=True)
     dataset_tag = "_".join(datasets)
-    report_path = eval_root / f"summary_{dataset_tag}.log"
+    report_path = report_root / f"summary_{dataset_tag}.log"
     report_text = "\n\n".join(blocks) + "\n"
     report_path.write_text(report_text, encoding="utf-8")
     if eval_mode == "pddl":
-        (eval_root / f"attribution_summary_{dataset_tag}.json").write_text(
+        (report_root / f"attribution_summary_{dataset_tag}.json").write_text(
             json.dumps(attribution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
         )
     print(f"报告已保存到: {report_path}")
     return report_path
+
+
+def postprocess_one(task: dict):
+    """Repair saved candidates; isolate and invalidate only their derived results."""
+    source_dir = get_save_dir(task)
+    try:
+        domain, problem, changes = repair_pddl(
+            (source_dir / "domain.pddl").read_text(encoding="utf-8"),
+            (source_dir / "problem.pddl").read_text(encoding="utf-8"),
+        )
+    except (OSError, ValueError, NotImplementedError) as error:
+        return task, False, f"静态扫描未处理: {error}"
+    if not changes:
+        return task, False, "unchanged"
+
+    save_dir = eval_root / "postprocessed" / source_dir.relative_to(eval_root)
+    processed_task = {**task, "save_dir": save_dir}
+    save_dir.mkdir(parents=True, exist_ok=True)
+    outputs = {"domain.pddl": domain, "problem.pddl": problem}
+    same_pddl = all(
+        (save_dir / name).is_file() and (save_dir / name).read_text(encoding="utf-8") == text
+        for name, text in outputs.items()
+    )
+    if not same_pddl or ((save_dir / "judge.json").exists() and not generation_complete(processed_task)):
+        for name in ("plan.txt", "judge.json", "attribution.json", "error.log"):
+            (save_dir / name).unlink(missing_ok=True)
+        shutil.rmtree(save_dir / "attribution_solver", ignore_errors=True)
+        for name, text in outputs.items():
+            (save_dir / name).write_text(text, encoding="utf-8")
+    (save_dir / "postprocess.json").write_text(
+        json.dumps(changes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+
+    if load_cached_status(processed_task)[0] is not None or generation_complete(processed_task):
+        return processed_task, True, "cached"
+    solved = solve_pddl(save_dir / "domain.pddl", save_dir / "problem.pddl")
+    return processed_task, True, "可解" if solved else "不可解"
+
+
+def evaluate_postprocessed(all_tasks: list[dict]):
+    """Re-evaluate changed tasks and merge them with unchanged baseline results."""
+    print("\n开始规则后处理：一次静态扫描，补全缺失声明")
+    report_tasks, changed_tasks = [], []
+    with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
+        futures = [executor.submit(postprocess_one, task) for task in all_tasks]
+        for future in as_completed(futures):
+            task, changed, info = future.result()
+            report_tasks.append(task)
+            if changed:
+                changed_tasks.append(task)
+            if info != "unchanged":
+                print(f"[后处理] {task['dataset']}/{task['task']}/{task['episode']}: {info}")
+    print(f"规则补全修改了 {len(changed_tasks)}/{len(all_tasks)} 个任务")
+    judge_tasks = [task for task in changed_tasks
+                   if generation_complete(task) and load_cached_status(task)[0] is None]
+    evaluate_results(changed_tasks, judge_tasks)
+    write_summary(report_tasks, report_root=eval_root / "postprocessed")
 
 
 # =========================
@@ -491,6 +554,14 @@ def main():
                 else:
                     print(f"❌ 生成失败: {info}")
 
+    evaluate_results(all_tasks, judge_tasks)
+    write_summary(all_tasks)
+    if rule_postprocess and eval_mode == "pddl":
+        evaluate_postprocessed(all_tasks)
+
+
+def evaluate_results(all_tasks: list[dict], judge_tasks: list[dict]):
+    """Share the existing Judge and attribution stages between both evaluations."""
     print("\n" + "=" * 80)
     print(f"开始 Judge 共 {len(judge_tasks)} 个任务")
 
@@ -555,7 +626,6 @@ def main():
                     continue
                 label = result["label"]
                 # print(f"[归因 {i}/{len(attribution_tasks)}] {task['dataset']}/{task['episode']}: {label}")
-    write_summary(all_tasks)
 
 
 if __name__ == "__main__":
