@@ -194,8 +194,35 @@ def replay(domain_text, problem_text, plan):
     return trace
 
 
+def native_plan(scenario, plan):
+    """Undo release action names and explicit singleton parameters for native rules."""
+    renames = scenario.get('operator_cleanup', {}).get('action_renames', {})
+    inverse = {new: old for old, new in renames.items()}
+    result = [(inverse.get(a[0], a[0]), *a[1:]) for a in plan]
+    if 'native_scenario' in scenario:
+        sizes = {a[1]: len(fields(a)[':parameters']) for a in parse_sexpr(scenario['native_scenario']['domain'])
+                 if isinstance(a, list) and a[:1] == [':action']}
+        result = [a[:sizes[a[0]]+1] for a in result]
+    return result
+
+
 def verify_invariants(scenario, plan, trace):
     """Check physical conservation separately from the PDDL action interpreter."""
+    if 'native_scenario' in scenario:
+        source = scenario['native_scenario']
+        original_plan = native_plan(scenario, plan)
+        native_trace = replay(source['domain'],source['problem'],original_plan)
+        alignment = scenario['representation_alignment']
+        extras = {tuple(a) for a in alignment['added_facts']}
+        for native_state,state in zip(native_trace,trace):
+            mapped = set()
+            for fact in native_state:
+                rule = alignment['rules'].get(fact[0])
+                changed = (rule[0],*(fact[arg+1] if isinstance(arg,int) else arg for arg in rule[1:])) if rule else fact
+                if changed[0] not in alignment['removed_predicates']: mapped.add(changed)
+            if mapped | extras != state:
+                raise ValueError('Training representation changes the native state trajectory')
+        return verify_invariants(source,original_plan,native_trace)
     game = scenario["game"]
 
     def facts(state, p):
@@ -410,7 +437,7 @@ def instruction(domain_text, problem_text, vocabulary, notes, game):
         "kitchen": "Move one orthogonal cell; objects and stations do not block movement. One hand holds one ingredient or plate. Pick up in the current cell with an empty hand; put_down frees it. Process a held ingredient at its matching clean station, in recipe order; advance its phase and dirty the tool. The final phase makes it prepared. Clean a dirty tool at its station with an empty hand. Put a prepared held ingredient onto its assigned plate in the current cell, freeing the hand. Hold a plate containing all required prepared ingredients to finish its recipe at the matching clean station; finish only an unready dish, making it ready and dirtying the tool. Cooling a ready held plate at the rack does not dirty it. Deliver a ready held plate at the green delivery tile; baked dishes require cooling. Delivery places the plate there and frees the hand. Plate contents travel with it. METHOD_station supports METHOD; phases count processing steps from phase0(raw).",
         "blocks": "One arm holds one block. pickup lifts a clear block from the table with an empty arm; unstack lifts a clear block from its direct supporting block, clearing that support. putdown places the held block on the table; stack places it on a clear block. Both free the arm. clear means supported on the table or another block with nothing directly above. Any block may support any other block.",
         "hanoi": "Move a top, clear disk from its direct support onto an empty peg or a top, clear larger disk. The old support becomes clear and the new support occupied. Disk dN has size N; d1 is smallest. Pegs are supports, never movable disks.",
-        "sliding_puzzle": "Each move swaps one tile with the orthogonally adjacent blank. Operation names describe BLANK movement, opposite to tile movement. In parameters (tile, from, to), from is the tile cell and to the blank cell before the swap. There is exactly one blank.",
+        "sliding_puzzle": "Each move swaps one tile with the orthogonally adjacent blank. Operation names describe BLANK movement, opposite to tile movement. There is exactly one blank.",
         "gripper": "The robot can move directly between any rooms. Its left and right grippers each hold one ball. pick requires the ball and robot in the same room and the selected gripper free; drop places its held ball in the current room and frees that gripper. Carried balls have no independent room location.",
         "miconic": "The lift may travel directly to any higher floor using up or any lower floor using down. board picks up an unserved waiting passenger at their origin; depart removes that passenger only at their destination and marks them served. Boarding consumes one free slot and departing restores one. Floor fN has height N. nN means N free slots.",
         "lights_out": "Pressing buttonR_C simultaneously flips lightR_C and its orthogonal neighbours using their previous states. A button belongs to row panelR. Connect a panel only when the shared connector is free; disconnecting frees it. Press only buttons of the connected panel. Buttons may be repeated. Rows and columns are zero-based from top-left.",
@@ -422,6 +449,12 @@ def instruction(domain_text, problem_text, vocabulary, notes, game):
     }
     if game not in rules:
         raise ValueError("Not a visual game: " + game)
+    if game == 'floortile':
+        operations = {a[1] for a in domain if isinstance(a, list) and a[0] == ':action'}
+        directions = [direction for name, direction in [('paint_up', 'above'), ('paint_down', 'below')]
+                      if name in operations]
+        rules[game] = rules[game].replace('above or below', ' or '.join(directions))
+    rules["miconic"] = rules["miconic"].replace("Boarding consumes", "For a finite-capacity lift, boarding consumes")
     goal_node = section(problem, ":goal")[1]
     goal = "Achieve this final state: " + phrase(goal_node, vocabulary)
     if game == "sokoban":
@@ -462,7 +495,7 @@ def instruction(domain_text, problem_text, vocabulary, notes, game):
         )
     if game in {"maze", "package", "printer"}:
         lines.append(
-            "The player arrow shows heading. For movement/interactions, from/to are player/target cells and d the heading; turns take old/new headings."
+            "The player arrow shows heading."
         )
     if game == "package":
         lines.append(
@@ -543,17 +576,10 @@ def instruction(domain_text, problem_text, vocabulary, notes, game):
             lines.append(
                 label + ": " + ", ".join(a[1] for a in initial if a[0] == pred) + "."
             )
-    lines.append("Available operation names and parameter order:")
-    for a in domain:
-        if isinstance(a, list) and a[:1] == [":action"]:
-            lines.append(
-                a[1]
-                + "("
-                + ", ".join(p.removeprefix("?") for p in fields(a)[":parameters"])
-                + ")"
-            )
+    from .instructions import operation_list
+    lines.append(operation_list(domain_text).rstrip())
     lines.append(
-        "Use visible IDs and these interfaces; choose predicate names while preserving the rules. Encode the depicted state and rule-implied bookkeeping; other facts are false. Unchanged facts persist."
+        "Use visible IDs and operation names; choose predicate names while preserving the rules. Encode the depicted state and rule-implied bookkeeping; other facts are false. Unchanged facts persist."
     )
     return "\n".join(lines) + "\n"
 

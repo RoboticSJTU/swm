@@ -20,18 +20,20 @@ from swm.pddl.planner import _run_fast_downward, fast_downward_path as FD, _outp
 from swm.pddl.strips import validate_untyped_pddl
 from swm.abstract_planning.model import parse_sexpr, section, fields, condition, apply_effect, verify_invariants
 from swm.abstract_planning import novel_games
+from swm.abstract_planning.instructions import names_only
+from swm.abstract_planning.action_alignment import align_actions, to_reference, to_candidate, AmbiguousActionMapping
 
 # 固定路径；只保留模型、数据集、并发这些实验配置。
 eval_model = '9B_3e_full'
 mapping_model = 'Qwen3.8-27B'
 datasets = ['abs_a_id', 'abs_a_scale', 'abs_b_base', 'abs_b_rule']
 max_workers = 200
-MANIFEST = ROOT / 'tasks/meta/abstract_planning_test_v2/manifest.jsonl'
+MANIFEST = ROOT / 'tasks/meta/abstract_planning_test/manifest.jsonl'
 PROMPT = ROOT / 'src/swm/prompt_templates/training_input_abstract.txt'
 VAL = ROOT / 'downloads/visual_pddl_v1/VAL/build/bin/Validate'
-eval_root = ROOT / 'eval_results' / eval_model / 'abstract_planning_test_v2'
+eval_root = ROOT / 'eval_results' / eval_model / 'abstract_planning_test'
 UNRESOLVED = {'generation_error', 'mapping_error', 'mapping_incomplete', 'solver_timeout',
-              'solver_memory_limit', 'search_incomplete', 'unsupported_pddl', 'infrastructure_error'}
+              'solver_memory_limit', 'search_incomplete', 'unsupported_pddl', 'infrastructure_error', 'action_mapping_ambiguous'}
 
 
 def sha(value):
@@ -199,9 +201,10 @@ def load_tasks(manifest=MANIFEST, selected_datasets=None):
             raise ValueError('Input differs from manifest: ' + row['id'])
         reference_steps = steps[dataset][row['task']][row['episode']]; gt = Path(row['gt'])
         if '\n'.join(reference_steps)+'\n' != (gt/'kf_actions.txt').read_text(): raise ValueError('Steps differ from reference: ' + row['id'])
-        for name in ['domain.pddl','problem.pddl','plan.txt']:
-            if sha((gt/'round1'/name).read_bytes()) != row['hashes'][name]: raise ValueError('Reference hash mismatch: ' + row['id'])
         scenario = json.loads((Path(row['metadata'])/'scenario.json').read_text())
+        if any((gt/'round1'/(name+'.pddl')).read_text().strip() != scenario[name].strip() for name in ['domain','problem']):
+            raise ValueError('Reference differs from scenario: ' + row['id'])
+        row['instruction'] = names_only(row['instruction'],scenario['domain'])
         row['_scenario'] = scenario; row['_oracle'] = machine(scenario['domain'],scenario['problem'])
         row['_reference_plan'] = read_plan(gt/'round1/plan.txt')
         expected = execute(row['_oracle'],row['_reference_plan'])
@@ -265,20 +268,25 @@ def align_objects(row, candidate, directory):
     return evidence
 
 
-def evaluate_probes(candidate, probes, mapping):
+def evaluate_probes(candidate, probes, mapping, adapters):
     inverse = {v:k for k,v in mapping.items()}; cache = {():{'executable':True,'state':candidate['init']}}
     results = []
     for probe in probes:
-        if any(x not in inverse for a in probe['actions'] for x in a[1:]):
-            results.append({'kind':probe['kind'],'pass':False,'status':'unmapped_probe'}); continue
-        actions = tuple((a[0],*(inverse[x] for x in a[1:])) for a in probe['actions']); prefix = ()
-        for index,act in enumerate(actions,1):
+        prefix = (); actual = cache[prefix]
+        for index,reference_act in enumerate(probe['actions'],1):
+            try: act = to_candidate(reference_act,inverse,adapters)
+            except KeyError:
+                actual = {'executable':False,'failed_step':index,'error':'Unmapped probe object'}; break
+            except ValueError as error:
+                actual = {'executable':False,'failed_step':index,'error':str(error)}; break
             previous, prefix = cache[prefix], (*prefix,act)
-            if prefix in cache: continue
-            if not previous['executable']: cache[prefix] = previous; continue
-            try: cache[prefix] = {'executable':True,'state':step(candidate,previous['state'],act)}
-            except ValueError as error: cache[prefix] = {'executable':False,'failed_step':index,'error':str(error)}
-        actual = cache[prefix]
+            if prefix not in cache:
+                if not previous['executable']: cache[prefix] = previous
+                else:
+                    try: cache[prefix] = {'executable':True,'state':step(candidate,previous['state'],act)}
+                    except ValueError as error: cache[prefix] = {'executable':False,'failed_step':index,'error':str(error)}
+            actual = cache[prefix]
+            if not actual['executable']:break
         reached = actual['executable'] and condition(candidate['goal'],actual['state'],{},candidate['objects'])
         passed = actual['executable'] == probe['executable'] and reached == probe['goal_reached']
         if not probe['executable']: passed = passed and actual.get('failed_step') == probe['failed_step']
@@ -291,7 +299,7 @@ def evaluate_probes(candidate, probes, mapping):
 
 def evaluate_candidate(row, raw_output, directory):
     directory.mkdir(parents=True,exist_ok=True)
-    for name in ['plan.txt','canonical_plan.txt','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','domain.pddl','problem.pddl']:
+    for name in ['plan.txt','canonical_plan.txt','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','domain.pddl','problem.pddl','action_mapping.json']:
         (directory/name).unlink(missing_ok=True)
     result = {k:row[k] for k in ['id','dataset','split','game','task','episode']}
     result.update(task_success=False,behavior_success=False,status='invalid_output',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
@@ -304,8 +312,10 @@ def evaluate_candidate(row, raw_output, directory):
         result['error'] = str(error); return result
     expected = {name:len(op[':parameters']) for name,op in row['_oracle']['ops'].items()}
     actual = {name:len(op[':parameters']) for name,op in candidate['ops'].items()}
-    result['interface_ok'] = bool(actual) and all(expected.get(name) == count for name,count in actual.items())
+    result['interface_ok'] = bool(actual) and set(actual) <= set(expected)
     result['missing_operations'] = sorted(set(expected)-set(actual))
+    if not result['interface_ok']:
+        result.update(status='interface_mismatch',error='Unknown or missing action names');return result
     result['solver'] = solve_files(directory,row['game'])
     if not result['solver']['solved']:
         result['status'] = result['solver']['status']; result['error'] = '\n'.join((directory/'solver.log').read_text().splitlines()[-12:]); return result
@@ -321,7 +331,12 @@ def evaluate_candidate(row, raw_output, directory):
     except Exception as error:
         result.update(status='mapping_error',error=f'{type(error).__name__}: {error}'); return result
     result['mapping_source'] = alignment['source']
-    canonical = [(a[0],*(mapping[x] for x in a[1:])) for a in plan]
+    try:
+        adapters = align_actions(candidate,row['_oracle'],mapping)
+        canonical = [to_reference(a,mapping,adapters) for a in plan]
+        write_json(directory/'action_mapping.json',{'source':'predicate extensions and action structure; no parameter-name or goal matching','operations':adapters})
+    except AmbiguousActionMapping as error:
+        result.update(status='action_mapping_ambiguous',error=str(error));return result
     (directory/'canonical_plan.txt').write_text('\n'.join('('+' '.join(a)+')' for a in canonical)+'\n')
     oracle = execute(row['_oracle'],canonical)
     reference = validate_files(Path(row['gt'])/'round1/domain.pddl',Path(row['gt'])/'round1/problem.pddl',directory/'canonical_plan.txt',directory/'reference_val.log')
@@ -336,7 +351,7 @@ def evaluate_candidate(row, raw_output, directory):
     elif oracle['executable']: verify_invariants(row['_scenario'],canonical,oracle['trace'])
     if reference != (oracle['executable'] and oracle['goal_reached']):
         result.update(status='infrastructure_error',error='VAL and reference interpreter disagree'); return result
-    result['probes'] = evaluate_probes(candidate,row['_probes'],mapping)
+    result['probes'] = evaluate_probes(candidate,row['_probes'],mapping,adapters)
     write_json(directory/'probes.json',{'definitions':row['_probes'],**result['probes']})
     result['task_success'] = result['interface_ok'] and own and reference
     result['behavior_success'] = result['task_success'] and result['probes']['pass']
@@ -356,7 +371,7 @@ def save_result(directory,result):
 
 def run_one(row,template,code_hash):
     directory = eval_root/row['dataset']/row['task']/row['episode']; directory.mkdir(parents=True,exist_ok=True)
-    prompt = template.format(instruction=row['instruction'],robot_configuration='single-arm')
+    prompt = template.format(instruction=names_only(row['instruction'],row['_scenario']['domain']),robot_configuration='single-arm')
     identity = {'model':eval_model,'prompt_sha256':sha(prompt),'image_sha256':row['hashes']['initial.png']}
     start = time.monotonic(); stage = 'generation_error'
     try:

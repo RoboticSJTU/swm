@@ -224,7 +224,7 @@ def build_pddl_action_template(
     out_log = out_dir / "retrieval_log.json"
 
     steps = [
-        re.sub(r"^(?:\[G\d+\]|\d+[.)])\s*", "", step)
+        re.sub(r"^(?:\[(?:G)?\d+\]|\d+[.)])\s*", "", step)
         for step in _read_lines(kf_actions_path)
     ]
     if not steps:

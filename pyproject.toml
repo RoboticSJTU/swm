@@ -25,6 +25,7 @@ dependencies = [
     "pyyaml",
     "Pillow",
     "numpy",
+    "pyarrow",
     "json-repair",
     "matplotlib"
 ]

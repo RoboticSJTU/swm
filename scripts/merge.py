@@ -17,8 +17,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 
 
-# 只需要修改这里。
-DATASET = "human_aug"
+# 只需要修改这里；多个数据集会合并到同一份算子库。
+DATASET = ["agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
 DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
 MAX_WORKERS = 100
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")
@@ -116,6 +116,8 @@ def canonical_signature(
     parameters_text: str,
     precondition_text: str,
     effect_text: str,
+    *,
+    variable_map_out: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Normalize variable names and unordered Boolean terms for action deduplication."""
     parameters = parse_sexp(parameters_text)
@@ -169,6 +171,8 @@ def canonical_signature(
     var_map = {
         variable: f"?v{index}" for index, variable in enumerate(ordered_vars)
     }
+    if variable_map_out is not None:
+        variable_map_out.update(var_map)
 
     def canon(
         node: PddlNode, bound: dict[str, str] | None = None, depth: int = 0
@@ -593,14 +597,19 @@ def write_outputs(
 
 def main() -> None:
     started = perf_counter()
-    root_dir = DATASET_ROOT / DATASET
+    dataset_name = "_".join(DATASET)
+    root_dir = DATASET_ROOT / dataset_name
     output_path = root_dir / "unified_domain.pddl"
     source_json_path = root_dir / "unified_operator_sources.json"
     print(f"[INFO] 数据集：{DATASET}", flush=True)
-    domain_files = find_domain_files(root_dir)
+    domain_files = [
+        path
+        for dataset in DATASET
+        for path in find_domain_files(DATASET_ROOT / dataset)
+    ]
     scan_seconds = perf_counter() - started
     if not domain_files:
-        raise FileNotFoundError(f"在 {root_dir} 下没有找到 domain.pddl")
+        raise FileNotFoundError(f"在数据集 {DATASET} 下没有找到 domain.pddl")
 
     print(
         f"[INFO] 找到 {len(domain_files)} 个 domain",
@@ -668,7 +677,7 @@ def main() -> None:
     if warning_count:
         print(f"[WARN] 输入检查或提取警告：{warning_count} 个文件（最多显示 3 个示例）")
         for path, warning in warning_examples:
-            print(f"[WARN] {Path(path).relative_to(root_dir)}：{' '.join(warning.split())}")
+            print(f"[WARN] {Path(path).relative_to(DATASET_ROOT)}：{' '.join(warning.split())}")
 
     if not predicate_index and not action_index:
         print("[WARN] 未提取到谓词或动作，将输出空算子库")
@@ -687,10 +696,11 @@ def main() -> None:
         count for count in action_contract_counts.values() if count > 1
     ]
 
+    root_dir.mkdir(parents=True, exist_ok=True)
     write_outputs(
         merged_predicates,
         merged_actions,
-        DATASET,
+        dataset_name,
         output_path,
         source_json_path,
     )

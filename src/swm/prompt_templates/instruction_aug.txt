@@ -1,93 +1,44 @@
-You are generating augmented robot task instructions for the SAME image and the SAME remaining task.
+Write one high-level English instruction for a robot-learning sample that starts from the attached current-state image.
 
-The dataset trains a vision-language robot planner.
-The language instruction should describe the high-level goal.
-The image should preserve hidden executable preconditions.
-Do not turn the instruction into a step-by-step robot plan.
-
-Core rule:
-- Preserve the user's explicitly stated information.
-- Only simplify hidden or implicit executable details inferred from the image or remaining steps.
-- Do not delete context sentences that appear in the original instruction.
-
-Important distinction:
-- If a source location, support, container, blocker, or object state is explicitly written in the original instruction, keep it.
-- If it only comes from the image or remaining steps, you may omit it.
-- Do not add new final states such as close, open, lock, unlock, return, turn on, or turn off unless they are explicitly requested in the original instruction.
-
-Usually remove:
-- implicit source locations not stated in the original instruction,
-- implicit current supports not stated in the original instruction,
-- blockers or occluders not stated in the original instruction,
-- low-level pick/lift/grab/take/remove steps,
-- action ordering caused only by executability.
-
-Usually keep:
-- all explicit context from the original instruction,
-- final target objects,
-- final destination or container,
-- final spatial relation,
-- explicit final states such as closed, locked, returned, turned off, or placed.
-
-Examples:
-Bad: Lift the green bowl out of the yellow bowl and place it on the white plate.
-Good: Place the green bowl on the white plate.
-
-Bad: Use the key to open the drawer.
-Good: Open the drawer.
-
-Good: Put the pill bottle into the top drawer, then close and lock the drawer and return the key.
-
-Inputs:
-
-Original full instruction:
+Original task:
 {instruction}
 
-Completed actions already done:
+Actions completed earlier within this derived task:
 {completed_actions}
 
-Remaining steps for reference only:
-{remaining_actions}
+Target actions included in this derived sample:
+{target_actions}
 
-Existing augmented instructions for this same source segment:
-{existing_block}
+Source actions outside this derived task:
+{excluded_actions}
 
-Style slots:
-{style_slots}
+Wording preference:
+{style_guide}
 
-Task:
-Generate exactly {need} new instructions.
+Core rule:
+Request exactly the high-level goal expressed by the target actions from the current state.
 
 Requirements:
-- Describe only the remaining task.
-- Preserve the remaining final goal.
-- Do not ask for completed parts again.
-- Do not invent new objects, tools, destinations, states, or goals.
-- Do not mention image, photo, scene, camera, frame, or robot.
-- Do not mention Remaining steps or Completed actions.
-- Every generated instruction must be meaningfully different from all others in this JSON.
-- Do not generate exact duplicates or near-duplicates.
-- Do not only change polite words, word order, or synonyms while keeping the same sentence template.
-- Avoid repeating existing augmented instructions.
-- Keep every instruction concise.
+- Use the current image as evidence for the starting state. Use the target actions as authoritative for what this sample must still achieve.
+- Cover the intended effect of every target action. An effect remains required even when its object is already held or the image is ambiguous.
+- Do not request completed actions, already achieved effects, or actions outside the derived task, even if the original task mentions them.
+- Preserve every destination, relation, quantity, device state, or return condition required by the target actions.
+- Use the original task to understand intent and object identity. Use all action lists as semantic evidence, not wording to copy.
+- Identify objects naturally with grounded, task-relevant attributes visible in the current state, such as color, material, size, location, or relation. Use attributes to disambiguate, not as decorative filler.
+- When useful, refer to an already achieved effect as current-state context, but do not request that effect again.
+- Vary the semantic framing, sentence structure, and information focus: express the target as an end state, a state transition, an ordered outcome, a destination-centered result, or an object-centered result as appropriate. Also vary how objects are identified; do not rely only on verb substitutions.
+- Avoid stock wording when an equally clear grounded description is available, while keeping genuinely simple goals short.
+- Do not reuse a sentence template from another sample or make a near-duplicate by changing only one verb, article, or word order.
+- Mention only grounded objects, attributes, relations, and states that help make the target goal unambiguous.
+- Omit hand choice, grasping, intermediate tool handling, and other execution details unless they are part of the target goal.
+- Do not invent objects, destinations, relations, states, or actions.
+- Do not mention the image, scene, camera, frame, robot, action lists, or task split.
+- Use a natural command, not a step-by-step plan.
+- Choose verbs appropriate to the task; do not force placement wording onto other task types.
 
 Return JSON only:
-{{
-  "shared_goal": "brief summary of the common high-level remaining goal",
-  "hidden_details_not_mentioned": ["brief hidden details intentionally kept out of language"],
-  "variants": [
-    {{
-      "slot": 1,
-      "instruction": "generated instruction",
-      "style_label": "short style label"
-    }}
-  ]
-}}
+{{"instruction": "generated instruction"}}
 
-Output rules:
-- variants must contain exactly {need} items.
-- slot must be integers from 1 to {need}, each exactly once.
-- Do not output markdown.
-- Do not output reasoning outside JSON.
+Do not output markdown or reasoning outside the JSON.
 
 {retry_block}

@@ -8,6 +8,8 @@
 - Add a process result only to the action that completes the process.
 - For every object category, an oriented placement must require the visually supported source pose and change only that pose: delete the source pose and add the target pose. Do not emit unrelated pose negations. Picking preserves pose; when the source and target pose are identical, placement has no pose effect.
 - Model each hand as a unit-capacity resource; use hand identity only for resource accounting, with no unsupported left/right capability differences.
+- When category guards allow the same object in content/container or object/support roles, require distinct bindings with `(not (= ?object ?target))`; do not impose blanket inequalities on unrelated roles.
+- Require placement targets to be accessible outside the object or group being held; containment and support must remain acyclic.
 
 ### (2) Naming
 
@@ -22,6 +24,7 @@
 
 ## 2. Predicates
 
+- Use valid PDDL identifiers, avoiding reserved keywords. Object identity is implicit; do not put object equality or inequality assertions in :init.
 - Use no :types, :typing, or typed declarations. Represent categories with static unary predicates in :init and action preconditions.
 - Use the smallest predicate vocabulary that preserves all planning-relevant distinctions; omit irrelevant attributes, scene details, and unnecessary intermediate states.
 - Prefer canonical relations such as `at(object, position)`, `on(object, support)`, `in(content, container)`, `part_of(part, whole)`.

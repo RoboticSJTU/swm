@@ -1,11 +1,13 @@
 """Export approved PDDL rounds and normalize/prune their source PDDL."""
 
 import json
+import os
 import re
 import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from time import perf_counter
 
 # ============================================================
 # 配置：只需要修改这里
@@ -18,14 +20,17 @@ if str(SRC_DIR) not in sys.path:
 from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
-ROBOT_CONFIGURATION = "single_arm"
-TASK_DOMAINS = ["swm", "swm_v2", "unidomain"]
-
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
 # ROBOT_CONFIGURATION = "dual_arm"
 # TASK_DOMAINS = ["agibot", "agibot_aug"]
+
+# ROBOT_CONFIGURATION = "dual_arm"
+# TASK_DOMAINS = ["agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
+
+ROBOT_CONFIGURATION = "dual_arm"
+TASK_DOMAINS = ["gelaxea", "gelaxea_aug"]
 
 PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
@@ -37,7 +42,6 @@ ONLY_PROBLEM_OUT_JSON_PATH = OUT_JSON_PATH.with_name(OUT_JSON_PATH.stem + "_only
 ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 MAX_WORKERS = 100
-
 
 # ============================================================
 # PDDL 解析与格式化
@@ -308,21 +312,69 @@ def inspect_init(problem):
 
 def find_image(task_domain, task_id, episode_id):
     directory = KEYFRAMES_ROOT / task_domain / task_id / episode_id / "seg_00"
-    if directory.is_dir():
-        images = [
-            path
-            for path in directory.iterdir()
-            if path.is_file()
-            and path.suffix.lower() == ".png"
-            and path.stem.isdigit()
-        ]
-        if images:
-            return str(min(images, key=lambda path: int(path.stem)))
+    try:
+        with os.scandir(directory) as entries:
+            images = [
+                Path(entry.path)
+                for entry in entries
+                if entry.name.lower().endswith(".png")
+                and entry.name[:-4].isdigit()
+                and entry.is_file()
+            ]
+    except (FileNotFoundError, NotADirectoryError):
+        images = []
+    if images:
+        return str(min(images, key=lambda path: int(path.stem)))
 
     image_path = IMAGES_ROOT / task_domain / task_id / f"{episode_id}.png"
     if image_path.is_file():
         return str(image_path)
     return None
+
+
+def find_task_rounds(item):
+    """扫描一个 task，只检查指令中包含的 episode 的最大 round。"""
+    task_dir, allowed_episodes = item
+    task_id = Path(task_dir).name
+    with os.scandir(task_dir) as entries:
+        episodes = sorted(
+            (entry.name, entry.path)
+            for entry in entries
+            if entry.name.startswith("episode_")
+            and entry.name in allowed_episodes
+            and entry.is_dir()
+        )
+
+    valid_rounds = []
+    rejected_rounds = []
+    for episode_id, episode_dir in episodes:
+        with os.scandir(episode_dir) as entries:
+            rounds = [
+                Path(entry.path)
+                for entry in entries
+                if re.fullmatch(r"round\d+", entry.name) and entry.is_dir()
+            ]
+        round_dir = max(rounds, key=lambda path: int(path.name[5:]), default=None)
+        if round_dir is None:
+            continue
+        if not all(
+            (round_dir / name).is_file()
+            for name in ("domain.pddl", "problem.pddl", "judge.json")
+        ):
+            continue
+        try:
+            judge = json.loads((round_dir / "judge.json").read_text(encoding="utf-8"))
+            if judge.get("pass") is not True:
+                reason = judge.get("feedback") or judge.get("reasoning") or "judge.pass is not True"
+                rejected_rounds.append((
+                    (task_id, episode_id),
+                    f"[JUDGE REJECTED] {round_dir.relative_to(ROOT_DIR)}: {reason}",
+                ))
+                continue
+        except json.JSONDecodeError:
+            continue
+        valid_rounds.append(((task_id, episode_id), round_dir))
+    return valid_rounds, rejected_rounds
 
 
 def prepare_round(item):
@@ -383,7 +435,15 @@ def prepare_round(item):
         return key, None, "[PDDL SKIP] " + message, None, message
 
 
+def prepare_episode(item):
+    task_domain, key, round_dir = item
+    result = prepare_round((key, round_dir))
+    image_path = find_image(task_domain, *key) if result[1] is not None else None
+    return result, image_path
+
+
 def process_domain(task_domain, prompt_template, only_problem_template):
+    started = perf_counter()
     eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
     instruction_path = ROOT_DIR / f"tasks/instructions/instructions_{task_domain}.json"
     instructions = json.loads(instruction_path.read_text(encoding="utf-8"))
@@ -396,43 +456,32 @@ def process_domain(task_domain, prompt_template, only_problem_template):
         for task_id, episodes in instructions.items()
         for episode_id, instruction in episodes.items()
     )
-    allowed = {(task_id, episode_id) for task_id, episode_id, _ in records}
+    print(f"[{task_domain}] scanning {len(records)} episode(s)", flush=True)
+    try:
+        with os.scandir(eval_root) as entries:
+            task_dirs = sorted(
+                (entry.path, set(instructions[entry.name]))
+                for entry in entries
+                if entry.name.startswith("task_")
+                and entry.name in instructions
+                and entry.is_dir()
+            )
+    except (FileNotFoundError, NotADirectoryError):
+        task_dirs = []
 
     valid_rounds = {}
-    episodes = sorted(
-        path
-        for path in eval_root.glob("task_*/episode_*")
-        if path.is_dir()
-    )
-    for episode in episodes:
-        task_id, episode_id = episode.relative_to(eval_root).parts
-        rounds = [
-            path
-            for path in episode.iterdir()
-            if path.is_dir() and re.fullmatch(r"round\d+", path.name)
-        ]
-        round_dir = max(rounds, key=lambda path: int(path.name[5:]), default=None)
-        if (task_id, episode_id) not in allowed or round_dir is None:
-            continue
+    rejected_rounds = {}
+    if task_dirs:
+        # 与 merge.py 一样，重叠共享文件系统的元数据等待，保留排序。
+        with ProcessPoolExecutor(
+            max_workers=min(32, MAX_WORKERS, len(task_dirs))
+        ) as executor:
+            for rounds, rejected in executor.map(find_task_rounds, task_dirs):
+                valid_rounds.update(rounds)
+                rejected_rounds.update(rejected)
+    scan_seconds = perf_counter() - started
 
-        domain_path = round_dir / "domain.pddl"
-        problem_path = round_dir / "problem.pddl"
-        judge_path = round_dir / "judge.json"
-        if not (
-            domain_path.is_file()
-            and problem_path.is_file()
-            and judge_path.is_file()
-        ):
-            continue
-        try:
-            judge = json.loads(judge_path.read_text(encoding="utf-8"))
-            if judge.get("pass") is not True:
-                continue
-        except json.JSONDecodeError:
-            continue
-        valid_rounds[(task_id, episode_id)] = round_dir
-
-    review_messages = []
+    review_messages = list(rejected_rounds.values())
     init_reviews = []
     prepared_rounds = {}
     pddl_errors = []
@@ -440,24 +489,26 @@ def process_domain(task_domain, prompt_template, only_problem_template):
     workers = min(MAX_WORKERS, len(valid_rounds)) if valid_rounds else 1
     print(
         f"[{task_domain}] preparing {len(valid_rounds)} episode(s) "
-        f"with {workers} processes"
+        f"with {workers} processes (scan={scan_seconds:.1f}s)",
+        flush=True,
     )
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        results = executor.map(
-            prepare_round,
-            list(valid_rounds.items()),
-            chunksize=50,
-        )
-        for key, prepared, review, init_review, pddl_error in results:
-            if prepared is not None:
-                prepared_rounds[key] = prepared
-            if review is not None:
-                review_messages.append(review)
-            if init_review is not None:
-                init_reviews.append(init_review)
-            if pddl_error is not None:
-                pddl_errors.append(pddl_error)
-                valid_rounds.pop(key)
+    if valid_rounds:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            results = executor.map(
+                prepare_episode,
+                ((task_domain, key, path) for key, path in valid_rounds.items()),
+                chunksize=max(1, min(50, len(valid_rounds) // workers)),
+            )
+            for (key, prepared, review, init_review, pddl_error), image_path in results:
+                if prepared is not None:
+                    prepared_rounds[key] = (*prepared, image_path)
+                if review is not None:
+                    review_messages.append(review)
+                if init_review is not None:
+                    init_reviews.append(init_review)
+                if pddl_error is not None:
+                    pddl_errors.append(pddl_error)
+    prepare_seconds = perf_counter() - started - scan_seconds
 
     samples = []
     only_problem_samples = []
@@ -465,18 +516,19 @@ def process_domain(task_domain, prompt_template, only_problem_template):
     missing_image = 0
     for task_id, episode_id, instruction in records:
         key = (task_id, episode_id)
+        if key in rejected_rounds:
+            continue
         if key not in valid_rounds:
             missing_episode += 1
             continue
         if key not in prepared_rounds:
             continue
 
-        image_path = find_image(task_domain, task_id, episode_id)
+        domain_text, problem_text, image_path = prepared_rounds[key]
         if image_path is None:
             missing_image += 1
             continue
 
-        domain_text, problem_text = prepared_rounds[key]
         problem_output = f"<problem>\n{problem_text}\n</problem>"
         domain_output = f"<domain>\n{domain_text}\n</domain>"
         for dataset, template, answer in (
@@ -501,14 +553,19 @@ def process_domain(task_domain, prompt_template, only_problem_template):
     print(
         f"[{task_domain}] saved={len(samples)}/{len(records)}  "
         f"missing_episode={missing_episode}  "
+        f"judge_rejected={len(rejected_rounds)}  "
         f"missing_image={missing_image}  init_review={len(init_reviews)}  "
-        f"pddl_skip={len(pddl_errors)}"
+        f"pddl_skip={len(pddl_errors)}  "
+        f"time={perf_counter() - started:.1f}s "
+        f"(scan={scan_seconds:.1f}s, prepare+images={prepare_seconds:.1f}s)",
+        flush=True,
     )
 
     return samples, only_problem_samples, review_messages
 
 
 def main():
+    started = perf_counter()
     prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
     only_problem_template = ONLY_PROBLEM_PROMPT_PATH.read_text(encoding="utf-8")
     samples = []
@@ -535,6 +592,7 @@ def main():
         print(f"[review] {len(review_messages)} issue(s) -> {ERROR_LOG_PATH}")
     else:
         ERROR_LOG_PATH.unlink(missing_ok=True)
+    print(f"[done] total time={perf_counter() - started:.1f}s", flush=True)
 
 
 if __name__ == "__main__":

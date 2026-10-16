@@ -51,7 +51,7 @@ def successors(game, spec, state):
             required = {"red": spec["red_phase"], "blue": 1 - spec["red_phase"]}
             if color and phase != required[color]:
                 continue
-            yield ("move", pos, entry), (entry, phase)
+            yield ("move", pos, entry, f"phase{phase}"), (entry, phase)
         elif game == "energy_route":
             energy = state[1]
             cost = spec["rough_cost"] if entry in spec["rough"] else 1
@@ -135,7 +135,8 @@ def formalize(game, seed, spec):
                 color = spec["gates"].get(c)
                 phases = [spec["red_phase"] if color == "red" else 1-spec["red_phase"]] if color else [0, 1]
                 initial += [["allows", c, f"phase{p}"] for p in phases]
-            actions = [action("move", "?from ?to", "(and (at_player ?from) (neighbor ?from ?to) (exists (?p) (and (phase ?p) (allows ?to ?p))))", "(and (not (at_player ?from)) (at_player ?to))"),
+            # Use ordinary state parameters, as in the training resource operators.
+            actions = [action("move", "?from ?to ?phase", "(and (at_player ?from) (neighbor ?from ?to) (phase ?phase) (allows ?to ?phase))", "(and (not (at_player ?from)) (at_player ?to))"),
                        action("toggle", "?loc ?previous ?result", "(and (at_player ?loc) (console ?loc) (phase ?previous) (flip ?previous ?result))", "(and (not (phase ?previous)) (phase ?result))")]
             vocab |= {"phase": "the global phase is {0}", "flip": "{0} toggles to {1}", "console": "cell {0} has a phase console", "allows": "cell {0} permits entry during {1}"}
             rules = f"Move one orthogonal floor cell. Enter red gates only in phase{spec['red_phase']}, blue gates only in phase{1-spec['red_phase']}. Other cells allow either phase. At a dial, toggle phase without moving; movement preserves phase."
@@ -154,14 +155,15 @@ def formalize(game, seed, spec):
             initial += [["landing", c, t] for c in cells if (t := landing(spec, c)) is not None]
             actions = [action("move", "?from ?entry ?to", "(and (at_player ?from) (neighbor ?from ?entry) (landing ?entry ?to) (not (= ?from ?to)))", "(and (not (at_player ?from)) (at_player ?to))")]
             vocab["landing"] = "entering cell {0} follows the arrow chain and stops at {1}"
-            rules = "Enter an orthogonally adjacent floor cell. On arrows, automatically follow the arrow chain until an unmarked cell. A chain hitting a wall, looping, or returning to the start makes the whole move illegal. entry is the adjacent cell; to is the final landing cell."
+            rules = "Enter an orthogonally adjacent floor cell. On arrows, automatically follow the arrow chain until an unmarked cell. A chain hitting a wall, looping, or returning to the start makes the whole move illegal."
     constants = ["n4"] if game == "energy_route" else []
     domain = make_domain(game, actions, initial, goal, constants)
     prompt = "Goal: " + (f"put token A at {spec['goal'][0]} and token B at {spec['goal'][1]}" if game == "coupled_tokens" else f"reach {spec['goal'][0]}") + ".\nRules: " + rules + "\n"
     prompt += "r01c01 is top-left; rows increase down, columns right. Walls and boundaries block movement.\n"
     legend = {"phase_gates": "Arches are gates; the header shows phase.", "energy_route": "The header shows current energy.", "coupled_tokens": "North is up; A/B label the tokens.", "conveyor_route": ""}[game]
     if legend: prompt += legend + "\n"
-    prompt += "Actions:\n" + "\n".join(a[1]+"("+", ".join(x.lstrip("?") for x in fields(a)[":parameters"])+")" for a in actions) + "\n"
+    from .instructions import operation_list
+    prompt += operation_list(domain)
     return {"game": game, "seed": seed, "variant": "base" if spec.get("red_phase", 0) == 0 and spec.get("rough_cost", 2) == 2 else "rule_changed", "domain": domain, "problem": make_problem(game, [x for x in objects if x not in constants], initial, goal), "vocabulary": vocab, "notes": [rules], "novel": spec, "instruction": prompt, "source": {"repository": "local held-out geometric game rules"}}
 
 
@@ -285,7 +287,7 @@ def verify_transitions(scenario):
         legal = dict(successors(game,spec,state))
         candidates = set(legal)
         if game == "phase_gates":
-            candidates.update(("move",state[0],c) for c in spec["cells"])
+            candidates.update(("move",state[0],c,f"phase{i}") for c in spec["cells"] for i in range(2))
             candidates.update(("toggle",c,f"phase{i}",f"phase{j}") for c in spec["cells"] for i in range(2) for j in range(2))
         elif game == "energy_route":
             candidates.update(("move",state[0],c,f"n{i}",f"n{j}") for c in spec["cells"] for i in range(5) for j in range(5))
@@ -324,8 +326,9 @@ def verify_edge_rules():
     swapped=dict(successors("coupled_tokens",{"cells":[a,b]},(a,b)))
     assert swapped[("move_east",a,b,b,a)]==(b,a)
     spec={"cells":[a,b],"gates":{b:"red"},"consoles":[a],"red_phase":0}
-    assert ("move",a,b) in dict(successors("phase_gates",spec,(a,0)))
-    assert ("move",a,b) not in dict(successors("phase_gates",spec,(a,1)))
+    assert ("move",a,b,"phase0") in dict(successors("phase_gates",spec,(a,0)))
+    assert ("move",a,b,"phase1") not in dict(successors("phase_gates",spec,(a,1)))
+    assert ("move",a,b,"phase1") not in dict(successors("phase_gates",spec,(a,0)))
     spec={"cells":[a,b],"rough":[b],"chargers":[a],"rough_cost":3}
     assert not any(act[0]=="move" for act,_ in successors("energy_route",spec,(a,2)))
     assert not any(act[0]=="charge" for act,_ in successors("energy_route",spec,(a,4)))
