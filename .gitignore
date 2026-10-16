@@ -57,6 +57,7 @@ Thumbs.db
 /tmp/
 /domain/
 /test_pddl/
+/scripts/clean_operator/
 *.log
 
 # External planner source/build tree

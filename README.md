@@ -117,6 +117,12 @@ eval_results/<model>/<domain>/<task>/<episode>/
 | `scripts/clean_operator/validate_operator_cleanup.py` | 验证 operator 清洗结果 |
 | `scripts/clean_operator/audit_cleaned_operator_contracts.py` | 审计 operator contract 一致性 |
 
+`scripts/eval_planning.py` 的 PDDL 模式默认先保存原始评测报告，再静态补全
+缺失的谓词、对象和动作参数，对有改动的任务重新求解、Judge 和归因。
+修复文件、改动记录 `postprocess.json` 和第二份报告保存到评测目录的
+`postprocessed/` 下；未改动任务复用原结果，两份报告的任务总数一致。
+将脚本顶部的 `rule_postprocess` 设为 `False` 可关闭此阶段。
+
 PDDL 评测还会通过 `swm.simulator.verify_cross_domain_files` 使用 GT PDDL
 回放候选计划，结果单独写入 `simulator.json`；`judge.json` 保持原样。
 模拟器保留 `PASS`、`FAIL`、`UNKNOWN` 三态，缺少 GT 或无效输入记为
