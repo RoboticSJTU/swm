@@ -1,0 +1,63 @@
+Use only needed entries with these meanings and argument roles; this is a vocabulary, not a domain to copy. Other object categories use static unary predicates. Extensions must express a necessary distinction rather than rename an existing one.
+
+(:predicates
+  ; Static: categories and fixed structural/supply/control relations never change.
+  (hand ?hand)
+  (part_of ?part ?whole)
+  (dispenses ?source ?material)
+  (controls ?control ?device)
+
+  ; Hand resource: acquisition consumes hand_free; release restores it.
+  (hand_free ?hand)
+  (holding ?hand ?object)
+  ; Sustained button control occupies the hand until release, when needed.
+  (pressing ?hand ?button)
+
+  ; Direct relations: remove superseded relations on transfer or detachment.
+  (on ?object ?support)
+  (in ?content ?container)
+  (inserted ?object ?socket)
+  (at ?object ?region) ; Only for a relevant region, not instead of on/in.
+  (under ?object ?reference)
+  (aligned ?object ?reference)
+
+  ; Dynamic state pairs: require and delete the old state when changing it.
+  (open ?unit)
+  (closed ?unit)
+  (is_on ?device)
+  (is_off ?device)
+  (locked ?unit)
+  (unlocked ?unit)
+  (pressed ?control)
+  (unpressed ?control)
+  (folded ?object)
+  (unfolded ?object)
+
+  ; Distinct meanings: clear = usable support is unobstructed;
+  ; empty = no contents; filled = required fill level reached.
+  ; Update on relevant loading, unloading, or obstruction changes.
+  (clear ?support)
+  (empty ?container)
+  (filled ?container)
+  ; Opening-path clearance, not empty interior or clear support.
+  ; Establish opening_clear only after all relevant blockers are removed.
+  (opening_clear ?unit)
+  (blocks_opening ?blocker ?unit)
+
+  ; Optional physical pose: upright/upside_down and flat/vertical are pairs
+  ; within their respective dimensions. Add only when required by the task.
+  (upright ?object)
+  (upside_down ?object)
+  (flat ?object)
+  (vertical ?object)
+
+  ; Optional results: establish on actual completion; invalidate if undone.
+  ; Heating differs from boiling; rinsing, wiping, and cleanliness differ.
+  (heated ?object)
+  (boiled ?material)
+  (rinsed ?object)
+  (wiped ?surface)
+  (clean ?object)
+  (wet ?object)
+  (stirred ?material)
+)
