@@ -25,6 +25,7 @@ def construct_prompt_with_feedback(
     action_template: str = "",
     robot_configuration: str = "dual-arm",
 ) -> str:
+    # action_template is retained for legacy callers; operator examples are unused.
     if robot_configuration not in {"single-arm", "dual-arm"}:
         raise ValueError(f"Unsupported robot configuration: {robot_configuration}")
 
@@ -38,8 +39,8 @@ def construct_prompt_with_feedback(
         robot_configuration=robot_configuration,
         failed_domain=failed_domain,
         failed_problem=failed_problem,
-        failed_plan=failed_plan or "Unsolveable.",
+        failed_plan=failed_plan or "No plan available.",
         feedback=feedback,
         rules=read_prompt("RULES.txt"),
-        action_template=action_template.strip(),
+        predicates=read_prompt("PREDICATE_TEMPLATE.txt"),
     )

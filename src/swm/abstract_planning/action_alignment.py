@@ -140,3 +140,4 @@ def to_candidate(action, inverse, adapters):
     for i,value in adapter['candidate_singletons'].items():args[int(i)]=inverse[value]
     if any(x is None for x in args):raise ValueError('Incomplete action mapping')
     return (action[0],*args)
+

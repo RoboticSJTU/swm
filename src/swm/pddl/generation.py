@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from swm.llm import call_gpt_json
+from swm.pddl.generation_contract import validate_generated_pddl, validate_generated_plan
 from swm.pddl.planner import solve_pddl, summarize_solver_error
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 from swm.prompts import construct_prompt_with_feedback
@@ -53,6 +54,7 @@ def generate_pddl(
     action_template: str = "",
     robot_configuration: str = "dual-arm",
 ):
+    # Keep action_template for legacy callers; the shared contract replaces examples.
     round_dir = save_dir / f"round{attempt}"
     round_dir.mkdir(parents=True, exist_ok=True)
     domain_path = round_dir / "domain.pddl"
@@ -62,7 +64,7 @@ def generate_pddl(
     feedback_parts = []
     if retry_state.solver_feedback:
         feedback_parts.append(
-            "[Solver failure]\n" + retry_state.solver_feedback.strip()
+            "[Generation/planning failure]\n" + retry_state.solver_feedback.strip()
         )
     if retry_state.judge_feedback:
         feedback_parts.append("[Judge failure]\n" + retry_state.judge_feedback.strip())
@@ -74,7 +76,6 @@ def generate_pddl(
         failed_domain=retry_state.prev_domain,
         failed_problem=retry_state.prev_problem,
         failed_plan=retry_state.prev_plan,
-        action_template=action_template,
         robot_configuration=robot_configuration,
     )
 
@@ -99,36 +100,40 @@ def generate_pddl(
             invalid.append("domain")
         if not problem_str.strip():
             invalid.append("problem")
+        feedback = (
+            "PDDL output contract failed: expected non-empty string field(s): "
+            + ", ".join(invalid)
+        )
+        (round_dir / "error.log").write_text(feedback, encoding="utf-8")
         return {
             "ok": False,
             "round_dir": round_dir,
             "domain": domain_str,
             "problem": problem_str,
             "plan": "",
-            "solver_feedback": (
-                "PDDL output contract failed: expected non-empty string field(s): "
-                + ", ".join(invalid)
-            ),
+            "solver_feedback": feedback,
         }
 
     try:
         validate_untyped_pddl(domain_str)
         validate_untyped_pddl(problem_str)
         domain_str = format_action_conditions(domain_str)
+        domain_path.write_text(domain_str, encoding="utf-8")
+        problem_path.write_text(problem_str, encoding="utf-8")
+        schemas, problem = validate_generated_pddl(domain_path, problem_path)
     except (ValueError, NotImplementedError) as error:
         domain_path.write_text(domain_str, encoding="utf-8")
         problem_path.write_text(problem_str, encoding="utf-8")
+        feedback = f"PDDL output contract failed: {error}"
+        (round_dir / "error.log").write_text(feedback, encoding="utf-8")
         return {
             "ok": False,
             "round_dir": round_dir,
             "domain": domain_str,
             "problem": problem_str,
             "plan": "",
-            "solver_feedback": f"PDDL output contract failed: {error}",
+            "solver_feedback": feedback,
         }
-
-    domain_path.write_text(domain_str, encoding="utf-8")
-    problem_path.write_text(problem_str, encoding="utf-8")
 
     if not solve_pddl(domain_path, problem_path):
         error_log = (round_dir / "error.log").read_text(encoding="utf-8")
@@ -140,6 +145,21 @@ def generate_pddl(
             "problem": problem_str,
             "plan": "",
             "solver_feedback": solver_feedback,
+        }
+
+    try:
+        validate_generated_plan(plan_path, schemas, problem)
+    except (OSError, ValueError, KeyError) as error:
+        feedback = f"PDDL plan validation failed: {error}"
+        (round_dir / "error.log").write_text(feedback, encoding="utf-8")
+        plan_path.unlink(missing_ok=True)
+        return {
+            "ok": False,
+            "round_dir": round_dir,
+            "domain": domain_str,
+            "problem": problem_str,
+            "plan": "",
+            "solver_feedback": feedback,
         }
 
     plan_text = plan_path.read_text(encoding="utf-8")

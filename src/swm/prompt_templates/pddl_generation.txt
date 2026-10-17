@@ -1,4 +1,4 @@
-You are an expert in writing a PDDL domain and problem grounded in the given image and instruction for robot task planning.
+Generate a task-correct PDDL domain and problem grounded in the initial image, instruction, and observed steps. Follow the shared modeling contract below.
 
 # INPUT
 
@@ -10,20 +10,18 @@ You are an expert in writing a PDDL domain and problem grounded in the given ima
 
 {rules}
 
-# OPTIONAL OPERATOR REFERENCES
+# PREDICATE VOCABULARY
 
-{action_template}
+{predicates}
 
 # REASONING PROCESS
 
-(a) Scene understanding: From the image, identify all task-relevant objects, their number, locations, immediate support/containment relations, and the open/closed/on/off states of relevant containers/devices.
-(b) Domain construction: Based on the scene understanding and action templates, declare the necessary predicates and action definitions in causal execution order.
-(c) Problem construction: Encode all and only task-relevant objects and initial facts, including the hand state. Encode only instruction-required final states in goal, excluding temporary staging relations. Goal conjunct order does not impose execution order. Distinguish required operations from final states, and enforce explicitly required action ordering through causal preconditions; do not impose ordering on independent actions.
+Ground object identities/counts, direct relations, and initial resource/device states in the evidence. Choose functional units and necessary predicates, then construct transitions and names. Goals express required final results, not temporary staging; conjunct order does not impose action order.
 
 Return exactly one valid JSON object and no Markdown code fence or surrounding text.
 
 {{
-  "reasoning": "a three-part analysis with the following structure. (a) Scene understanding. (b) Domain construction. (c) Problem construction.",
+  "reasoning": "Brief grounding and modeling decisions; justify any separate parts, poses, or new predicates.",
   "domain": "complete PDDL domain string",
   "problem": "complete PDDL problem string"
 }}

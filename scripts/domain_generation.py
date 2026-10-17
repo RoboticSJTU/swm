@@ -17,7 +17,7 @@ from swm.pddl.strips import (
     parse_problem_model,
     rollout,
 )
-from swm.prompts import construct_instruction_with_steps, read_prompt
+from swm.prompts import construct_instruction_with_steps
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 STEP_SOURCE = "video"  # "video" or "steps_json"
@@ -28,9 +28,6 @@ ACTION_EXTRACTION_MODEL = "Qwen3.8-27B"
 JUDGE_MODEL = "gemini-3.8-flash"
 
 ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
-ACTION_TEMPLATE_MODE = "fixed"  # "fixed" or "retrieved"
-ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
-ACTION_TEMPLATE_DOMAIN = "human"
 
 
 MAX_PLAN_ATTEMPTS = 3
@@ -169,56 +166,6 @@ def prepare_temporal_gradient_keyframes(task: dict) -> dict:
     return metadata
 
 
-def find_task_action_template(task_id: str) -> str:
-    task_dir = ROOT_DIR / "eval_results" / ACTION_TEMPLATE_MODEL / ACTION_TEMPLATE_DOMAIN / task_id
-    episode_dirs = [path for path in task_dir.glob("episode_*") if path.is_dir()]
-    if not episode_dirs:
-        return ""
-
-    first_episode = min(episode_dirs, key=lambda path: int(path.name.rsplit("_", 1)[1]))
-    passed_rounds = []
-    for judge_path in first_episode.glob("round*/judge.json"):
-        round_dir = judge_path.parent
-        round_number = round_dir.name.removeprefix("round")
-        if round_number.isdigit() and judge_path.is_file():
-            try:
-                judge_result = json.loads(judge_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if judge_result.get("pass") is True:
-                domain_path = round_dir / "domain.pddl"
-                if domain_path.is_file():
-                    passed_rounds.append((int(round_number), round_dir))
-
-    if not passed_rounds:
-        return ""
-
-    domain_path = max(passed_rounds)[1] / "domain.pddl"
-    if not domain_path.is_file():
-        return ""
-
-    domain_text = domain_path.read_text(encoding="utf-8")
-    validate_untyped_pddl(domain_text)
-    lines = format_action_conditions(domain_text).splitlines()
-    first_action = next(
-        (index for index, line in enumerate(lines) if "(:action" in line), None
-    )
-    if first_action is None:
-        return ""
-
-    action_start = first_action - 1
-    while action_start >= 0 and (
-        not lines[action_start].strip()
-        or lines[action_start].lstrip().startswith(";")
-    ):
-        action_start -= 1
-    action_section = "\n".join(lines[action_start + 1 : -1]).strip()
-    action_reference = "\n\n".join(
-        block.strip() for block in action_section.split("\n\n") if block.strip()
-    )
-    return action_reference
-
-
 def _round_has_verified_plan(round_dir: Path) -> bool:
     judge_path = round_dir / "judge.json"
     domain_path = round_dir / "domain.pddl"
@@ -263,7 +210,7 @@ def _latest_verified_round(save_dir: Path) -> Path | None:
     return max(rounds, default=(0, None), key=lambda item: item[0])[1]
 
 
-def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
+def run_task(task: dict) -> tuple[bool, bool]:
     save_dir = task["save_dir"]
     save_dir.mkdir(parents=True, exist_ok=True)
     kf_actions_path = save_dir / "kf_actions.txt"
@@ -315,7 +262,6 @@ def run_task(task: dict, action_template: str) -> tuple[bool, bool]:
             save_dir=save_dir,
             attempt=attempt,
             retry_state=retry_state,
-            action_template=action_template,
             robot_configuration=ROBOT_CONFIGURATION,
         )
 
@@ -373,17 +319,6 @@ def main() -> None:
     tasks = [task for task, round_dir in verified if round_dir is None]
     already_passed = total_loaded - len(tasks)
 
-    task_ids = {task["task_id"] for task in tasks}
-    if ACTION_TEMPLATE_MODE == "fixed":
-        action_templates = dict.fromkeys(task_ids, read_prompt("ACTION_TEMPLATE.txt"))
-    elif ACTION_TEMPLATE_MODE == "retrieved":
-        action_templates = {task_id: find_task_action_template(task_id) for task_id in task_ids}
-        missing = sorted(task_id for task_id, template in action_templates.items() if not template)
-        if missing:
-            raise RuntimeError(f"Missing retrieved action templates: {', '.join(missing)}")
-    else:
-        raise ValueError('ACTION_TEMPLATE_MODE must be "fixed" or "retrieved"')
-
     if STEP_SOURCE == "video":
         ready_tasks = []
         with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
@@ -410,7 +345,7 @@ def main() -> None:
     planning_succeeded = 0
     with ThreadPoolExecutor(max_workers=TASK_WORKERS) as executor:
         futures = {
-            executor.submit(run_task, task, action_templates[task["task_id"]]): task
+            executor.submit(run_task, task): task
             for task in tasks
         }
         for index, future in enumerate(as_completed(futures), 1):
