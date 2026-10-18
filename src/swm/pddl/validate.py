@@ -15,6 +15,19 @@ from swm.pddl.strips import parse_sexpr_file
 from swm.pddl.plan_branches import factor_plan_orders, render_plan_orders, render_named_orders
 
 
+def format_kf_actions(text: str) -> str:
+    """Give judges only numbered actions, without extraction labels or states."""
+    actions = []
+    for line in text.splitlines():
+        action = line.split('|', 1)[0].strip()
+        if re.match(r'^(?:Before|After)\s*:', action, re.IGNORECASE):
+            continue
+        action = re.sub(r'^(?:(?:\[G\d+\]|\d+[.)])\s*)+', '', action).strip()
+        if action:
+            actions.append(action)
+    return '\n'.join(f'{i}. {action}' for i, action in enumerate(actions, 1))
+
+
 def _validate_verdict(result):
     if not isinstance(result, dict) or set(result) != {'reasoning', 'pass', 'feedback'}:
         raise ValueError('Judge must return exactly reasoning, pass, and feedback')
@@ -242,7 +255,7 @@ def build_group_judge_prompt(
     audit, marker, _ = template.read_text(encoding="utf-8").rpartition("\n# Output\n")
     if not marker:
         raise ValueError("Judge template is missing its output section")
-    prompt = audit.format(instruction=instruction, kf_actions=kf_actions,
+    prompt = audit.format(instruction=instruction, kf_actions=format_kf_actions(kf_actions),
                           evaluated_symbolic_trace="\n".join(trace))
     prompt += ('\n# Output\nReturn exactly one JSON object: {"results":[{"candidate_id":"...","reasoning":"...",'
                '"pass":true,"feedback":""}]}. '
@@ -264,6 +277,7 @@ def validate_plan_feasibility(
     capture: dict | None = None,
     scene_context: str = "",
 ):
+    kf_actions = format_kf_actions(kf_actions)
     candidate_plan = candidate_plan.strip()
     prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
     prompt = prompt_path.read_text(encoding="utf-8").format(
@@ -702,11 +716,11 @@ def validation_inputs(round_dir, model, first_img, instruction, kf_actions):
     template = Path(__file__).parent.parent / 'prompt_templates/pddl_judge.txt'
     reference = Path(round_dir).parent / 'kf_actions.txt'
     return {
-        'model': model, 'instruction': instruction, 'kf_actions': kf_actions,
+        'model': model, 'instruction': instruction, 'kf_actions': format_kf_actions(kf_actions),
         'files': {n: (Path(round_dir) / n).read_text() for n in ('domain.pddl', 'problem.pddl', 'plan.txt')},
         'images': [[str(Path(p).resolve()), Path(p).stat().st_size, Path(p).stat().st_mtime_ns] for p in images],
         'audit_template': template.read_text(), 'state_policy': PROCESS_SCHEMA,
-        'reference_source': reference.read_text() if reference.is_file() else None,
+        'reference_source': format_kf_actions(reference.read_text()) if reference.is_file() else None,
     }
 
 
@@ -741,6 +755,7 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
     Search and transport failures remain incomplete. Only completed, validated
     responses produce verdicts. Removed orders inherit no instruction verdict.
     """
+    kf_actions = format_kf_actions(kf_actions)
     directory = Path(round_dir)
     record = json.loads((directory / 'judge.json').read_text())
     inputs = validation_inputs(directory, model, first_img, instruction, kf_actions)

@@ -13,6 +13,7 @@ from swm.pddl.validate import (
     validate_plan_feasibility,
     validate_plan_soundness,
     validation_inputs,
+    format_kf_actions,
 )
 from swm.pddl.reorder import ReorderModel
 from swm.pddl.strips import (
@@ -212,8 +213,7 @@ def _latest_verified_round(task: dict) -> Path | None:
             inputs = json.loads((round_dir / 'judge.json').read_text())['inputs']
             if inputs['instruction'] != task['instruction']:
                 continue
-            if STEP_SOURCE == 'steps_json' and inputs['kf_actions'] != '\n'.join(
-                    f'{i}. {s.strip()}' for i, s in enumerate(task['steps'], 1) if s.strip()):
+            if STEP_SOURCE == 'steps_json' and inputs['kf_actions'] != format_kf_actions('\n'.join(task['steps'])):
                 continue
             rounds.append((int(suffix), round_dir))
     return max(rounds, default=(0, None), key=lambda item: item[0])[1]
@@ -256,11 +256,7 @@ def run_task(task: dict) -> tuple[bool, bool]:
         kf_actions_path.write_text("\n".join(steps) + "\n", encoding="utf-8")
 
     instruction_with_steps = construct_instruction_with_steps(task["instruction"], steps)
-    numbered_steps = "\n".join(
-        f"{i}. {step.strip()}"
-        for i, step in enumerate(steps, 1)
-        if step.strip()
-    )
+    numbered_steps = format_kf_actions("\n".join(steps))
     retry_state = RetryState()
     planning_success = False
     rounds = [p for p in save_dir.glob('round*') if p.is_dir() and p.name[5:].isdigit()]

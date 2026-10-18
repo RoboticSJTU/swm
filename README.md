@@ -88,6 +88,12 @@ python scripts/domain_generation.py
 - `video`：抽帧、提取 temporal-gradient 关键帧、生成动作序列，再生成 PDDL。
 - `steps_json`：直接读取 `tasks/steps` 和场景图像，跳过视频处理。
 
+视频动作提取使用逐组 Generator 和一个全段 Compiler：G320 对照图加单帧用于观察，
+C320 横/竖屏固定 3×3 拼图用于全段整理。结果每行包含动作及 Before/After，默认保存
+`action_traces/` 和实际附图。调用沿用非流式 `call_gpt`，使用 medium、temperature=0；
+传输、JSON 或引用契约失败按同一完整范围重试。PDDL 生成接收完整动作和状态；
+PFV、PSV 的参考输入则去掉 `[G#]`、Before/After，仅保留从 1 开始编号的动作。
+
 结果保存在：
 
 ```text
