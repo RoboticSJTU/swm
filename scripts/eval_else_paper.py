@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import traceback
 from swm.llm import call_gpt
-from swm.pddl.judge import judge_pddl
+from swm.pddl.validate import validate_plan_feasibility
 from swm.pddl.gt_validation import VALIDATOR_VERSION, validate_gt_plan
 from swm.pddl.planner import solve_pddl
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
@@ -252,7 +252,7 @@ def judge_one(task: dict):
             judge_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             return task, True, result["pass"], "done"
 
-        result = judge_pddl(
+        result = validate_plan_feasibility(
             model=judge_model,
             first_img=images if len(images) > 1 else images[0],
             instruction=instruction,

@@ -6,16 +6,18 @@ from pathlib import Path
 
 from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
-from swm.pddl.judge import SymbolicTraceError, judge_pddl
+from swm.pddl.validate import (
+    SymbolicTraceError,
+    _validate_verdict,
+    save_validation,
+    validate_plan_feasibility,
+    validate_plan_soundness,
+    validation_inputs,
+)
+from swm.pddl.reorder import ReorderModel
 from swm.pddl.strips import (
-    assert_goals,
     format_action_conditions,
     validate_untyped_pddl,
-    ground_plan,
-    parse_domain,
-    parse_plan,
-    parse_problem_model,
-    rollout,
 )
 from swm.prompts import construct_instruction_with_steps
 
@@ -27,7 +29,7 @@ PDDL_MODEL = "gpt-5.6-sol"
 ACTION_EXTRACTION_MODEL = "Qwen3.8-27B"
 JUDGE_MODEL = "gemini-3.8-flash"
 
-ROBOT_CONFIGURATION = "single-arm"  # "single-arm" or "dual-arm"
+ROBOT_CONFIGURATION = "single_arm"  # "single_arm" or "dual_arm"
 
 
 MAX_PLAN_ATTEMPTS = 3
@@ -176,36 +178,43 @@ def _round_has_verified_plan(round_dir: Path) -> bool:
 
     try:
         judge = json.loads(judge_path.read_text(encoding="utf-8"))
-        if judge.get("pass") is not True or not plan_path.read_text(encoding="utf-8").strip():
+        if not isinstance(judge, dict):
+            return False
+        psv = judge.get('psv')
+        if (judge.get('pass') is not True or not psv or psv['status'] != 'passed'
+                or not psv['search_complete'] or psv['unresolved_representatives'] != 0
+                or judge['pfv']['pass'] is not True
+                or len(psv['reviews']) + 1 != psv['classes']):
             return False
         domain_text = domain_path.read_text(encoding="utf-8")
         validate_untyped_pddl(domain_text)
         validate_untyped_pddl(problem_path.read_text(encoding="utf-8"))
         if format_action_conditions(domain_text) != domain_text:
             return False
-        schemas = parse_domain(domain_path)
-        problem = parse_problem_model(problem_path, schemas)
-        raw_plan, _ = parse_plan(plan_path)
-        if not raw_plan:
+        inputs = judge['inputs']
+        if inputs != validation_inputs(round_dir, JUDGE_MODEL, [Path(row[0]) for row in inputs['images']],
+                                       inputs['instruction'], inputs['kf_actions']):
             return False
-        plan = ground_plan(raw_plan, schemas, problem.objects)
-        final_state = rollout(problem.init_state, plan)
-        assert_goals(
-            final_state,
-            problem.goal_positive,
-            problem.goal_negative,
-            "Saved plan does not satisfy goal.",
-        )
-    except (OSError, ValueError, KeyError, NotImplementedError, json.JSONDecodeError):
+        if not all(_validate_verdict({k: row[k] for k in ('pass', 'reasoning', 'feedback')})['pass']
+                   for row in psv['reviews']):
+            return False
+        ReorderModel(domain_path, problem_path, plan_path)
+    except (OSError, ValueError, KeyError, TypeError, NotImplementedError):
         return False
     return True
 
 
-def _latest_verified_round(save_dir: Path) -> Path | None:
+def _latest_verified_round(task: dict) -> Path | None:
     rounds = []
-    for round_dir in save_dir.glob("round*"):
+    for round_dir in task['save_dir'].glob("round*"):
         suffix = round_dir.name.removeprefix("round")
         if suffix.isdigit() and _round_has_verified_plan(round_dir):
+            inputs = json.loads((round_dir / 'judge.json').read_text())['inputs']
+            if inputs['instruction'] != task['instruction']:
+                continue
+            if STEP_SOURCE == 'steps_json' and inputs['kf_actions'] != '\n'.join(
+                    f'{i}. {s.strip()}' for i, s in enumerate(task['steps'], 1) if s.strip()):
+                continue
             rounds.append((int(suffix), round_dir))
     return max(rounds, default=(0, None), key=lambda item: item[0])[1]
 
@@ -254,16 +263,35 @@ def run_task(task: dict) -> tuple[bool, bool]:
     )
     retry_state = RetryState()
     planning_success = False
-    for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
-        round_result = generate_pddl(
-            generate_pddl_model_name=PDDL_MODEL,
-            task_img=task_img,
-            instruction_with_steps=instruction_with_steps,
-            save_dir=save_dir,
-            attempt=attempt,
-            retry_state=retry_state,
-            robot_configuration=ROBOT_CONFIGURATION,
-        )
+    rounds = [p for p in save_dir.glob('round*') if p.is_dir() and p.name[5:].isdigit()]
+    latest = max(rounds, key=lambda p: int(p.name[5:]), default=None)
+    next_round = int(latest.name[5:]) + 1 if latest else 1
+    pending = latest if latest and all((latest / n).is_file() for n in (
+        'domain.pddl', 'problem.pddl', 'plan.txt', 'judge.json')) else None
+    attempts = 0
+    while pending is not None or attempts < MAX_PLAN_ATTEMPTS:
+        if pending is not None:
+            round_result = {'ok': True, 'round_dir': pending,
+                            'domain': (pending / 'domain.pddl').read_text(),
+                            'problem': (pending / 'problem.pddl').read_text(),
+                            'plan': (pending / 'plan.txt').read_text()}
+            pending = None
+            try:
+                ReorderModel(*(round_result['round_dir'] / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
+            except (ValueError, NotImplementedError):
+                continue
+        else:
+            round_result = generate_pddl(
+                generate_pddl_model_name=PDDL_MODEL,
+                task_img=task_img,
+                instruction_with_steps=instruction_with_steps,
+                save_dir=save_dir,
+                attempt=next_round,
+                retry_state=retry_state,
+                robot_configuration=ROBOT_CONFIGURATION,
+            )
+            attempts += 1
+            next_round += 1
 
         retry_state.prev_domain = round_result["domain"]
         retry_state.prev_problem = round_result["problem"]
@@ -276,32 +304,61 @@ def run_task(task: dict) -> tuple[bool, bool]:
 
         planning_success = True
         retry_state.solver_feedback = ""
+        directory = round_result['round_dir']
+        inputs = validation_inputs(directory, JUDGE_MODEL, task_img, task['instruction'], numbered_steps)
+        saved = {}
+        if (directory / 'judge.json').is_file():
+            try:
+                saved = json.loads((directory / 'judge.json').read_text())
+                if not isinstance(saved, dict):
+                    saved = {}
+            except json.JSONDecodeError:
+                pass
+        pfv, previous_psv = None, None
+        if saved and ('inputs' not in saved or saved['inputs'] == inputs):
+            try:
+                pfv = _validate_verdict(saved['pfv'] if 'pfv' in saved else
+                                        {k: saved[k] for k in ('pass', 'reasoning', 'feedback')})
+                previous_psv = saved.get('psv')
+            except (ValueError, KeyError):
+                pass
         try:
-            judge_out = judge_pddl(
-                model=JUDGE_MODEL,
-                first_img=task_img,
-                instruction=task["instruction"],
-                kf_actions=numbered_steps,
-                candidate_plan=round_result["plan"],
-                predicted_domain=round_result["round_dir"] / "domain.pddl",
-                pddl_plan=round_result["round_dir"] / "plan.txt",
-            )
+            if pfv is None:
+                save_validation(directory, None, None, inputs)
+                pfv = validate_plan_feasibility(
+                    model=JUDGE_MODEL,
+                    first_img=task_img,
+                    instruction=task['instruction'],
+                    kf_actions=numbered_steps,
+                    candidate_plan=round_result['plan'],
+                    predicted_domain=directory / 'domain.pddl',
+                    pddl_plan=directory / 'plan.txt',
+                )
         except SymbolicTraceError as error:
+            (directory / 'judge.json').unlink(missing_ok=True)
             retry_state.solver_feedback = str(error)
             retry_state.judge_feedback = ""
             retry_state.prev_plan = round_result["plan"]
             (round_result["round_dir"] / "error.log").write_text(str(error), encoding="utf-8")
             continue
-        (round_result["round_dir"] / "judge.json").write_text(
-            json.dumps(judge_out, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        except (RuntimeError, ValueError) as error:
+            save_validation(directory, None, None, inputs)
+            (directory / 'error.log').write_text(str(error), encoding='utf-8')
+            return planning_success, False
 
-        if judge_out["pass"]:
+        result = save_validation(directory, pfv, previous_psv, inputs)
+        psv = None
+        if pfv['pass']:
+            psv = validate_plan_soundness(JUDGE_MODEL, task_img, task['instruction'], numbered_steps, directory)
+            result = save_validation(directory, pfv, psv, inputs)
+
+        if result['pass'] is True:
             return True, True
+        if result['pass'] is None:
+            return planning_success, False
 
-        retry_state.judge_feedback = judge_out["feedback"]
-        retry_state.prev_plan = round_result["plan"]
+        retry_state.judge_feedback = result['feedback']
+        retry_state.prev_plan = psv['counterexample']['plan'] if psv is not None else round_result['plan']
 
     return planning_success, False
 
@@ -314,7 +371,7 @@ def main() -> None:
     total_loaded = len(tasks)
     failed = 0
     verified = [
-        (task, _latest_verified_round(task["save_dir"])) for task in tasks
+        (task, _latest_verified_round(task)) for task in tasks
     ]
     tasks = [task for task, round_dir in verified if round_dir is None]
     already_passed = total_loaded - len(tasks)
@@ -352,17 +409,17 @@ def main() -> None:
             task = futures[future]
             tag = f"{TASK_DOMAIN}/{task['task_id']}/{task['episode_id']}"
             try:
-                planning_success, judge_pass = future.result()
+                planning_success, validation_pass = future.result()
                 planning_succeeded += int(planning_success)
-                passed += int(judge_pass)
-                status = "judge pass" if judge_pass else "planning/judge failed"
+                passed += int(validation_pass)
+                status = 'PFV + PSV passed' if validation_pass else 'planning/validation unsuccessful'
             except Exception as error:
                 failed += 1
                 status = f"crashed: {error}"
             print(f"[{index}/{len(tasks)}] {tag} {status}")
 
     print(f"planning success: {planning_succeeded}/{len(tasks)}")
-    print(f"judge pass: {passed}/{len(tasks)}")
+    print(f"PFV + PSV passed: {passed}/{len(tasks)}")
     print(f"crashed: {failed}/{total_loaded}")
 
 

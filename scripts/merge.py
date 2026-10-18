@@ -18,7 +18,7 @@ from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 
 
 # 只需要修改这里；多个数据集会合并到同一份算子库。
-DATASET = ["agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
+DATASET = ["human", "human_aug"]
 DATASET_ROOT = PROJECT_ROOT / "eval_results" / "gpt-5.6-sol"
 MAX_WORKERS = 100
 TOKEN_RE = re.compile(r"\(|\)|[^\s()]+")

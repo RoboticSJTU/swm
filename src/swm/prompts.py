@@ -22,10 +22,8 @@ def construct_prompt_with_feedback(
     failed_domain: str = "",
     failed_problem: str = "",
     failed_plan: str = "",
-    action_template: str = "",
     robot_configuration: str = "dual-arm",
 ) -> str:
-    # action_template is retained for legacy callers; operator examples are unused.
     if robot_configuration not in {"single-arm", "dual-arm"}:
         raise ValueError(f"Unsupported robot configuration: {robot_configuration}")
 

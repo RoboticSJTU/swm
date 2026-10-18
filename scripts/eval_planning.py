@@ -14,7 +14,7 @@ sys.path.insert(0, str(root_dir / "src"))
 
 from swm.llm import call_gpt
 from swm.pddl.generation import parse_pddl_output, strip_code_block
-from swm.pddl.judge import judge_pddl
+from swm.pddl.validate import validate_plan_feasibility
 from swm.pddl.planner import solve_pddl
 from swm.pddl.postprocess import repair_pddl
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
@@ -369,7 +369,7 @@ def judge_one(task: dict):
         if not candidate_plan:
             return task, False, False, "empty_plan"
 
-        result = judge_pddl(
+        result = validate_plan_feasibility(
             model=judge_model,
             first_img=image_path,
             instruction=instruction,

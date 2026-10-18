@@ -15,7 +15,6 @@ def strip_code_block(text: str) -> str:
     m = re.match(r"^```(?:\w+)?\s*\n?(.*?)\n?```$", text, flags=re.S)
     return m.group(1).strip() if m else text
 
-
 def parse_pddl_output(output: str) -> tuple[str, str]:
     output = output.strip()
 
@@ -51,10 +50,8 @@ def generate_pddl(
     save_dir: Path,
     attempt: int,
     retry_state: RetryState,
-    action_template: str = "",
     robot_configuration: str = "dual-arm",
 ):
-    # Keep action_template for legacy callers; the shared contract replaces examples.
     round_dir = save_dir / f"round{attempt}"
     round_dir.mkdir(parents=True, exist_ok=True)
     domain_path = round_dir / "domain.pddl"
@@ -92,29 +89,11 @@ def generate_pddl(
     raw_problem = data.get("problem")
     domain_str = raw_domain if isinstance(raw_domain, str) else ""
     problem_str = raw_problem if isinstance(raw_problem, str) else ""
-    if not domain_str.strip() or not problem_str.strip():
-        domain_path.write_text(domain_str, encoding="utf-8")
-        problem_path.write_text(problem_str, encoding="utf-8")
-        invalid = []
-        if not domain_str.strip():
-            invalid.append("domain")
-        if not problem_str.strip():
-            invalid.append("problem")
-        feedback = (
-            "PDDL output contract failed: expected non-empty string field(s): "
-            + ", ".join(invalid)
-        )
-        (round_dir / "error.log").write_text(feedback, encoding="utf-8")
-        return {
-            "ok": False,
-            "round_dir": round_dir,
-            "domain": domain_str,
-            "problem": problem_str,
-            "plan": "",
-            "solver_feedback": feedback,
-        }
-
+    feedback = ""
     try:
+        invalid = [name for name, text in (("domain", domain_str), ("problem", problem_str)) if not text.strip()]
+        if invalid:
+            raise ValueError("expected non-empty string field(s): " + ", ".join(invalid))
         validate_untyped_pddl(domain_str)
         validate_untyped_pddl(problem_str)
         domain_str = format_action_conditions(domain_str)
@@ -125,50 +104,24 @@ def generate_pddl(
         domain_path.write_text(domain_str, encoding="utf-8")
         problem_path.write_text(problem_str, encoding="utf-8")
         feedback = f"PDDL output contract failed: {error}"
+    if not feedback:
+        if not solve_pddl(domain_path, problem_path):
+            error_log = (round_dir / "error.log").read_text(encoding="utf-8")
+            feedback = summarize_solver_error(error_log) + "\n\nPlanner diagnostics:\n" + error_log
+        else:
+            try:
+                validate_generated_plan(plan_path, schemas, problem)
+            except (OSError, ValueError, KeyError) as error:
+                feedback = f"PDDL plan validation failed: {error}"
+                plan_path.unlink(missing_ok=True)
+    if feedback and not (round_dir / "error.log").exists():
         (round_dir / "error.log").write_text(feedback, encoding="utf-8")
-        return {
-            "ok": False,
-            "round_dir": round_dir,
-            "domain": domain_str,
-            "problem": problem_str,
-            "plan": "",
-            "solver_feedback": feedback,
-        }
-
-    if not solve_pddl(domain_path, problem_path):
-        error_log = (round_dir / "error.log").read_text(encoding="utf-8")
-        solver_feedback = summarize_solver_error(error_log) + "\n\nPlanner diagnostics:\n" + error_log
-        return {
-            "ok": False,
-            "round_dir": round_dir,
-            "domain": domain_str,
-            "problem": problem_str,
-            "plan": "",
-            "solver_feedback": solver_feedback,
-        }
-
-    try:
-        validate_generated_plan(plan_path, schemas, problem)
-    except (OSError, ValueError, KeyError) as error:
-        feedback = f"PDDL plan validation failed: {error}"
-        (round_dir / "error.log").write_text(feedback, encoding="utf-8")
-        plan_path.unlink(missing_ok=True)
-        return {
-            "ok": False,
-            "round_dir": round_dir,
-            "domain": domain_str,
-            "problem": problem_str,
-            "plan": "",
-            "solver_feedback": feedback,
-        }
-
-    plan_text = plan_path.read_text(encoding="utf-8")
 
     return {
-        "ok": True,
+        "ok": not feedback,
         "round_dir": round_dir,
         "domain": domain_str,
         "problem": problem_str,
-        "plan": plan_text,
-        "solver_feedback": "",
+        "plan": "" if feedback else plan_path.read_text(encoding="utf-8"),
+        "solver_feedback": feedback,
     }
