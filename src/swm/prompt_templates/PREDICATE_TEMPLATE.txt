@@ -48,10 +48,12 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (folded ?object)
   (unfolded ?object)
 
-  ; No modeled object is directly on this object.
-  ; Not general graspability.
-  ; Pick/place preserves the moved object's clear unless its own loads change.
-  ; Adding on invalidates the support's clear; removing its last load restores it.
+  ; No modeled object is directly on this object, and no hand is holding it.
+  ; Adding a direct on-load or acquiring the object invalidates clear.
+  ; Restore clear only when no direct load remains and no hand still holds the object.
+  ; Handoffs and releasing loaded objects do not restore clear.
+  ; Changes to in alone do not change clear.
+  ; False clear does not by itself imply a direct load.
   (clear ?object)
   ; No object occludes the container opening.
   ; Use only for necessary aperture obstruction beyond open/closed; ordinary contents need not cover the opening.
@@ -71,7 +73,7 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (blocks_closing ?blocker ?unit)
 
   ; Optional physical pose: upright/upside_down and flat/vertical are pairs within their respective dimensions.
-  ; Add only when required by the task.
+  ; Keep only poses that causally constrain task execution or a required result, and include them in action names at the corresponding object's role.
   (upright ?object)
   (upside_down ?object)
   (flat ?object)

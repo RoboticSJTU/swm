@@ -1,36 +1,41 @@
-# Task
-Audit the full Generator ledger for decisive edits to its chronological Drafts. Follow each object's source, control, use, handoff, and release; preserve a Draft unless the trajectory establishes an error.
-
-# Inputs
+Return the COMPLETE episode's event sequence in ONE response.
 Instruction: {instruction}
 
-Chronological Generator ledger:
+{shared_rules}
+
+Reconstruct one physical sequence from the images, then reconcile the ledger with it. Observations and Drafts are fallible: repeating a claim in both does not confirm it. For each event, write reason FIRST: cite a real span and describe the SAME operated object's relation to its hand, support or housing at BOTH endpoints. Infer the action from that change, then match Draft IDs. A quoted proposal or an occluded object is not endpoint evidence. Correct the moving object's identity when other objects remain visibly in place. Include supported effects even with no Draft. Use neighboring groups to resolve a partial event and the final frames to resolve ending control/support.
+
+A support, containment or opening relation persisting through hand/camera motion is one continuing state; remove unsupported cycle Drafts. Distinguish operating an attached control from merely grasping or later removing it. At the ending, distinguish moving with the hand from settling onto a support; if release/destination is unproven, describe Move.
+
+Visual timeline:
+{frame_order}
+
+Only the attached grouped grids are image evidence. Context/bridge cells repeat existing moments; use their frame IDs to follow one chronology. The complete ledger also retains observations for original frames omitted from a four-frame group's grid.
+
+Generator ledger:
 {evidence_ledger}
 
-Attached image: the episode's initial frame, G0 ({initial_frame}).
+Keep chronological order and nondecreasing completion group. Represent EVERY original Draft ID in actions.drafts or explicitly in removed, never both. Merges list all contributing IDs, splits reuse IDs, additions use drafts: []. Merge only the same event, preserving distinct results.
+Emit actions in the illustrated field order; list removed last.
 
-# Audit
-- Observations and Drafts are fallible. A shared img_N is one physical state: resolve conflicting descriptions using the surrounding before/after states, not by inserting an intermediate action. Use the initial image only for initial identity/state.
-- The instruction guides attention and compatible naming; it cannot prove an unseen event or remove an extra observed event.
-- Track object identity/count, controller, direct support/containment, payload, and affected part. Handoff preserves payload identity and is a completed action. In stacking, the new top object becomes the next direct target. Delete a counted extra only with evidence of duplication.
-- If control switches from held A to controlled B, A's control ended. Insert Place when A is visibly supported; if A leaves view and continued holding/handoff is impossible, use `Set down A` without inventing a location.
-- Preserve real repeats, reversals, acquisitions, handoffs, uses, placements, starts/stops, and final operations. Across groups, rising fill, repeated strokes, or increasing effect under continuous control are progress, not new occurrences. Merge fragments only without stable release/reset followed by renewed actuation or a distinct new task result. A no-result trial is incomplete; retain the later completed actuation. Identical wording on different affected parts does not prove duplication.
-- Audit every use or Place for its earlier independently evidenced acquisition, including small payloads loaded onto tools. Pick requires the object itself to leave direct support under control: insert an omitted Pick at the observed support loss, not from Place alone. Delete a premature Pick contradicted by continued support, preserving a later real Pick. Supported Grasp counts only when control persists across independent task operations, not for momentary contact. Keep acquisition, use, handoff, and placement distinct.
-- If the initial frame already holds a task object and its first trajectory ends in placement, insert acquisition only when the instruction names it and a unique compatible source is visible.
-- When adjacent groups disagree at their shared img_N about release versus continued control of the same object, reconstruct one transfer: preserve the earlier acquisition and the later stable placement, deleting intermediate Place/Pick fragments.
-- Track payload independently from its carrier. Once loading is established, carry it forward until observed unloading or contradiction. A negative transfer claim based only on invisible payload is not evidence; require incompatible carrier-opening/target geometry or later visible retained payload. For an instructed transfer, alignment over the named target, opening-down orientation, then return upright or set-down establishes a small or sparsely sampled transfer; insert it without replacing the carrier's final Place. Later unloading from a tool establishes its earlier source-to-tool loading when preceding source contact is recorded.
-- Track doors and lids by whether the interior is exposed or covered, not by screen orientation. If the ledger establishes fully exposed interior followed by the door/lid covering it before an exterior control action, insert Close before that action.
-- Contact alone is not Press; require control motion or compatible device response. Identify the affected physical part rather than borrowing a later control's name; combine each actuation with its delayed response, but preserve separate completed actions on different parts.
-
-# Edits
-Insert only an observed omitted operation at its completion group. Replace only an established operation/object/actor/direct-source/target/boundary error. Delete only an established duplicate, contradiction, unfinished fragment, or incidental motion. Otherwise preserve the Draft. Equivalent wording and faithful macros are valid.
-
-New action text is one concise sentence with minimum distinguishing qualifiers and direct source/target. Never include G#, K#, img_#, or evidence text.
-
-# Output
-Return JSON immediately with no prose:
-{{"decisions":[{{"reason":"G1 img_57->img_70 shows ...","op":"replace","draft":2,"group":1,"action":"..."}}]}}
-
-Each decision has exactly these five fields. `op` is `insert`, `replace`, or `delete`. `draft` is the original target ID, or preceding original ID for insert (`0` before D1). `group` is the target Draft group for replace/delete and evidence group for insert. `action` is one line for insert/replace and `null` for delete. Every reason must contain literal G# and img_N->img_M and use at most 25 words.
-
-Use original IDs without renumbering; replace/delete each Draft at most once. Inserts keep original positions and listed order. Result groups must be nondecreasing. If no edit is justified, return {{"decisions":[]}}.
+Every final action/removal needs a brief reason: copy a complete real G# img_N->img_M span literally from the ledger and state the observed change. Keep each span within its stated group. Each removal has exactly draft (one integer ID) and reason; each action has exactly group, action, before, after, reason, drafts (integer IDs). Return ONE complete JSON object, no Markdown. States may be empty; action/state strings contain no references or |. The example illustrates format, not episode facts; use removed: [] when none.
+{{
+  "actions": [
+    {{
+      "reason": "{example_span} shows the object on its support, then clear of it in the hand.",
+      "group": 0,
+      "action": "Pick up the object.",
+      "before": "The object rests on its support.",
+      "after": "The hand holds the object clear of its support.",
+      "drafts": [
+        1
+      ]
+    }}
+  ],
+  "removed": [
+    {{
+      "draft": 2,
+      "reason": "{example_span} repeats the event represented by draft 1."
+    }}
+  ]
+}}

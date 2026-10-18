@@ -20,6 +20,9 @@ if str(SRC_DIR) not in sys.path:
 from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
+ROBOT_CONFIGURATION = "single_arm"
+TASK_DOMAINS = ["human", "human_aug"]
+
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
@@ -29,10 +32,9 @@ MODEL_NAME = "gpt-5.6-sol"
 # ROBOT_CONFIGURATION = "dual_arm"
 # TASK_DOMAINS = ["agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
 
-ROBOT_CONFIGURATION = "dual_arm"
-TASK_DOMAINS = ["gelaxea", "gelaxea_aug"]
+# ROBOT_CONFIGURATION = "dual_arm"
+# TASK_DOMAINS = ["gelaxea", "gelaxea_aug"]
 
-PDDL_DOMAIN_NAME = ROBOT_CONFIGURATION
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
 PROMPT_PATH = ROOT_DIR / "src/swm/prompt_templates/training_input.txt"
@@ -88,8 +90,8 @@ def predicate_name(expression):
     return expression_head(expression)
 
 
-def format_domain(domain, problem, action_names, *, preserve_identity=False):
-    """裁剪动作和谓词；preserve_identity 仅控制是否保留 domain 名称。"""
+def format_domain(domain, problem, action_names):
+    """裁剪动作和谓词，保留原有 domain 名称。"""
     action_heads = {":action", ":durative-action"}
     declarations = [
         predicate
@@ -130,8 +132,7 @@ def format_domain(domain, problem, action_names, *, preserve_identity=False):
     }
     selected_actions = [actions[name] for name in action_names]
 
-    domain_name = domain[1][1] if preserve_identity else PDDL_DOMAIN_NAME
-    lines = [f"(define (domain {domain_name})"]
+    lines = ["(define " + pddl_line(domain[1])]
     for section in domain[2:]:
         name = expression_head(section)
         if name in action_heads:
@@ -215,7 +216,7 @@ def reorder_stacks(atoms, goal=False):
     return result
 
 
-def format_problem(problem, *, preserve_identity=False):
+def format_problem(problem):
     objects = None
     init = None
     goal = None
@@ -236,12 +237,9 @@ def format_problem(problem, *, preserve_identity=False):
         elif name not in {":domain", ":objects"}:
             extra_sections.append(section)
 
-    if preserve_identity:
-        if domain_section is None:
-            raise ValueError("problem 缺少 :domain")
-        lines = ["(define " + pddl_line(problem[1]), "  " + pddl_line(domain_section)]
-    else:
-        lines = ["(define (problem task)", f"  (:domain {PDDL_DOMAIN_NAME})"]
+    if domain_section is None:
+        raise ValueError("problem 缺少 :domain")
+    lines = ["(define " + pddl_line(problem[1]), "  " + pddl_line(domain_section)]
     if objects is not None:
         lines.append("  " + pddl_line(objects))
     if init is not None:
@@ -404,17 +402,9 @@ def prepare_round(item):
             review = "[INIT CONFLICT] " + message
             init_review = message
 
-        source_domain = format_domain(
-            domain,
-            problem,
-            action_names,
-            preserve_identity=True,
-        ).strip() + "\n"
-        source_problem = format_problem(problem, preserve_identity=True).strip() + "\n"
-        prepared = (
-            format_domain(domain, problem, action_names).strip() + "\n",
-            format_problem(problem).strip() + "\n",
-        )
+        source_domain = format_domain(domain, problem, action_names).strip() + "\n"
+        source_problem = format_problem(problem).strip() + "\n"
+        prepared = (source_domain, source_problem)
 
         if source_problem != problem_raw:
             atomic_write(source_paths[1], source_problem)

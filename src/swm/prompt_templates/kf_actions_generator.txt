@@ -1,46 +1,30 @@
-# Task
-Extract completed task-level manipulation events demonstrated in the current keyframe group, in order, with supporting adjacent frame pairs. Visual evidence determines occurrence and timing. The instruction and prior candidates guide attention and compatible identity resolution; they cannot override contrary evidence or predict later actions.
-
-# Inputs
+Extract event proposals for group G{group} of G{last_group}.
 Instruction: {instruction}
-Current group: G{group} of G{last_group}
-Attached images, in order: {frame_order}
-Prior action candidates:
+
+{shared_rules}
+
+Visual input: {frame_order}
+Prior event proposals (names only, fallible context):
 {previous_actions}
 
-# Pairwise evidence
-Return one `change` for every adjacent Ki->Ki+1. Record concrete before/after changes in actor, object/control, control ownership, direct support/containment, orientation, payload, surface, and device state.
+Use the comparison grid to compare relations and the individual images to resolve identity and detail. K labels, not the number of image attachments, define the moments. Return one change for EVERY adjacent K0->K1, K1->K2, etc., exactly once in order. Describe the observed start -> end relations before naming an action, including distinct effects within the same pair; use unchanged neighbors to separate object motion from occlusion or camera motion. Do not import an expected starting state from earlier action names. Put unfinished progress in changes and supported completed results in actions, ordered by their first cited pair. Use actions: [] when no result completes. Cite actual adjacent pairs in each action's non-empty evidence list.
 
-- Use the instruction as a checklist for every named object, relation, count, and effect, including subtle liquid, contents, residue, or device changes.
-- Keep identity stable through movement using visible attributes and position. Across a handoff, the payload remains the same object; do not rename it as its support/container.
-- Reconcile similar objects with the visible count and prior candidates. Do not create an extra instance or count one instance twice.
-- If control switches from object A to B at a shared boundary or next group, record how A's control ended and B's began.
-- Prefer the instruction's name only when visually compatible. If category is unnamed or uncertain, use stable visible color/form/package; never guess a product category.
-- Name the directly touched support/container as source or target, not an indirect surface. In successive stacking, each placed object becomes the next direct target; do not keep naming the lower base.
-
-Record observations, not intentions or action labels. Prior candidates are context, not evidence.
-
-# Actions
-Review all current images and changes. Use task-level actions such as Pick, Place, Open, Close, Fill, Pour, Wipe, Stir, Insert, Turn, Push, and Press.
-
-- For each changed object in `changes`, check whether it completes an action; put every completed acquisition, use, handoff, placement, or control effect in a separate Draft, even when two complete within one pair. Check counts, reversals, and final operations. Do not turn a changed pose into an action without a completed effect.
-- One continuous operation across pairs or a shared group boundary is one action unless stable release/reset followed by renewed actuation or a distinct new task result establishes another occurrence. Progress toward one result, such as rising fill during one uninterrupted pour, is not a new result. A no-result trial before the successful actuation is an incomplete fragment; keep the completed occurrence.
-- Pick completes only when the object itself loses direct support and moves under control; a grip while it stays supported is not Pick. Record a supported Grasp only when independent control persists through other task operations; otherwise contact before a Pick/Open/Press is incidental. If a visible source becomes empty and the object moves with the gripper, record Pick even when partly occluded. Place ends control on stable support/containment. Never hide an evidenced acquisition inside use or Place.
-- Before Pour, Brush, Insert, or another use, keep the object's completed acquisition as a separate Pick when it changed from supported to controlled; never absorb that Pick into the use.
-- A visible handoff that transfers control between hands is a completed action; preserve it between acquisition and placement.
-- If the episode begins with a task object already held and its first trajectory ends in placement, include its acquisition only when the instruction names it and a unique compatible source is visible; never invent the source.
-- If control switches to B while A is no longer held, include A's Place when its support is visible. If A leaves view and continued holding/handoff is impossible, use `Set down A` without inventing a location.
-- Track liquid, food, particles, residue, and other payload independently from its carrier. Once loading is established, carry it forward until observed unloading or contradiction. When payload is occluded, describe the carrier opening relative to the target mouth; nonvisibility alone is not evidence of no transfer. For an instructed transfer, alignment over the named target, opening-down orientation, then return upright or set-down establishes a small or sparsely sampled transfer unless incompatible geometry or later visible retained payload contradicts it. Keep the carrier's final Place separate. If later unloading proves payload was on a tool, include the earlier source-to-tool loading supported by source contact.
-- Repeated strokes, shakes, or dips with the same tool/material on the same target before another task result form one application action, not one action per motion. This merges only the application effect; keep its initial Pick and final Place/Set down separate.
-- Track doors and lids by whether the interior is exposed or covered, not by screen orientation. If a door/lid moves from fully exposing the interior to covering it before an exterior control is used, include the completed Close before that control action.
-- Count Press only with visible control motion or compatible device response. Mere panel contact is not Press.
-- Omit reaching, carrying, static holding, incidental contact, and unfinished motion. Pose or final state alone is insufficient. Return an empty array when nothing completes.
-
-Action text must be one concise sentence with the object/control and direct source/target when applicable. Never include G#, K#, img_#, or evidence text.
-
-# Output
-Return only:
+Return ONE complete JSON object, no Markdown or extra text. Use exactly the illustrated keys; replace example facts with observed names/events. Action/state strings contain no frame references or |.
 {{
-  "changes": [{{"pair": "K0->K1", "change": "..."}}],
-  "actions": [{{"action": "Pick up the spoon from the red bowl.", "evidence": ["K0->K1"]}}]
+  "changes": [
+    {{
+      "pair": "K0->K1",
+      "change": "The object leaves its support and moves with the hand."
+    }}
+  ],
+  "actions": [
+    {{
+      "action": "Pick up the object.",
+      "before": "The object rests on its support.",
+      "after": "The hand holds the object clear of its support.",
+      "evidence": [
+        "K0->K1"
+      ]
+    }}
+  ]
 }}
