@@ -1,13 +1,12 @@
-Use only needed entries with these meanings and argument roles; this is a vocabulary, not a domain to copy. Other object categories use static unary predicates. Extensions must express a necessary distinction rather than rename an existing one.
+Use only needed entries with these meanings and argument roles; this is a vocabulary, not a domain to copy. Other object categories use static unary predicates. Extensions must express a necessary distinction rather than rename an existing one. Argument variable names denote roles, not entity categories.
 
 (:predicates
   ; Static: categories and fixed structural/supply/control relations never change.
   (hand ?hand)
-  ; part_of and controls are optional; include only when required
-  ; for correct participant bindings or necessary causal dependencies.
-  ; A separately relevant component is the direct on/in participant;
-  ; part_of binds that component to its functional whole.
+  ; part_of and controls are optional; include only when required for correct participant bindings or necessary causal dependencies.
+  ; A separately relevant component is the direct on/in participant; part_of binds that component to its functional whole.
   (part_of ?part ?whole)
+  ; Supply capability; a discrete portion's source availability is separate.
   (dispenses ?source ?material)
   (controls ?control ?device)
 
@@ -16,17 +15,26 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (holding ?hand ?object)
   ; Sustained button control occupies the hand until release, when needed.
   (pressing ?hand ?button)
-  ; A held tool has its own payload capacity. Acquiring a payload consumes
-  ; grip_free; releasing that payload restores it. Put the tool down only free.
+  ; Optional one-payload grip whose load requires active control.
+  ; Acquiring a payload replaces grip_free with gripping; release reverses it.
+  ; The hand keeps holding the tool; put it down only with a free grip.
   (grip_free ?tool)
+  (gripping ?tool ?object)
 
-  ; Direct relations: remove superseded relations on transfer or detachment.
+  ; Direct relations: on = direct external support; in = direct containment, including actual nesting.
+  ; Support, containment and closure are distinct.
+  ; Remove superseded relations when transferring or detaching their subject.
   (on ?object ?support)
   (in ?content ?container)
   (inserted ?object ?socket)
   (at ?object ?region) ; Only for a relevant region, not instead of on/in.
   (under ?object ?reference)
+  ; Keep execution-relevant alignment and instruction-required fine layout.
+  ; These supplement direct on/in relations.
+  ; Invalidate them when movement makes them false; preserve unchanged internal relations of an intact assembly.
   (aligned ?object ?reference)
+  (beside ?object ?reference)
+  (centered ?object ?reference)
 
   ; Dynamic state pairs: require and delete the old state when changing it.
   (open ?unit)
@@ -40,26 +48,30 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (folded ?object)
   (unfolded ?object)
 
-  ; No modeled object is directly on this object. Not general graspability.
+  ; No modeled object is directly on this object.
+  ; Not general graspability.
   ; Pick/place preserves the moved object's clear unless its own loads change.
   ; Adding on invalidates the support's clear; removing its last load restores it.
   (clear ?object)
-  ; No object occludes the container opening. Use only for necessary aperture
-  ; obstruction beyond open/closed; ordinary contents need not cover the opening.
+  ; No object occludes the container opening.
+  ; Use only for necessary aperture obstruction beyond open/closed; ordinary contents need not cover the opening.
   ; Restore only after the last actual covering object has been removed.
   (uncovered ?container)
-  ; empty = no contents; filled = required fill level reached.
+  ; empty = no direct in contents of any modeled kind.
+  ; Adding any content invalidates empty; restore it only after the last leaves.
+  ; filled = required fill level reached, not merely nonempty.
   (empty ?container)
   (filled ?container)
   ; Directional motion-path clearance, distinct from empty and clear.
-  ; Establish the affected direction only after all its blockers are removed;
-  ; invalidate it if blocking is restored. Neither direction implies the other.
+  ; Establish the affected direction only after all its blockers are removed; invalidate it if blocking is restored.
+  ; Neither direction implies the other.
   (opening_clear ?unit)
   (closing_clear ?unit)
   (blocks_opening ?blocker ?unit)
+  (blocks_closing ?blocker ?unit)
 
-  ; Optional physical pose: upright/upside_down and flat/vertical are pairs
-  ; within their respective dimensions. Add only when required by the task.
+  ; Optional physical pose: upright/upside_down and flat/vertical are pairs within their respective dimensions.
+  ; Add only when required by the task.
   (upright ?object)
   (upside_down ?object)
   (flat ?object)
@@ -67,21 +79,18 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
 
   ; Optional results: establish on actual completion; invalidate if undone.
   ; Heating differs from boiling; rinsing, wiping, and cleanliness differ.
-  ; wait_until_* establishes the supported result (e.g., in, filled, heated);
-  ; no separate waiting or done predicate.
+  ; A completed manipulation or waiting event establishes its supported result; no separate waiting or done predicate.
   (heated ?object)
+  ; Boiling result of this discrete material portion, preserved by transfer.
+  ; Fresh portions have separate identities and do not inherit this result.
   (boiled ?material)
-  ; If an unlimited supply reuses a material symbol across multiple portions,
-  ; bind boiling to its current container. Fresh supply invalidates that
-  ; receiver's result; pouring transfers it to the receiving container.
-  (boiled_in ?material ?container)
   (rinsed ?object)
   (wiped ?surface)
   (clean ?object)
   (wet ?object)
   (stirred ?material)
-  ; Temperature of contained water, distinct from the container's temperature
-  ; and from filled's level threshold. Mixing to warm replaces the hot result.
+  ; Temperature of contained water, distinct from the container's temperature and from filled's level threshold.
+  ; Mixing to warm replaces the hot result.
   (contains_hot_water ?container)
   (contains_warm_water ?container)
 )
