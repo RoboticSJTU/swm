@@ -449,11 +449,6 @@ def instruction(domain_text, problem_text, vocabulary, notes, game):
     }
     if game not in rules:
         raise ValueError("Not a visual game: " + game)
-    if game == 'floortile':
-        operations = {a[1] for a in domain if isinstance(a, list) and a[0] == ':action'}
-        directions = [direction for name, direction in [('paint_up', 'above'), ('paint_down', 'below')]
-                      if name in operations]
-        rules[game] = rules[game].replace('above or below', ' or '.join(directions))
     rules["miconic"] = rules["miconic"].replace("Boarding consumes", "For a finite-capacity lift, boarding consumes")
     goal_node = section(problem, ":goal")[1]
     goal = "Achieve this final state: " + phrase(goal_node, vocabulary)

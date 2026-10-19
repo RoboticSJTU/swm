@@ -2,7 +2,6 @@
 """Generate PDDL, align identities with a VLM, then evaluate with fixed rules."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import subprocess
@@ -18,28 +17,29 @@ from swm.llm import call_gpt, call_gpt_json
 from swm.pddl.generation import parse_pddl_output
 from swm.pddl.planner import _run_fast_downward, fast_downward_path as FD, _output_text
 from swm.pddl.strips import validate_untyped_pddl
-from swm.abstract_planning.model import parse_sexpr, section, fields, condition, apply_effect, verify_invariants
-from swm.abstract_planning import novel_games
+from swm.abstract_planning.model import parse_sexpr, section, fields, condition, apply_effect
+from swm.abstract_planning import novel_games, visual_games
 from swm.abstract_planning.instructions import names_only
+from swm.abstract_planning.test_contract import DATASETS as ABSTRACT_SPLITS, task_id, verify_plan
 from swm.abstract_planning.action_alignment import align_actions, to_reference, to_candidate, AmbiguousActionMapping
 
 # 固定路径；只保留模型、数据集、并发这些实验配置。
-eval_model = '9B_3e_full'
+eval_model = '9B_full_106'
 mapping_model = 'Qwen3.8-27B'
 datasets = ['abs_a_id', 'abs_a_scale', 'abs_b_base', 'abs_b_rule']
 max_workers = 200
 MANIFEST = ROOT / 'tasks/meta/abstract_planning_test/manifest.jsonl'
 PROMPT = ROOT / 'src/swm/prompt_templates/training_input_abstract.txt'
 VAL = ROOT / 'downloads/visual_pddl_v1/VAL/build/bin/Validate'
-eval_root = ROOT / 'eval_results' / eval_model / 'abstract_planning_test'
+eval_root = ROOT / 'eval_results' / eval_model / MANIFEST.parent.name
 UNRESOLVED = {'generation_error', 'mapping_error', 'mapping_incomplete', 'solver_timeout',
               'solver_memory_limit', 'search_incomplete', 'unsupported_pddl', 'infrastructure_error', 'action_mapping_ambiguous'}
 
 
-def sha(value):
-    if not isinstance(value, (str, bytes)):
-        value = json.dumps(value, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
+def file_revision(path):
+    path = Path(path)
+    stat = path.stat()
+    return {'path':str(path), 'bytes':stat.st_size, 'modified_ns':stat.st_mtime_ns}
 
 
 def write_json(path, value):
@@ -69,7 +69,7 @@ def solve_files(directory, game):
     cmd = [sys.executable, str(FD), '--overall-time-limit', '60s', '--overall-memory-limit', '2G',
            '--plan-file', str(directory / 'plan.txt'), '--sas-file', str(directory / 'output.sas')]
     inputs = [str(directory / 'domain.pddl'), str(directory / 'problem.pddl')]
-    cmd += inputs + ['--search', 'astar(lmcut())'] if game == 'sliding_puzzle' else ['--alias', 'lama-first', *inputs]
+    cmd += inputs + ['--search', 'astar(lmcut())'] if game in {'sliding_puzzle','numeric_sliding','rush_hour'} else ['--alias', 'lama-first', *inputs]
     code = 0
     try:
         stdout, stderr = _run_fast_downward(cmd, directory, timeout=65)
@@ -186,35 +186,71 @@ def prepare_probes(row):
 
 
 def load_tasks(manifest=MANIFEST, selected_datasets=None):
+    manifest = Path(manifest)
     source = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
+    inputs = json.loads((ROOT/'tasks/instructions/instructions_abstract_planning_test.json').read_text())
+    steps = json.loads((ROOT/'tasks/steps/steps_abstract_planning_test.json').read_text())
+    expected_keys = {d:{r['task'] for r in source if r['dataset']==d} for d in ABSTRACT_SPLITS}
+    if set(inputs) != set(steps) or set(inputs) != set(expected_keys):
+        raise ValueError('Instruction/steps split keys differ from manifest')
+    for dataset, keys in expected_keys.items():
+        if set(inputs[dataset]) != keys or set(steps[dataset]) != keys:
+            raise ValueError('Instruction/steps task keys differ from manifest: ' + dataset)
+    if len({r['task'] for r in source}) != len(source):
+        raise ValueError('Task IDs must be globally unique')
+    audit_path = manifest.parent/'training_audit.json'
+    trained_operations = {}
+    if audit_path.exists():
+        audit = json.loads(audit_path.read_text())
+        trained_operations = audit.get('operations', {})
+        records = json.loads(Path(audit['training_json']).read_text())
+        trained = Counter(Path(r['images'][0]).parents[1].name for r in records)
+        del records
+        if trained != Counter(audit['counts']):
+            raise ValueError('Training game counts changed; rebuild abstract planning tests')
+        for dataset in ['abs_a_id','abs_a_scale']:
+            covered = {r['game'] for r in source if r['dataset']==dataset}
+            if covered != set(trained): raise ValueError('Incomplete training-game coverage: ' + dataset)
+        if any(r['game'] in trained for r in source if r['dataset'] in {'abs_b_base','abs_b_rule'}):
+            raise ValueError('B split contains a trained game')
+    if selected_datasets is not None and set(selected_datasets)-set(expected_keys):
+        raise ValueError('Unknown abstract split')
     rows = [r.copy() for r in source if selected_datasets is None or r['dataset'] in selected_datasets]
     if not rows: raise ValueError('No selected tasks')
-    inputs, steps = {}, {}
     for row in rows:
-        dataset = row['dataset']; row['id'] = '/'.join([dataset,row['task'],row['episode']])
+        dataset = row['dataset']; row['id'] = task_id(row)
         row['split'] = {'abs_a_id':'A-ID','abs_a_scale':'A-scale','abs_b_base':'B-base','abs_b_rule':'B-rule'}[dataset]
-        if dataset not in inputs:
-            inputs[dataset] = json.loads((ROOT/'tasks/instructions'/f'instructions_{dataset}.json').read_text())
-            steps[dataset] = json.loads((ROOT/'tasks/steps'/f'steps_{dataset}.json').read_text())
-        prompt = inputs[dataset][row['task']][row['episode']]
-        if prompt != row['instruction'] or sha(Path(row['image']).read_bytes()) != row['hashes']['initial.png']:
+        prompt = inputs[dataset][row['task']]
+        image = ROOT/'tasks/images/abstract_planning_test'/(row['task']+'.png')
+        if prompt != row['instruction'] or Path(row['image']).resolve() != image.resolve() or not image.is_file():
             raise ValueError('Input differs from manifest: ' + row['id'])
-        reference_steps = steps[dataset][row['task']][row['episode']]; gt = Path(row['gt'])
-        if '\n'.join(reference_steps)+'\n' != (gt/'kf_actions.txt').read_text(): raise ValueError('Steps differ from reference: ' + row['id'])
+        reference_steps = steps[dataset][row['task']]; gt = Path(row['gt'])
+        if reference_steps != row['steps'] or '\n'.join(reference_steps)+'\n' != (gt/'kf_actions.txt').read_text():
+            raise ValueError('Steps differ from reference: ' + row['id'])
         scenario = json.loads((Path(row['metadata'])/'scenario.json').read_text())
         if any((gt/'round1'/(name+'.pddl')).read_text().strip() != scenario[name].strip() for name in ['domain','problem']):
             raise ValueError('Reference differs from scenario: ' + row['id'])
-        row['instruction'] = names_only(row['instruction'],scenario['domain'])
+        if (Path(row['metadata'])/'instruction.txt').read_text() != prompt or scenario['instruction'] != prompt:
+            raise ValueError('Instruction differs from scenario: ' + row['id'])
+        row['instruction'] = names_only(prompt,scenario['domain'])
         row['_scenario'] = scenario; row['_oracle'] = machine(scenario['domain'],scenario['problem'])
+        if dataset in {'abs_a_id','abs_a_scale'} and scenario['game'] in trained_operations:
+            unseen = set(row['_oracle']['ops']) - set(trained_operations[scenario['game']])
+            if unseen:
+                raise ValueError('A split contains untrained operations: ' + row['id'] + ' ' + ', '.join(sorted(unseen)))
         row['_reference_plan'] = read_plan(gt/'round1/plan.txt')
-        expected = execute(row['_oracle'],row['_reference_plan'])
-        if not expected['executable'] or not expected['goal_reached']: raise ValueError('Invalid reference: ' + row['id'])
-        if scenario['game'] in novel_games.GAMES: novel_games.simulate(scenario,row['_reference_plan'])
-    if len({r['id'] for r in rows}) != len(rows): raise ValueError('Duplicate task IDs')
-    by_id = {'/'.join([r['dataset'],r['task'],r['episode']]):r for r in source}
+        if len(row['_reference_plan']) != row['plan_length'] or len(reference_steps) != row['plan_length']:
+            raise ValueError('Plan length differs from steps: ' + row['id'])
+        for i,action in enumerate(row['_reference_plan'],1):
+            if not reference_steps[i-1].startswith(f'{i}. {action[0]}('+', '.join(action[1:])+'). Result: '):
+                raise ValueError('Plan action differs from steps: ' + row['id'])
+        verify_plan(scenario,row['_reference_plan'])
+    by_id = {task_id(r):r for r in source}
     for row in rows:
         if pair := row.get('paired_with'):
-            paired = by_id['/'.join([pair['dataset'],pair['task'],pair['episode']])]
+            paired = by_id[task_id(pair)]
+            if paired['game'] != row['game'] or Path(paired['image']).read_bytes() != Path(row['image']).read_bytes():
+                raise ValueError('Rule pair differs in game or image: ' + row['id'])
             row['_paired_reference'] = read_plan(Path(paired['gt'])/'round1/plan.txt')
         row['_probes'] = prepare_probes(row)
     return rows
@@ -237,8 +273,8 @@ def validate_mapping(value, source, targets, fixed):
 def align_objects(row, candidate, directory):
     source, target = set(candidate['objects']), set(row['_oracle']['objects'])
     fixed = {x:x for x in source & target}
-    identity = {'model':mapping_model, 'candidate_sha256':sha([(directory/n).read_text() for n in ['domain.pddl','problem.pddl']]),
-                'image_sha256':row['hashes']['initial.png'], 'oracle_sha256':sha(row['_scenario']['problem']), 'instruction_sha256':sha(row['instruction'])}
+    identity = {'model':mapping_model, 'candidate':[(directory/n).read_text() for n in ['domain.pddl','problem.pddl']],
+                'image':file_revision(row['image']), 'oracle':row['_scenario']['problem'], 'instruction':row['instruction']}
     capture, evidence = {}, {'source':'identity', 'objects':fixed}
     if source-set(fixed):
         path = directory/'mapping.json'; saved = json.loads(path.read_text()) if path.exists() else {}
@@ -301,7 +337,7 @@ def evaluate_candidate(row, raw_output, directory):
     directory.mkdir(parents=True,exist_ok=True)
     for name in ['plan.txt','canonical_plan.txt','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','domain.pddl','problem.pddl','action_mapping.json']:
         (directory/name).unlink(missing_ok=True)
-    result = {k:row[k] for k in ['id','dataset','split','game','task','episode']}
+    result = {k:row[k] for k in ['id','dataset','split','game','task']}
     result.update(task_success=False,behavior_success=False,status='invalid_output',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
     try:
         domain,problem = parse_pddl_output(raw_output)
@@ -342,13 +378,13 @@ def evaluate_candidate(row, raw_output, directory):
     reference = validate_files(Path(row['gt'])/'round1/domain.pddl',Path(row['gt'])/'round1/problem.pddl',directory/'canonical_plan.txt',directory/'reference_val.log')
     result['reference_val_pass'] = reference; result['environment'] = {k:v for k,v in oracle.items() if k != 'trace'}
     write_json(directory/'environment_trace.json',[[list(a) for a in sorted(s)] for s in oracle['trace']])
-    if row['game'] in novel_games.GAMES:
-        try: novel_games.simulate(row['_scenario'],canonical); independent = True
-        except ValueError: independent = False
-        result['independent_game_pass'] = independent
-        if independent != (oracle['executable'] and oracle['goal_reached']):
-            result.update(status='infrastructure_error',error='Independent rules disagree with reference PDDL'); return result
-    elif oracle['executable']: verify_invariants(row['_scenario'],canonical,oracle['trace'])
+    independent = False
+    if oracle['executable'] and oracle['goal_reached']:
+        try: verify_plan(row['_scenario'],canonical); independent = True
+        except (ValueError, AssertionError): pass
+    result['independent_game_pass'] = independent
+    if independent != (oracle['executable'] and oracle['goal_reached']):
+        result.update(status='infrastructure_error',error='Independent rules disagree with reference PDDL'); return result
     if reference != (oracle['executable'] and oracle['goal_reached']):
         result.update(status='infrastructure_error',error='VAL and reference interpreter disagree'); return result
     result['probes'] = evaluate_probes(candidate,row['_probes'],mapping,adapters)
@@ -369,25 +405,25 @@ def save_result(directory,result):
     (directory/'result.md').write_text('\n\n'.join(lines+[' · '.join(links)])+'\n')
 
 
-def run_one(row,template,code_hash):
-    directory = eval_root/row['dataset']/row['task']/row['episode']; directory.mkdir(parents=True,exist_ok=True)
+def run_one(row,template,code_revision):
+    directory = eval_root/row['dataset']/row['task']; directory.mkdir(parents=True,exist_ok=True)
     prompt = template.format(instruction=names_only(row['instruction'],row['_scenario']['domain']),robot_configuration='single-arm')
-    identity = {'model':eval_model,'prompt_sha256':sha(prompt),'image_sha256':row['hashes']['initial.png']}
+    identity = {'model':eval_model,'prompt':prompt,'image':file_revision(row['image'])}
     start = time.monotonic(); stage = 'generation_error'
     try:
         saved = json.loads((directory/'generation.json').read_text()) if (directory/'generation.json').exists() else {}
         raw_path = directory/'raw_output.txt'
-        if saved.get('identity') == identity and raw_path.exists() and saved.get('output_sha256') == sha(raw_path.read_bytes()): raw = raw_path.read_text()
+        if saved.get('identity') == identity and raw_path.exists() and saved.get('output') == raw_path.read_text(): raw = raw_path.read_text()
         else:
             for name in ['raw_output.txt','generation.json','domain.pddl','problem.pddl','plan.txt','canonical_plan.txt','mapping.json','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log']:
                 (directory/name).unlink(missing_ok=True)
             capture = {}; raw = call_gpt(eval_model,prompt,[Path(row['image'])],temperature=0,capture=capture)
-            raw_path.write_text(raw); write_json(directory/'generation.json',{'identity':identity,'output_sha256':sha(raw),'capture':capture})
+            raw_path.write_text(raw); write_json(directory/'generation.json',{'identity':identity,'output':raw,'capture':capture})
         stage = 'infrastructure_error'; result = evaluate_candidate(row,raw,directory)
     except Exception as error:
-        result = {k:row[k] for k in ['id','dataset','split','game','task','episode']}
+        result = {k:row[k] for k in ['id','dataset','split','game','task']}
         result.update(task_success=False,behavior_success=False,status=stage,error=f'{type(error).__name__}: {error}',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
-    result.update(model=eval_model,elapsed_seconds=round(time.monotonic()-start,3),evaluator_sha256=code_hash)
+    result.update(model=eval_model,elapsed_seconds=round(time.monotonic()-start,3),evaluator_revision=code_revision)
     save_result(directory,result); return result
 
 
@@ -402,8 +438,13 @@ def aggregate(results):
 
 
 def summarize(results,rows):
-    summary = {'model':eval_model,'mapping_model':mapping_model,'manifest_sha256':sha(MANIFEST.read_bytes()),
+    summary = {'model':eval_model,'mapping_model':mapping_model,'manifest':file_revision(MANIFEST),
                'overall':aggregate(results),'by_split':{},'by_game':{},'pairs':[], 'decision_source':'program; VLM supplies object identity aliases only'}
+    audit_path = MANIFEST.parent/'training_audit.json'
+    if audit_path.exists():
+        audit = json.loads(audit_path.read_text())
+        summary['training'] = {key:audit[key] for key in ['training_json','records','counts','ranges','variant_of']}
+    summary['test_version'] = MANIFEST.parent.name
     for field,label in [('split','by_split'),('game','by_game')]:
         groups = defaultdict(list)
         for result in results: groups[result[field]].append(result)
@@ -411,6 +452,7 @@ def summarize(results,rows):
         if field == 'split':
             for key,group in groups.items():
                 games = {r['game'] for r in group}
+                summary[label][key]['by_game'] = {g:aggregate([r for r in group if r['game']==g]) for g in sorted(games)}
                 rates = [aggregate([r for r in group if r['game']==g])['task_success_rate'] for g in games]
                 rates = [rate for rate in rates if rate is not None]
                 summary[label][key]['macro_game_success_rate'] = sum(rates)/len(rates) if rates else None
@@ -419,7 +461,7 @@ def summarize(results,rows):
     by_id = {r['id']:r for r in results}
     for row in rows:
         if row['dataset'] != 'abs_b_rule' or not row.get('paired_with'): continue
-        pair = row['paired_with']; base_id = '/'.join([pair['dataset'],pair['task'],pair['episode']])
+        pair = row['paired_with']; base_id = task_id(pair)
         if base_id not in by_id: continue
         a,b = by_id[base_id],by_id[row['id']]
         summary['pairs'].append({'base':base_id,'variant':row['id'],
@@ -436,23 +478,23 @@ def summarize(results,rows):
     lines += ['', f"规则配对成功：{sum(p['both_tasks_pass'] for p in evaluated_pairs)}/{len(evaluated_pairs)}；未完成：{summary['pairs_unresolved']}", '', '| 任务 | 游戏 | 状态 | 任务完成 | 规则探针 |', '| --- | --- | --- | --- | --- |']
     for r in sorted(results,key=lambda r:r['id']):
         p=r['probes']; lines.append(f"| [{r['id']}]({r['id']}/result.md) | {r['game']} | {r['status']} | {'是' if r['task_success'] else '否'} | {p['passed']}/{p['total']} |")
-    lines += ['', '规则探针只覆盖已检查行为；已知游戏以参考 PDDL 为规则基准，新游戏另有独立几何模拟器。']
+    lines += ['', '规则探针只覆盖已检查行为；五个新增训练游戏和四个未训练游戏另以独立原生规则模拟器核验计划。']
     (eval_root/'report_abs.md').write_text('\n'.join(lines)+'\n'); return summary
 
 
 def main():
     eval_root.mkdir(parents=True,exist_ok=True); rows = load_tasks(MANIFEST,datasets); template = PROMPT.read_text()
-    code_hash = sha([sha(Path(__file__).read_bytes()),sha(MANIFEST.read_bytes()),sha(Path(novel_games.__file__).read_bytes())])
+    code_revision = [file_revision(p) for p in [__file__, MANIFEST, novel_games.__file__]]
     print(f'开始评测：{eval_model}，{len(rows)} 条；映射模型 {mapping_model}。',flush=True)
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(run_one,row,template,code_hash) for row in rows]
+        futures = [pool.submit(run_one,row,template,code_revision) for row in rows]
         for future in as_completed(futures):
             result = future.result(); results.append(result)
             print(f"{result['id']}: {result['status']} ({len(results)}/{len(rows)})",flush=True)
     summary = summarize(results,rows)
     print(json.dumps(summary['overall'],ensure_ascii=False,indent=2),flush=True)
-    print(f'详细结果：{eval_root / "report_abs.md"}',flush=True)
+    print(f'详细结果：  {eval_root / "report_abs.md"}',flush=True)
 
 
 if __name__ == '__main__':

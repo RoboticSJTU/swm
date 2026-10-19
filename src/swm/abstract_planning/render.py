@@ -11,8 +11,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageChops
 from .model import parse_sexpr, section
 
 WIDTH, HEIGHT = 1440, 1080
-VERSION = "readable-scenes-v3"
-MIN_LABEL_SIZE = 28
+VERSION = "clean-scenes-v2"
 STYLES = ("classic", "pastel", "pixel", "night")
 COLORS = ["#d56a42", "#308cae", "#dfb036", "#73a351", "#a969ac", "#496fba"]
 INK = "#263442"
@@ -119,7 +118,6 @@ class Scene:
         self.regions = {}
 
     def label(self, xy, value, size=23, bold=False, fill=INK, anchor="left"):
-        size = max(MIN_LABEL_SIZE, size)
         value = str(value)
         x, y = xy
         box = self.draw.textbbox((0, 0), value, font=font(size, bold))
@@ -129,7 +127,7 @@ class Scene:
         elif anchor == "right":
             x -= w
         bbox = [round(x), round(y), round(x + w), round(y + h)]
-        if min(bbox[:2]) < 0 or bbox[2] > self.image.width or bbox[3] > self.image.height:
+        if min(bbox[:2]) < 0 or bbox[2] > WIDTH or bbox[3] > HEIGHT:
             raise ValueError((self.game, "Clipped label", value, bbox))
         self.draw.text((x, y - box[1]), value, font=font(size, bold), fill=fill)
         self.labels.append({"text": value, "bbox": bbox, "font_size": size})
@@ -214,7 +212,7 @@ class Scene:
             round(x + size * 0.6),
             round(y + size * 0.6),
         ]
-        if min(bbox[:2]) < 0 or bbox[2] > self.image.width or bbox[3] > self.image.height:
+        if min(bbox[:2]) < 0 or bbox[2] > WIDTH or bbox[3] > HEIGHT:
             raise ValueError((self.game, "Clipped entity", name, bbox))
         if label:
             self.label(
@@ -267,7 +265,7 @@ class Scene:
         background.close()
         x0, y0, x1, y1 = bounds
         x0, y0 = max(0, x0 - 24), max(0, y0 - 24)
-        x1, y1 = min(self.image.width, x1 + 24), min(self.image.height, y1 + 24)
+        x1, y1 = min(WIDTH, x1 + 24), min(HEIGHT, y1 + 24)
         cropped = self.image.crop((x0, y0, x1, y1))
         self.image.close()
         self.image = cropped
@@ -825,6 +823,8 @@ def sprite(s, kind, center, size, accent):
 def block_scene(s, scenario):
     state = s.state
     game = s.game
+    s.texture((20, 105, 1420, 995), "wood")
+    s.draw.rectangle((35, 800, 1405, 845), fill="#685139")
     if game == "blocks":
         roots = [a[0] for a in state["on_table"]]
         piles = stacks(state, roots)
@@ -832,17 +832,12 @@ def block_scene(s, scenario):
         n = max(len(p) for p in piles)
         unit = min(108, 590 / n)
         width = min(145, 1130 / max(len(piles), 1))
-        spacing = min(180, 1180 / max(len(piles), 1))
-        right = 130 + (len(piles) - 1) * spacing + width / 2 + 100
-        s.draw.rectangle((35, 800, right, 830), fill="#685139")
         for i, pile in enumerate(piles):
-            x = 130 + i * spacing
+            x = 130 + i * (1180 / max(len(piles), 1))
             for j, obj in enumerate(pile):
                 bottom = 800 - j * unit
                 top = bottom - unit
-                label_size = max(MIN_LABEL_SIZE, min(36, int(unit * 0.60)))
-                half = max(min(width * 0.45, unit * 0.65),
-                           s.draw.textlength(obj, font=font(label_size, True)) / 2 + 8)
+                half = min(width * 0.45, unit * 0.65)
                 fill = color(obj)
                 s.draw.rectangle(
                     (x - half, top, x + half, bottom),
@@ -885,7 +880,7 @@ def block_scene(s, scenario):
                 s.label(
                     (x, top + unit * 0.35),
                     obj,
-                    min(36, int(unit * 0.60)),
+                    min(26, int(unit * 0.52)),
                     True,
                     "#fff9ea",
                     "center",
@@ -895,20 +890,18 @@ def block_scene(s, scenario):
                     s.fact("clear", obj)
         s.fact("arm_empty")
         s.draw.line(
-            [(right - 90, 770), (right - 65, 738), (right - 43, 752), (right - 28, 737)], fill="#667f8d", width=14
+            [(150, 955), (190, 910), (220, 930), (240, 910)], fill="#667f8d", width=22
         )
-        s.draw.line((right - 28, 737, right - 18, 750), fill="#263e4b", width=5)
+        s.draw.line((240, 910, 255, 928), fill="#263e4b", width=6)
     else:
         pegs = ["peg1", "peg2", "peg3"]
         piles = stacks(state, pegs)
         n = max(len(p) for p in piles)
         unit = min(65, 510 / max(n, 1))
-        peg_top = 773 - n * unit - 45
-        s.draw.rectangle((35, 800, 1065, 830), fill="#685139")
         for i, (peg, pile) in enumerate(zip(pegs, piles)):
-            x = 200 + i * 350
+            x = 260 + i * 460
             s.draw.rounded_rectangle(
-                (x - 7, peg_top, x + 7, 805), 5, fill="#897555", outline="#4e4435", width=3
+                (x - 7, 210, x + 7, 805), 5, fill="#897555", outline="#4e4435", width=3
             )
             s.draw.ellipse(
                 (x - 142, 773, x + 142, 815), fill="#8e7049", outline="#594834", width=3
@@ -931,7 +924,7 @@ def block_scene(s, scenario):
                     outline=tint(fill, 32),
                     width=2,
                 )
-                s.label((x, y - unit * 0.68), obj, 32, True, "#fff7e9", "center")
+                s.label((x, y - unit * 0.68), obj, 24, True, "#fff7e9", "center")
                 s.entities.append(
                     {
                         "id": obj,
@@ -954,7 +947,7 @@ def block_scene(s, scenario):
                 {
                     "id": peg,
                     "kind": "peg",
-                    "bbox": [x - 10, round(peg_top), x + 10, 805],
+                    "bbox": [x - 10, 210, x + 10, 805],
                     "location": None,
                     "attributes": {"clear": not pile},
                 }
@@ -1027,6 +1020,7 @@ def puzzle_scene(s, scenario):
 
 def cards_scene(s, scenario):
     state = s.state
+    s.texture((20, 100, 1420, 1000), "felt")
     ranks = dict(state["value"])
     suits = dict(state["hassuit"])
     bottoms = [a[0] for a in state["bottomcol"]]
@@ -1035,12 +1029,6 @@ def cards_scene(s, scenario):
     space = int(state["cellspace"][0][0].replace("celln", ""))
     occupied = [a[0] for a in state["incell"]]
     homes = [a[0] for a in state["home"]]
-    piles = [[base, *p] for base, p in zip(bottoms, stacks(state, bottoms))]
-    bottom = max(398 + min(65, 390 / max(len(p) - 1, 1)) * (len(p) - 1) + 183
-                 for p in piles)
-    s.texture((20, 100, 1390, bottom + 20), "felt")
-    s.label((45, 112), "FREECELL", 28, True, "#e1e5cf")
-    s.label((1020, 112), "FOUNDATION", 28, True, "#e1e5cf")
 
     def card(name, x, y):
         red = suits[name] in {"h", "d"}
@@ -1048,9 +1036,11 @@ def cards_scene(s, scenario):
         s.draw.rounded_rectangle(
             (x, y, x + 146, y + 183), 9, fill="#fbf7e8", outline="#b6ad90", width=3
         )
-        # The card ID already encodes both suit and rank; repeating it lower on
-        # the card is obscured by the next card in a stack.
-        s.label((x + 13, y + 10), name, 34, True, fill)
+        rank = ranks[name].removeprefix("n")
+        s.label((x + 13, y + 10), name, 25, True, fill)
+        s.label(
+            (x + 74, y + 73), rank + " " + suits[name].upper(), 38, True, fill, "center"
+        )
         s.entities.append(
             {
                 "id": name,
@@ -1063,9 +1053,10 @@ def cards_scene(s, scenario):
 
     for i in range(space + len(occupied)):
         x = 45 + i * 175
-        s.draw.rounded_rectangle((x, 157, x + 150, 347), 9, outline="#b5c4ae", width=3)
+        s.draw.rounded_rectangle((x, 147, x + 150, 337), 9, outline="#b5c4ae", width=3)
+        s.label((x + 75, 115), "FREECELL", 20, True, "#e1e5cf", "center")
         if i < len(occupied):
-            card(occupied[i], x + 2, 160)
+            card(occupied[i], x + 2, 150)
             s.fact("incell", occupied[i])
     for i, home in enumerate(homes):
         x = 1020 + i * 180
@@ -1086,11 +1077,13 @@ def cards_scene(s, scenario):
             )
         else:
             card(home, x, 150)
+        s.label((x + 73, 115), "FOUNDATION", 20, True, "#e1e5cf", "center")
         s.fact("home", home)
+    piles = [[base, *p] for base, p in zip(bottoms, stacks(state, bottoms))]
     for i in range(columns):
         x = 55 + i * (1295 / max(columns, 1))
         y = 398
-        s.draw.rounded_rectangle((x, y, x + 150, bottom + 8), 9, outline="#8fb4a0", width=2)
+        s.draw.rounded_rectangle((x, y, x + 150, 970), 9, outline="#8fb4a0", width=2)
         if i >= len(piles):
             continue
         pile = piles[i]
@@ -1111,105 +1104,34 @@ def grid_scene(s, scenario):
     state = s.state
     game = s.game
     h, w = grid["height"], grid["width"]
+    unit = min((WIDTH - 140) / w, (HEIGHT - 100) / h)
+    ox = (WIDTH - w * unit) / 2
+    oy = (HEIGHT - h * unit) / 2
     cells = set(grid["cells"])
-    # Keep one wall around the playable area, with original coordinate IDs.
-    r_start, c_start = 0, 0
-    if game == "sokoban":
-        coords = [tuple(map(int, re.findall(r"\d+", cell))) for cell in cells]
-        r_start = max(0, min(r for r, c in coords) - 2)
-        c_start = max(0, min(c for r, c in coords) - 2)
-        h = min(h, max(r for r, c in coords) + 1) - r_start
-        w = min(w, max(c for r, c in coords) + 1) - c_start
-    unit = min(190, (WIDTH - 180) / w, (HEIGHT - 100) / h)
-    if game == "sokoban":
-        unit = min(unit, (WIDTH - 180) / grid["width"], (HEIGHT - 100) / grid["height"])
-    col_widths, row_heights = [unit] * w, [unit] * h
-    parent = {a: b for a, b in state["depends_on"]}
-    children = defaultdict(list)
-    for child, outer in parent.items():
-        children[outer].append(child)
-
-    def package_size(name):
-        nested = [package_size(child) for child in children[name]]
-        return (max(112, sum(a for a, b in nested) + 12 * (len(nested) + 1)),
-                48 + max((b for a, b in nested), default=80))
-
-    if game == "package":
-        col_widths, row_heights = [170] * w, [170] * h
-        roots_by_cell = defaultdict(list)
-        for name, cell in state["at"]:
-            if s.present("package", name) and name not in parent:
-                roots_by_cell[cell].append(name)
-        for cell, roots in roots_by_cell.items():
-            r, c = (int(v) - 1 for v in re.findall(r"\d+", cell))
-            sizes = [package_size(name) for name in roots]
-            col_widths[c] = max(col_widths[c], sum(a for a, b in sizes) + 24)
-            row_heights[r] = max(row_heights[r], max(b for a, b in sizes) + 24)
-    if game in {"kitchen", "printer", "package", "maze"}:
-        if game in {"kitchen", "printer"}:
-            col_widths, row_heights = [180] * w, [180] * h
-        contents = defaultdict(list)
-        for pred in ("at", "tool_at", "key_at"):
-            for name, cell in state[pred]:
-                if not s.present("package", name):
-                    contents[cell].append(name)
-        for cell, names in contents.items():
-            r, c = (int(v) - 1 for v in re.findall(r"\d+", cell))
-            ncols = 1 if len(names) == 1 else 2
-            short_names = [name.replace("_station", "").replace("cartridge", "c")
-                           .replace("printer", "p").replace("table", "t")
-                           for name in names if name != "player"]
-            label_width = max((s.draw.textlength(n, font=font(30, True))
-                               for n in short_names), default=80)
-            col_widths[c] = max(col_widths[c], ncols * (label_width + 24) + (112 if game == "maze" else 0))
-            row_heights[r] = max(row_heights[r], math.ceil(len(names) / ncols) * 138 + (48 if game == "maze" else 0))
-    if game == "maze":
-        doors_by_edge = defaultdict(set)
-        for a, b, door in state["edge_door"]:
-            doors_by_edge[tuple(sorted((a, b)))].add(door)
-        for (a, b), doors in doors_by_edge.items():
-            ar, ac = (int(v) - 1 for v in re.findall(r"\d+", a))
-            br, bc = (int(v) - 1 for v in re.findall(r"\d+", b))
-            if ac == bc:
-                spacing = max(s.draw.textlength(d, font=font(28, True)) for d in doors) + 16
-                col_widths[ac] = max(col_widths[ac], len(doors) * spacing + 24)
-            else:
-                row_heights[ar] = max(row_heights[ar], len(doors) * 48 + 24)
-    canvas_width = max(WIDTH, math.ceil(sum(col_widths) + 180))
-    canvas_height = max(HEIGHT, math.ceil(sum(row_heights) + 100))
-    if (canvas_width, canvas_height) != s.image.size:
-        s.image.close()
-        s.image = Image.new("RGB", (canvas_width, canvas_height), s.palette["ground"])
-        s.draw = ImageDraw.Draw(s.image)
-    ox = (canvas_width - sum(col_widths)) / 2
-    oy = (canvas_height - sum(row_heights)) / 2
     holes = set(grid.get("holes", []))
     goals = set(grid.get("goals", []))
     positions = {}
     for r in range(h):
-        rh = row_heights[r]
-        ry = oy + sum(row_heights[:r])
         s.label(
-            (ox - 14, ry + rh * 0.45),
-            f"r{r + r_start + 1:02d}",
-            32,
+            (ox - 14, oy + r * unit + unit * 0.45),
+            f"r{r + 1:02d}",
+            22,
             True,
             anchor="right",
         )
         for c in range(w):
-            cw = col_widths[c]
-            cell = f"r{r + r_start + 1:02d}c{c + c_start + 1:02d}"
-            x, y = ox + sum(col_widths[:c]), ry
+            cell = f"r{r + 1:02d}c{c + 1:02d}"
+            x, y = ox + c * unit, oy + r * unit
             if r == 0:
                 s.label(
-                    (x + cw / 2, oy - 38), f"c{c + c_start + 1:02d}", 32, True, anchor="center"
+                    (x + unit / 2, oy - 31), f"c{c + 1:02d}", 22, True, anchor="center"
                 )
-            box = (x + 1, y + 1, x + cw - 1, y + rh - 1)
+            box = (x + 1, y + 1, x + unit - 1, y + unit - 1)
             if cell not in cells:
                 s.texture(box, "brick")
                 continue
-            positions[cell] = (x + cw / 2, y + rh / 2)
-            s.regions[cell] = list(map(round, (x, y, x + cw, y + rh)))
+            positions[cell] = (x + unit / 2, y + unit / 2)
+            s.regions[cell] = list(map(round, (x, y, x + unit, y + unit)))
             s.texture(
                 box,
                 "water"
@@ -1251,7 +1173,7 @@ def grid_scene(s, scenario):
                 )
             if s.present("delivery", cell):
                 s.draw.rectangle(
-                    (x + 5, y + 5, x + cw - 5, y + rh - 5),
+                    (x + 5, y + 5, x + unit - 5, y + unit - 5),
                     outline="#318658",
                     width=6,
                 )
@@ -1262,11 +1184,10 @@ def grid_scene(s, scenario):
         for dr, dc in ((0, 1), (1, 0)):
             other = f"r{r + dr:02d}c{c + dc:02d}"
             if other in positions and frozenset((cell, other)) not in passages:
-                x0, y0, x1, y1 = s.regions[cell]
                 line = (
-                    (x1, y0, x1, y1)
+                    (x + unit / 2, y - unit / 2, x + unit / 2, y + unit / 2)
                     if dc
-                    else (x0, y1, x1, y1)
+                    else (x - unit / 2, y + unit / 2, x + unit / 2, y + unit / 2)
                 )
                 s.draw.line(line, fill=s.palette["wall"], width=12)
     occupancy = defaultdict(list)
@@ -1275,32 +1196,31 @@ def grid_scene(s, scenario):
             occupancy[cell].append((obj, pred))
             s.fact(pred, obj, cell)
     heading = state["facing"][0][0] if state["facing"] else None
+    parent = {a: b for a, b in state["depends_on"]}
     for cell, items in sorted(occupancy.items()):
         cx, cy = positions[cell]
-        r, c = (int(v) - 1 for v in re.findall(r"\d+", cell))
-        cw, rh = col_widths[c - c_start], row_heights[r - r_start]
-        x0, y0 = cx - cw / 2, cy - rh / 2
+        x0, y0 = cx - unit / 2, cy - unit / 2
         packages = [name for name, p in items if s.present("package", name)]
         if packages:
 
             def package_box(name, box):
                 x, y, bx, by = box
-                nested = [n for n in packages if parent.get(n) == name]
+                children = [n for n in packages if parent.get(n) == name]
                 s.draw.rectangle(
                     box, fill=tint(s.palette["floor"], -8), outline="#8e6b42", width=3
                 )
                 tag = "p" + name.removeprefix("package")
-                s.label((x + 8, y + 8), tag, 30, True)
+                s.label((x + 5, y + 3), tag, 17, True)
                 if s.present("taped", name):
                     s.draw.line(
-                        (bx - 32, y + 8, bx - 32, y + 34), fill="#9a761f", width=9
+                        (bx - 20, y + 4, bx - 20, y + 19), fill="#bba051", width=7
                     )
                     s.fact("taped", name)
                 if s.present("tape_cut", name):
                     s.fact("tape_cut", name)
                 if s.present("clipped", name):
                     s.draw.arc(
-                        (bx - 22, y + 8, bx - 7, y + 33),
+                        (bx - 13, y + 3, bx - 3, y + 16),
                         0,
                         320,
                         fill="#657881",
@@ -1324,39 +1244,33 @@ def grid_scene(s, scenario):
                 )
                 if name in parent:
                     s.fact("depends_on", name, parent[name])
-                if nested:
-                    offset = x + 12
-                    total = sum(package_size(child)[0] for child in nested)
-                    for child in nested:
-                        child_width = (bx - x - 12 * (len(nested) + 1)) * package_size(child)[0] / total
+                if children:
+                    cw = (bx - x - 12) / len(children)
+                    for j, child in enumerate(children):
                         package_box(
                             child,
-                            (offset, y + 48, offset + child_width, by - 12),
+                            (x + 6 + j * cw, y + 24, x + 6 + (j + 1) * cw - 3, by - 5),
                         )
-                        offset += child_width + 12
 
             roots = [n for n in packages if n not in parent]
-            offset = x0 + 12
-            total = sum(package_size(name)[0] for name in roots)
-            for name in roots:
-                root_width = (cw - 12 * (len(roots) + 1)) * package_size(name)[0] / total
+            for j, name in enumerate(roots):
                 package_box(
                     name,
-                    (offset, y0 + 12, offset + root_width, y0 + rh - 12),
+                    (
+                        x0 + 6 + j * (unit - 12) / len(roots),
+                        y0 + 10,
+                        x0 + 6 + (j + 1) * (unit - 12) / len(roots) - 4,
+                        y0 + unit - 10,
+                    ),
                 )
-                offset += root_width + 12
             items = [a for a in items if a[0] not in packages]
         cols = 1 if len(items) == 1 else 2
         rows = math.ceil(len(items) / cols)
-        content_y = y0 + (24 if game == "maze" else 0)
-        content_height = rh - (48 if game == "maze" else 0)
-        content_x = x0 + (56 if game == "maze" else 0)
-        content_width = cw - (112 if game == "maze" else 0)
         for j, (name, pred) in enumerate(items):
-            px = content_x + (j % cols + 0.5) * content_width / cols
-            py = content_y + (j // cols + 0.47) * content_height / max(rows, 1)
+            px = x0 + (j % cols + 0.5) * unit / cols
+            py = y0 + (j // cols + 0.47) * unit / max(rows, 1)
             if rows > 1:
-                py = content_y + (j // cols + 0.5) * content_height / rows - 18
+                py = y0 + (j // cols + 0.5) * unit / rows - 12
             kind = (
                 "player"
                 if name == "player"
@@ -1394,10 +1308,10 @@ def grid_scene(s, scenario):
                 if name in {"cutter", "pliers"}
                 else "tool"
             )
-            size = min(content_width / cols * 0.64, content_height / max(rows, 1) * 0.56, 104)
+            size = min(unit / cols * 0.64, unit / max(rows, 1) * 0.56, 104)
             if rows > 1:
                 # Reserve the label height and clearance from the cell boundary.
-                size = min(size, (content_height / rows - 46) / 1.2)
+                size = min(size, (unit / rows - 30) / 1.2)
             attributes = {
                 k: s.present(k, name)
                 for k in ("clean", "powered", "calibrated", "mounted", "table_free")
@@ -1415,7 +1329,7 @@ def grid_scene(s, scenario):
                 s.label(
                     (px, py + size * 0.61 + 2),
                     short,
-                    30,
+                    18 if len(short) < 10 else 14,
                     True,
                     anchor="center",
                 )
@@ -1477,24 +1391,18 @@ def grid_scene(s, scenario):
         ax, ay = positions[a]
         bx, by = positions[b]
         for j, door in enumerate(doors):
-            spacing = (max(s.draw.textlength(d, font=font(28, True)) for d in doors) + 16
-                       if ax == bx else 48)
-            delta = (j - (len(doors) - 1) / 2) * spacing
-            a_box, b_box = s.regions[a], s.regions[b]
+            delta = (j - (len(doors) - 1) / 2) * 48
+            mx, my = (ax + bx) / 2, (ay + by) / 2
             if ax == bx:
-                mx = ax
-                my = max(a_box[1], b_box[1])
                 mx += delta
             else:
-                mx = max(a_box[0], b_box[0])
-                my = ay
                 my += delta
-            label_width = s.draw.textlength(door, font=font(28, True))
+            label_width = s.draw.textlength(door, font=font(15, True))
             half_width = max(15, label_width / 2 + 5)
-            box = [round(mx - half_width), round(my - 20),
-                   round(mx + half_width), round(my + 20)]
+            box = [round(mx - half_width), round(my - 15),
+                   round(mx + half_width), round(my + 15)]
             s.draw.rectangle(box, fill="#dfc392", outline="#695b43", width=3)
-            s.label((mx, my - 11), door, 28, True, anchor="center")
+            s.label((mx, my - 6), door, 15, True, anchor="center")
             s.entities.append(
                 {
                     "id": door,
@@ -1523,20 +1431,7 @@ def room_scene(s, scenario):
     cols = min(3, len(rooms))
     rows = math.ceil(len(rooms) / cols)
     pw = 1300 / cols
-    counts = [sum(r == room and not s.present("in", n) for n, r in state["at"])
-              for room in rooms]
-    case_rows = max(1, math.ceil(len(state["in"]) / 3))
-    case_reserve = 160 + 100 * case_rows
-    requirements = [math.ceil(n / 4) * 100 +
-                    (case_reserve if game == "briefcase" and s.present("is_at", room)
-                     else 230 if game == "gripper" else 110)
-                    for room, n in zip(rooms, counts)]
-    ph = max(330 if game == "briefcase" else 350, *requirements)
-    canvas_height = max(HEIGHT, math.ceil(90 + rows * ph + 24))
-    if canvas_height != s.image.height:
-        s.image.close()
-        s.image = Image.new("RGB", (WIDTH, canvas_height), s.palette["ground"])
-        s.draw = ImageDraw.Draw(s.image)
+    ph = 820 / rows
     for i, room in enumerate(rooms):
         x = 60 + (i % cols) * pw
         y = 90 + (i // cols) * ph
@@ -1548,7 +1443,7 @@ def room_scene(s, scenario):
         s.regions[room] = list(map(round, (x, y, x + pw - 18, y + ph - 18)))
         objects = [n for n, r in state["at"] if r == room and not s.present("in", n)]
         has_case = game == "briefcase" and s.present("is_at", room)
-        object_height = ph - (case_reserve if has_case else 230 if game == "gripper" else 110)
+        object_height = ph - (240 if has_case else 160)
         for j, name in enumerate(objects):
             ncols = min(4, len(objects))
             nrows = math.ceil(len(objects) / ncols)
@@ -1592,20 +1487,15 @@ def room_scene(s, scenario):
         if has_case:
             # A cutaway keeps every contained item's ID readable inside the case.
             contents = state["in"]
-            rx = x + (pw - 18) / 2
-            spacing = max(90, max((s.draw.textlength(name, font=font(MIN_LABEL_SIZE, True)) + 18
-                                  for (name,) in contents), default=90))
-            case_cols = max(1, min(3, len(contents)))
-            case_width = max(120, case_cols * spacing + 24)
-            case_bottom = y + ph - 57
-            case_top = case_bottom - (98 + 100 * (case_rows - 1))
-            box = [round(rx - case_width / 2), round(case_top),
-                   round(rx + case_width / 2), round(case_bottom)]
+            rx, ry = x + (pw - 18) / 2, y + ph - 95
+            case_width = max(120, len(contents) * 90 + 24)
+            box = [round(rx - case_width / 2), round(ry - 50),
+                   round(rx + case_width / 2), round(ry + 48)]
             s.draw.rounded_rectangle(tuple(box), radius=8, fill=s.palette["ground"],
                                      outline="#315d72", width=4)
-            s.draw.arc((rx - 20, case_top - 18, rx + 20, case_top + 18), 180, 360,
+            s.draw.arc((rx - 20, ry - 68, rx + 20, ry - 32), 180, 360,
                        fill="#315d72", width=4)
-            s.label((rx, case_bottom + 5), "briefcase", 28, True, anchor="center")
+            s.label((rx, ry + 53), "briefcase", 22, True, anchor="center")
             s.entities.append({"id": "briefcase", "kind": "case", "bbox": box,
                                "location": room, "attributes": {}})
             s.fact("is_at", room)
@@ -1613,8 +1503,7 @@ def room_scene(s, scenario):
                 s.object(
                     name,
                     "relic",
-                    (rx + (j % case_cols - (case_cols - 1) / 2) * spacing,
-                     case_top + 38 + (j // case_cols) * 100),
+                    (rx + (j - (len(contents) - 1) / 2) * 90, ry - 12),
                     40,
                     "briefcase",
                     {"case_room": room},
@@ -1629,20 +1518,18 @@ def lift_scene(s, scenario):
     floors = sorted(
         [a[0] for a in state["floor"]], key=lambda x: int(x[1:]), reverse=True
     )
-    unit = min(130, 900 / len(floors))
-    max_waiting = max(sum(f == floor for p, f in state["origin"]) for floor in floors)
-    lift_x = max(480, 220 + max_waiting * 140)
+    unit = 900 / len(floors)
     for i, floor in enumerate(floors):
         y = 70 + i * unit
-        s.texture((70, y, lift_x - 20, y + unit - 4), "wood")
+        s.texture((70, y, 1000, y + unit - 4), "wood")
         s.draw.line(
-            (70, y + unit - 4, lift_x + 180, y + unit - 4), fill=s.palette["wall"], width=5
+            (70, y + unit - 4, 1350, y + unit - 4), fill=s.palette["wall"], width=5
         )
         s.label((82, y + unit * 0.4), floor, 25, True)
-        s.regions[floor] = [70, round(y), lift_x + 180, round(y + unit - 4)]
+        s.regions[floor] = [70, round(y), 1350, round(y + unit - 4)]
         waiting = [p for p, f in state["origin"] if f == floor]
         for j, p in enumerate(waiting):
-            x = 235 + j * 140
+            x = 235 + j * 110
             s.object(
                 p,
                 "passenger",
@@ -1653,11 +1540,11 @@ def lift_scene(s, scenario):
                 label=False,
             )
             target = next(f for n, f in state["destin"] if n == p)
-            s.label((x, y + unit - 34), p + ">" + target, 28, True, anchor="center")
+            s.label((x, y + unit * 0.76), p + ">" + target, 19, True, anchor="center")
             s.fact("not_boarded", p)
             s.fact("not_served", p)
         if s.present("lift_at", floor):
-            box = [lift_x, round(y + 4), lift_x + 170, round(y + unit - 8)]
+            box = [1020, round(y + 4), 1340, round(y + unit - 8)]
             s.draw.rectangle(box, fill="#b6c8cf", outline="#526f7e", width=4)
             s.fact("lift_at", floor)
             s.entities.append(
@@ -1671,7 +1558,7 @@ def lift_scene(s, scenario):
             )
     if state["free_slots"]:
         count = state["free_slots"][0][0]
-        s.note((lift_x + 60, 80 + len(floors) * unit), count, [("free_slots", count)], 28)
+        s.note((1110, 1010), count, [("free_slots", count)], 23)
 
 
 def lights_scene(s, scenario):
@@ -1679,28 +1566,24 @@ def lights_scene(s, scenario):
     names = [a[0] for a in state["light"]]
     h = max(int(n.split("_")[0][5:]) for n in names) + 1
     w = max(int(n.split("_")[1]) for n in names) + 1
-    ux, uy = 220, 230
-    ox, oy = 160, 90
-    # Larger evaluation boards need the same readable spacing as training boards.
-    width = max(s.image.width, ox + w * ux + 40)
-    height = max(s.image.height, oy + h * uy + 30)
-    if (width, height) != s.image.size:
-        canvas = Image.new("RGB", (width, height), s.palette["ground"])
-        canvas.paste(s.image, (0, 0))
-        s.image = canvas
-        s.draw = ImageDraw.Draw(s.image)
+    unit = min(920 / h, 1170 / w)
+    ox = (WIDTH - w * unit) / 2 + 35
+    oy = (HEIGHT - h * unit) / 2
     for r in range(h):
         panel = f"panel{r}"
-        y = oy + r * uy
+        y = oy + r * unit
         connected = s.present("connected", panel)
         s.draw.line(
-            (ox - 12, y + 35, ox - 12, y + 190),
+            (ox - 40, y + unit * 0.15, ox - 40, y + unit * 0.85),
             fill="#6080a1",
             width=6,
         )
-        s.label((ox - 25, y + 88), panel, 30, True, anchor="right")
+        s.label((ox - 52, y + unit * 0.44), panel, 21, True, anchor="right")
         box = [
-            ox - 20, y + 35, ox - 4, y + 190,
+            round(ox - 48),
+            round(y + unit * 0.15),
+            round(ox - 32),
+            round(y + unit * 0.85),
         ]
         s.entities.append(
             {
@@ -1716,9 +1599,9 @@ def lights_scene(s, scenario):
         for c in range(w):
             light = f"light{r}_{c}"
             button = f"button{r}_{c}"
-            x = ox + (c + 0.5) * ux
-            cy = y + 91
-            rad = 53
+            x = ox + (c + 0.5) * unit
+            cy = y + unit * 0.4
+            rad = unit * 0.26
             lit = s.present("lit", light)
             s.draw.ellipse(
                 (x - rad, cy - rad, x + rad, cy + rad),
@@ -1732,15 +1615,15 @@ def lights_scene(s, scenario):
                     fill="#fff6ce",
                 )
                 s.fact("lit", light)
-            s.label((x, y + 2), light, 30, True, anchor="center")
-            by = y + 172
+            s.label((x, cy - rad - 24), light, 20, True, anchor="center")
+            by = y + unit * 0.82
             s.draw.ellipse(
                 (x - 14, by - 14, x + 14, by + 14),
                 fill="#d18055",
                 outline="#83613e",
                 width=3,
             )
-            s.label((x, by + 22), button, 30, True, anchor="center")
+            s.label((x + 25, by - 10), button, 17)
             s.entities.extend(
                 [
                     {
@@ -1762,8 +1645,8 @@ def lights_scene(s, scenario):
                 ]
             )
     if state["controller_free"]:
-        s.draw.line((ox - 95, oy - 23, ox - 35, oy - 23), fill="#6080a1", width=5)
-        s.draw.rectangle((ox - 35, oy - 32, ox - 16, oy - 14), fill="#6080a1")
+        s.draw.line((45, 55, 120, 55), fill="#6080a1", width=5)
+        s.draw.rectangle((120, 46, 139, 64), fill="#6080a1")
         s.fact("controller_free")
 
 
@@ -1787,7 +1670,6 @@ def construction_scene(s, scenario):
         s.texture((x + 2, y + 2, x + unit - 2, y + unit - 2), "tile")
         s.regions[name] = list(map(round, (x, y, x + unit, y + unit)))
         if game == "termes" and s.present("is_depot", name):
-            # Draw the depot border before its coordinate/height labels.
             s.draw.rectangle(
                 (x + 5, y + 5, x + unit - 5, y + unit - 5),
                 outline="#268e57",
@@ -1865,13 +1747,12 @@ def construction_scene(s, scenario):
                     s.fact("robot_at", robot, cell)
                     s.fact("robot_has", robot, paint)
     if game == "floortile":
-        swatch_y = oy + h * unit + 24
         for j, (paint,) in enumerate(state["available_color"]):
-            x = ox + j * 170
+            x = 80 + j * 170
             s.draw.rectangle(
-                (x, swatch_y, x + 35, swatch_y + 35), fill=paint, outline="#8b9296", width=2
+                (x, 980, x + 35, 1015), fill=paint, outline="#8b9296", width=2
             )
-            s.note((x + 46, swatch_y + 5), paint, [("available_color", paint)], 28)
+            s.note((x + 46, 985), paint, [("available_color", paint)], 21)
         for (robot,) in state["free_color"]:
             s.fact("free_color", robot)
 
