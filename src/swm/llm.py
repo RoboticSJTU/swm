@@ -14,11 +14,13 @@ from openai import OpenAI
 load_dotenv(find_dotenv())
 
 
-def get_client(model: str):
+def get_client(model: str, *, base_url: str | None = None):
     """Return the OpenAI-compatible client for a model name.
     codex务必注意：不要删我注释的api key和url，这些都是备用的！
     """
-    if model.startswith(("gemini", "gpt")):
+    if base_url is not None:
+        api_key = "0"
+    elif model.startswith(("gemini", "gpt")):
         api_key = os.getenv("A6_API_KEY")
         base_url = "https://api.a6api.com/v1"        
         # api_key = os.getenv("das_API_KEY")
@@ -26,7 +28,7 @@ def get_client(model: str):
         # api_key = os.getenv("lin_API_KEY")
         # base_url = "https://direct.linkai.pics/v1" 
         
-    elif model.startswith(("kimi-k3", "qwen3.8-flash", "glm-5.2")):
+    elif model.startswith(("kimi", "qwen", "glm", "deepseek")):
         api_key = os.getenv("BOYUE_API_KEY")
         base_url = "https://apicz.boyuerichdata.com/v1"
 
@@ -49,7 +51,7 @@ def get_client(model: str):
         base_url = "http://127.0.0.1:8001/v1"
 
     kwargs = {}
-    if not model.startswith(("gemini", "gpt")):
+    if not model.startswith(("gemini", "gpt")) or base_url.startswith("http://127.0.0.1"):
         kwargs["http_client"] = httpx.Client(trust_env=False)
 
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
@@ -59,6 +61,7 @@ def call_gpt(
     prompt: str,
     image_paths: list[Path] | None = None,
     *,
+    base_url: str | None = None,
     response_format: dict | None = None,
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
@@ -77,7 +80,7 @@ def call_gpt(
                 }
             )
 
-    client = get_client(model)
+    client = get_client(model, base_url=base_url)
 
     kwargs = {
         "model": model,

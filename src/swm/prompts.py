@@ -22,9 +22,10 @@ def construct_prompt_with_feedback(
     failed_domain: str = "",
     failed_problem: str = "",
     failed_plan: str = "",
-    robot_configuration: str = "dual-arm",
+    robot_configuration: str = "dual_arm",
+    action_template: str = "",
 ) -> str:
-    if robot_configuration not in {"single-arm", "dual-arm"}:
+    if robot_configuration not in {"single_arm", "dual_arm"}:
         raise ValueError(f"Unsupported robot configuration: {robot_configuration}")
 
     template = read_prompt(
@@ -38,6 +39,7 @@ def construct_prompt_with_feedback(
         failed_domain=failed_domain,
         failed_problem=failed_problem,
         failed_plan=failed_plan or "No plan available.",
+        action_template=(action_template or "").strip(),
         feedback=feedback,
         rules=read_prompt("RULES.txt"),
         predicates=read_prompt("PREDICATE_TEMPLATE.txt"),

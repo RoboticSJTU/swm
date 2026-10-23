@@ -18,15 +18,13 @@ Generator ledger:
 Keep chronological order and nondecreasing completion group. Represent EVERY original Draft ID in actions.drafts or explicitly in removed, never both. Merges list all contributing IDs, splits reuse IDs, additions use drafts: []. Merge only the same event, preserving distinct results.
 Emit actions in the illustrated field order; list removed last.
 
-Every final action/removal needs a brief reason: copy a complete real G# img_N->img_M span literally from the ledger and state the observed change. Keep each span within its stated group. Each removal has exactly draft (one integer ID) and reason; each action has exactly group, action, before, after, reason, drafts (integer IDs). Return ONE complete JSON object, no Markdown. States may be empty; action/state strings contain no references or |. The example illustrates format, not episode facts; use removed: [] when none.
+Every final action/removal needs a brief reason: copy a complete real G# img_N->img_M span literally from the ledger and state the observed change. Keep each span within its stated group. Each removal has exactly draft (one integer ID) and reason; each action has exactly group, action, reason, drafts (integer IDs). Return ONE complete JSON object, no Markdown. Action strings contain no references or |. The example illustrates format, not episode facts; use removed: [] when none.
 {{
   "actions": [
     {{
       "reason": "{example_span} shows the object on its support, then clear of it in the hand.",
       "group": 0,
       "action": "Pick up the object.",
-      "before": "The object rests on its support.",
-      "after": "The hand holds the object clear of its support.",
       "drafts": [
         1
       ]

@@ -3,286 +3,138 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
-import traceback
 import sys
+import traceback
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from pathlib import Path
 
-root_dir = Path(__file__).resolve().parent.parent
+root_dir = Path("/home/xyx/下载/swm")
 sys.path.insert(0, str(root_dir / "src"))
 
 from swm.llm import call_gpt
+from swm.pddl.attribution import attribute_failure
+from swm.pddl.eval_report import render_markdown_report
 from swm.pddl.generation import parse_pddl_output, strip_code_block
-from swm.pddl.validate import validate_plan_feasibility
 from swm.pddl.planner import solve_pddl
 from swm.pddl.postprocess import repair_pddl
+from swm.pddl.reorder import plan_reorder
 from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
-from swm.pddl.attribution import attribute_failure
-from swm.pddl.eval_report import render_dataset_report
+from swm.pddl.validate import validate_plan_feasibility
 
-# =========================
 # 基本配置
-# =========================
-eval_model = "9B_3e_full"
-judge_model = "Qwen3.8-27B"  # Qwen3.8-27B
+eval_models = ["9B_full_1019", "9B_full_1019_nopro"]  # 按顺序对应本地端口 8001、8002、8003……
+judge_model = "Qwen3.8-27B"
 attribution_model = "Qwen3.8-27B"
-ROBOT_CONFIGURATION = "single-arm"
-
-# swm swm_v2 unidomain
-datasets = ["swm", "unidomain","swm_v2"]
+ROBOT_CONFIGURATION = "single_arm"
+datasets = ["swm", "swm_v2", "unidomain"]
 generation_max_workers = 200
 judge_max_workers = generation_max_workers
-rule_postprocess = True  # 原始评测结束后，另存规则补全后的评测结果。
-
-prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input.txt"
-# prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "training_input_only_problem.txt"
-# prompt_path = root_dir / "src" / "swm" / "prompt_templates" / "vlm_cot.txt"
-
-problem_only = prompt_path.name == "training_input_only_problem.txt"
-if prompt_path.name in {"training_input.txt", "training_input_only_problem.txt"}:
-    eval_mode = "pddl"
-elif prompt_path.name == "vlm_cot.txt":
-    eval_mode = "nl"
-else:
-    raise ValueError(f"未知 prompt 文件名，无法判断评测模式: {prompt_path.name}")
-
-eval_root = root_dir / "eval_results" / eval_model
-if problem_only:
-    eval_root /= "only_problem"
+prompt_files = ["training_input.txt", "training_input_only_problem.txt"]
 
 
-# =========================
-# 基础函数
-# =========================
+def configure_eval(model: str, prompt_file: str, port: int = 8001):
+    global eval_model, eval_base_url, prompt_path, problem_only, eval_mode, eval_root
+    eval_model = model
+    eval_base_url = f"http://127.0.0.1:{port}/v1"
+    prompt_path = root_dir / "src/swm/prompt_templates" / prompt_file
+    problem_only = prompt_path.name == "training_input_only_problem.txt"
+    if prompt_path.name in {"training_input.txt", "training_input_only_problem.txt"}:
+        eval_mode = "pddl"
+    elif prompt_path.name == "vlm_cot.txt":
+        eval_mode = "nl"
+    else:
+        raise ValueError(f"未知 prompt 文件名，无法判断评测模式: {prompt_path.name}")
+    eval_root = root_dir / "eval_results" / eval_model
+    if problem_only:
+        eval_root /= "only_problem"
+
+
+configure_eval(eval_models[0], prompt_files[0])
+
+
 def number(name: str) -> int:
-    m = re.search(r"(\d+)$", name)
-    return int(m.group(1)) if m else 0
-
-
-def steps_to_text(raw_steps) -> str:
-    if isinstance(raw_steps, list):
-        return "\n".join(str(x) for x in raw_steps)
-    if isinstance(raw_steps, dict):
-        return "\n".join(str(raw_steps[k]) for k in sorted(raw_steps.keys(), key=number))
-    if raw_steps is None:
-        return ""
-    return str(raw_steps)
-
-
-def parse_nl_output(output: str) -> tuple[str, str]:
-    text = strip_code_block(output)
-
-    try:
-        data = json.loads(text)
-
-        if "plan_sequence" in data:
-            reasoning = str(data["reasoning"]).strip() if "reasoning" in data else ""
-            plan_lines = []
-
-            for step in data["plan_sequence"]:
-                step = str(step).strip()
-                if step:
-                    plan_lines.append(step)
-
-            plan = "\n".join(plan_lines).strip()
-            if not plan:
-                raise ValueError("empty plan_sequence")
-
-            return reasoning, plan
-
-    except Exception:
-        pass
-
-    if not text.strip():
-        raise ValueError("empty natural-language plan")
-
-    return "", text.strip()
-
-
-def get_save_dir(task: dict) -> Path:
-    if "save_dir" in task:
-        return Path(task["save_dir"])
-    dataset_name = task["dataset"]
-    task_name = task["task"]
-    episode_name = task["episode"]
-
-    if task["flat"]:
-        return eval_root / dataset_name / episode_name
-
-    return eval_root / dataset_name / task_name / episode_name
+    match = re.search(r"(\d+)$", name)
+    return int(match[1]) if match else 0
 
 
 def generation_complete(task: dict) -> bool:
-    save_dir = get_save_dir(task)
-
-    output_files = [save_dir / "plan.txt"]
-    if eval_mode == "pddl":
-        output_files[:0] = [
-            save_dir / "domain.pddl",
-            save_dir / "problem.pddl",
-        ]
-
-    return all(
-        path.is_file() and path.read_text(encoding="utf-8").strip()
-        for path in output_files
-    )
+    names = ("domain.pddl", "problem.pddl", "plan.txt") if eval_mode == "pddl" else ("plan.txt",)
+    files = (task["save_dir"] / name for name in names)
+    return all(path.is_file() and path.read_text(encoding="utf-8").strip() for path in files)
 
 
 def load_cached_status(task: dict):
-    save_dir = get_save_dir(task)
+    save_dir = task["save_dir"]
     judge_file = save_dir / "judge.json"
-    error_file = save_dir / "error.log"
-
     if judge_file.exists():
-        result = json.loads(judge_file.read_text(encoding="utf-8"))
-        passed = result.get("pass") is True
-        return "judge", passed
-
-    if error_file.exists():
+        return "judge", json.loads(judge_file.read_text(encoding="utf-8")).get("pass") is True
+    if (save_dir / "error.log").exists():
         return "error", False
-
     return None, False
 
 
-# =========================
-# 读取任务
-# =========================
-def load_tasks_one(dataset_name: str) -> list[dict]:
-    instructions_path = root_dir / "tasks" / "instructions" / f"instructions_{dataset_name}.json"
-    steps_path = root_dir / "tasks" / "steps" / f"steps_{dataset_name}.json"
-    image_root = root_dir / "tasks" / "images" / dataset_name
-
-    instructions = json.loads(instructions_path.read_text(encoding="utf-8"))
-    steps_data = json.loads(steps_path.read_text(encoding="utf-8"))
-
-    if dataset_name in instructions and isinstance(instructions[dataset_name], dict):
-        instructions = instructions[dataset_name]
-
-    if dataset_name in steps_data and isinstance(steps_data[dataset_name], dict):
-        steps_data = steps_data[dataset_name]
-
+def load_tasks() -> list[dict]:
+    """统一读取扁平/嵌套任务，并确定各阶段共用的结果目录与 GT 目录。"""
     tasks = []
+    for dataset_name in datasets:
+        instructions = json.loads(
+            (root_dir / f"tasks/instructions/instructions_{dataset_name}.json").read_text(encoding="utf-8")
+        )
+        steps_data = json.loads(
+            (root_dir / f"tasks/steps/steps_{dataset_name}.json").read_text(encoding="utf-8")
+        )
+        image_root = root_dir / "tasks/images" / dataset_name
+        if dataset_name in instructions and isinstance(instructions[dataset_name], dict):
+            instructions = instructions[dataset_name]
+        if dataset_name in steps_data and isinstance(steps_data[dataset_name], dict):
+            steps_data = steps_data[dataset_name]
 
-    # flat:
-    # {
-    #   "episode_1": "...",
-    #   "episode_2": "..."
-    # }
-    if all(isinstance(v, str) for v in instructions.values()):
-        for episode_name in sorted(instructions.keys(), key=number):
-            instruction = instructions[episode_name]
+        flat = all(isinstance(value, str) for value in instructions.values())
+        groups = {dataset_name: instructions} if flat else instructions
+        for task_name in sorted(groups, key=number):
+            episodes = groups[task_name]
+            if not isinstance(episodes, dict):
+                continue
+            task_steps = steps_data if flat else steps_data.get(task_name)
+            image_dirs = [image_root] if flat else [image_root / task_name, image_root]
+            for episode_name in sorted(episodes, key=number):
+                images = (directory / f"{episode_name}.{ext}"
+                          for ext in ("png", "jpg", "jpeg") for directory in image_dirs)
+                raw_steps = task_steps.get(episode_name) if isinstance(task_steps, dict) else None
+                if isinstance(raw_steps, dict):
+                    raw_steps = [raw_steps[key] for key in sorted(raw_steps, key=number)]
+                if isinstance(raw_steps, list):
+                    raw_steps = "\n".join(map(str, raw_steps))
 
-            image_path = None
-            for ext in ("png", "jpg", "jpeg"):
-                p = image_root / f"{episode_name}.{ext}"
-                if p.exists():
-                    image_path = p
-                    break
-
-            kf_actions = ""
-            if episode_name in steps_data:
-                kf_actions = steps_to_text(steps_data[episode_name])
-
-            tasks.append(
-                {
-                    "dataset": dataset_name,
-                    "task": dataset_name,
-                    "episode": episode_name,
-                    "instruction": instruction,
-                    "image": image_path,
-                    "kf_actions": kf_actions,
-                    "flat": True,
+                relative = Path(dataset_name) / episode_name if flat else Path(dataset_name) / task_name / episode_name
+                gt_dir = root_dir / "eval_results/gt" / relative
+                task = {
+                    "dataset": dataset_name, "task": task_name, "episode": episode_name,
+                    "instruction": episodes[episode_name],
+                    "image": next((path for path in images if path.exists()), None),
+                    "kf_actions": "" if raw_steps is None else str(raw_steps), "flat": flat,
+                    "save_dir": eval_root / relative, "gt_dir": gt_dir,
                 }
-            )
-
-        return tasks
-
-    # nested:
-    # {
-    #   "task_1": {
-    #     "episode_1": "..."
-    #   }
-    # }
-    for task_name in sorted(instructions.keys(), key=number):
-        episode_map = instructions[task_name]
-        if not isinstance(episode_map, dict):
-            continue
-
-        for episode_name in sorted(episode_map.keys(), key=number):
-            instruction = episode_map[episode_name]
-
-            image_path = None
-            for ext in ("png", "jpg", "jpeg"):
-                p1 = image_root / task_name / f"{episode_name}.{ext}"
-                p2 = image_root / f"{episode_name}.{ext}"
-
-                if p1.exists():
-                    image_path = p1
-                    break
-                if p2.exists():
-                    image_path = p2
-                    break
-
-            kf_actions = ""
-            if task_name in steps_data and isinstance(steps_data[task_name], dict):
-                if episode_name in steps_data[task_name]:
-                    kf_actions = steps_to_text(steps_data[task_name][episode_name])
-
-            tasks.append(
-                {
-                    "dataset": dataset_name,
-                    "task": task_name,
-                    "episode": episode_name,
-                    "instruction": instruction,
-                    "image": image_path,
-                    "kf_actions": kf_actions,
-                    "flat": False,
-                }
-            )
-
+                if problem_only:
+                    rounds = [p for p in gt_dir.glob("round*")
+                              if p.is_dir() and re.fullmatch(r"round\d+", p.name)]
+                    if not rounds:
+                        raise FileNotFoundError(f"No GT round directory in {gt_dir}")
+                    round_dir = max(rounds, key=lambda p: number(p.name))
+                    task["gt_domain"] = (round_dir / "domain.pddl").read_text(encoding="utf-8")
+                    task["kf_actions"] = (gt_dir / "kf_actions.txt").read_text(encoding="utf-8")
+                    if not task["gt_domain"].strip() or not task["kf_actions"].strip():
+                        raise ValueError(f"Empty GT domain or reference actions in {gt_dir}")
+                tasks.append(task)
     return tasks
 
 
-def load_tasks() -> list[dict]:
-    all_tasks = []
-
-    for dataset_name in datasets:
-        dataset_tasks = load_tasks_one(dataset_name)
-        if problem_only:
-            for task in dataset_tasks:
-                gt_dir = root_dir / "eval_results" / "gt" / dataset_name
-                if not task["flat"]:
-                    gt_dir /= task["task"]
-                gt_dir /= task["episode"]
-                rounds = [p for p in gt_dir.glob("round*") if p.is_dir() and re.fullmatch(r"round\d+", p.name)]
-                round_dir = max(rounds, key=lambda p: number(p.name), default=None)
-                if round_dir is None:
-                    raise FileNotFoundError(f"No GT round directory in {gt_dir}")
-                task["gt_domain"] = (round_dir / "domain.pddl").read_text(encoding="utf-8")
-                task["kf_actions"] = (gt_dir / "kf_actions.txt").read_text(encoding="utf-8")
-                if not task["gt_domain"].strip() or not task["kf_actions"].strip():
-                    raise ValueError(f"Empty GT domain or reference actions in {gt_dir}")
-        print(f"数据集: {dataset_name}")
-        print(f"任务总数: {len(dataset_tasks)}")
-        all_tasks.extend(dataset_tasks)
-
-    return all_tasks
-
-
-# =========================
-# 单任务生成
-# =========================
 def generate_one(task: dict):
-    instruction = task["instruction"]
     image_path = task["image"]
-
-    save_dir = get_save_dir(task)
+    save_dir = task["save_dir"]
     domain_file = save_dir / "domain.pddl"
     problem_file = save_dir / "problem.pddl"
     plan_file = save_dir / "plan.txt"
-    reasoning_file = save_dir / "reasoning.txt"
-
     try:
         if generation_complete(task):
             return task, True, "cached"
@@ -293,70 +145,74 @@ def generate_one(task: dict):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         prompt = prompt_path.read_text(encoding="utf-8").format(
-            instruction=instruction,
+            instruction=task["instruction"],
             robot_configuration=ROBOT_CONFIGURATION,
             domain=f"\n{task['gt_domain']}\n" if problem_only else "",
         )
-        output = call_gpt(eval_model, prompt, [image_path])
+        output = call_gpt(eval_model, prompt, [image_path], base_url=eval_base_url)
 
-        if eval_mode == "pddl":
-            if problem_only:
-                domain = task["gt_domain"]
-                match = re.search(r"<problem>\s*(.*?)\s*</problem>", output, flags=re.S)
-                if match is None:
-                    raise ValueError("cannot parse problem-only PDDL output")
-                problem = strip_code_block(match.group(1))
-                if not problem:
-                    raise ValueError("empty problem-only PDDL output")
-            else:
-                domain, problem = parse_pddl_output(output)
-            # 保留候选原文，语法错误也能进入后续 FD 归因。
-            domain_file.write_text(domain, encoding="utf-8")
-            problem_file.write_text(problem, encoding="utf-8")
-            plan_file.unlink(missing_ok=True)
-            validate_untyped_pddl(domain)
-            validate_untyped_pddl(problem)
-            if not problem_only:
-                domain = format_action_conditions(domain)
-                domain_file.write_text(domain, encoding="utf-8")
+        if eval_mode != "pddl":
+            candidate_plan = strip_code_block(output)
+            reasoning = ""
+            try:
+                data = json.loads(candidate_plan)
+                plan = "\n".join(step for item in data["plan_sequence"] if (step := str(item).strip()))
+                if plan:
+                    reasoning = str(data["reasoning"]).strip() if "reasoning" in data else ""
+                    candidate_plan = plan
+            except Exception:
+                pass
+            if not candidate_plan:
+                raise ValueError("empty natural-language plan")
+            if reasoning:
+                (save_dir / "reasoning.txt").write_text(reasoning, encoding="utf-8")
+            plan_file.write_text(candidate_plan, encoding="utf-8")
+            return task, True, "nl"
 
-            if not solve_pddl(domain_file, problem_file):
-                return task, False, "pddl_unsolvable"
-
-            if not plan_file.exists() or not plan_file.read_text(encoding="utf-8").strip():
-                return task, False, "missing_pddl_plan"
-
-            return task, True, "pddl"
-
-        reasoning, candidate_plan = parse_nl_output(output)
-
-        if reasoning:
-            reasoning_file.write_text(reasoning, encoding="utf-8")
-
-        plan_file.write_text(candidate_plan, encoding="utf-8")
-        return task, True, "nl"
+        if problem_only:
+            domain = task["gt_domain"]
+            match = re.search(r"<problem>\s*(.*?)\s*</problem>", output, flags=re.S)
+            if match is None:
+                raise ValueError("cannot parse problem-only PDDL output")
+            problem = strip_code_block(match.group(1))
+            if not problem:
+                raise ValueError("empty problem-only PDDL output")
+        else:
+            domain, problem = parse_pddl_output(output)
+        # 暂存原文，修复失败时仍可保留输入供归因。
+        domain_file.write_text(domain, encoding="utf-8")
+        problem_file.write_text(problem, encoding="utf-8")
+        plan_file.unlink(missing_ok=True)
+        domain, problem, changes = repair_pddl(domain, problem)
+        validate_untyped_pddl(domain)
+        validate_untyped_pddl(problem)
+        if not problem_only:
+            domain = format_action_conditions(domain)
+        domain_file.write_text(domain, encoding="utf-8")
+        problem_file.write_text(problem, encoding="utf-8")
+        if changes:
+            (save_dir / "postprocess.json").write_text(json.dumps(changes, ensure_ascii=False, indent=2) + "\n")
+        if not solve_pddl(domain_file, problem_file, reorder_plan=False):
+            return task, False, "pddl_unsolvable"
+        if not plan_file.exists() or not plan_file.read_text(encoding="utf-8").strip():
+            return task, False, "missing_pddl_plan"
+        return task, True, "pddl"
 
     except Exception as e:
-        print(traceback.format_exc())
+        save_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
         return task, False, str(e)
 
 
-# =========================
-# 单任务 Judge
-# =========================
 def judge_one(task: dict):
-    instruction = task["instruction"]
     image_path = task["image"]
-    kf_actions = task["kf_actions"]
-
-    save_dir = get_save_dir(task)
+    save_dir = task["save_dir"]
     plan_file = save_dir / "plan.txt"
     judge_file = save_dir / "judge.json"
 
     try:
-        if judge_file.exists():
-            result = json.loads(judge_file.read_text(encoding="utf-8"))
-            passed = result.get("pass") is True
+        cached_status, passed = load_cached_status(task)
+        if cached_status == "judge":
             return task, True, passed, "cached"
 
         if image_path is None or not image_path.exists():
@@ -365,6 +221,10 @@ def judge_one(task: dict):
         if not plan_file.is_file():
             return task, False, False, "missing_plan"
 
+        if eval_mode == "pddl":
+            # PFV 前统一按人类偏好重排一次，覆盖新求解和缓存的 plan。
+            plan_reorder(save_dir / "domain.pddl", save_dir / "problem.pddl", plan_file, plan_file)
+
         candidate_plan = plan_file.read_text(encoding="utf-8").strip()
         if not candidate_plan:
             return task, False, False, "empty_plan"
@@ -372,43 +232,25 @@ def judge_one(task: dict):
         result = validate_plan_feasibility(
             model=judge_model,
             first_img=image_path,
-            instruction=instruction,
-            kf_actions=kf_actions,
+            instruction=task["instruction"],
+            kf_actions=task["kf_actions"],
             candidate_plan=candidate_plan,
             predicted_domain=(save_dir / "domain.pddl") if eval_mode == "pddl" else None,
-            pddl_plan=(save_dir / "plan.txt") if eval_mode == "pddl" else None,
+            pddl_plan=plan_file if eval_mode == "pddl" else None,
         )
 
-        judge_file.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        passed = result.get("pass") is True
-        return task, True, passed, "done"
+        judge_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return task, True, result["pass"] is True, "done"
 
     except Exception as e:
         return task, False, False, str(e)
 
 
-def attribute_one(task: dict):
-    gt_dir = root_dir / "eval_results" / "gt" / task["dataset"]
-    if not task["flat"]:
-        gt_dir /= task["task"]
-    gt_dir /= task["episode"]
-    result = attribute_failure(
-        get_save_dir(task), gt_dir, task["instruction"], task["image"],
-        model=attribution_model, reasoning_effort="medium",
-    )
-    return task, result
-
-
-def write_summary(all_tasks: list[dict], report_root: Path | None = None) -> Path:
-    """Rebuild the report from saved task results, including attribution details."""
-    report_root = eval_root if report_root is None else report_root
-    records = defaultdict(list)
+def write_summary(all_tasks: list[dict]) -> Path:
+    """汇总本次评测结果与失败归因。"""
+    records = {dataset: [] for dataset in datasets}
     for task in all_tasks:
-        save_dir = get_save_dir(task)
+        save_dir = task["save_dir"]
         attribution_path = save_dir / "attribution.json"
         result = None
         if eval_mode == "pddl" and attribution_path.is_file():
@@ -424,209 +266,127 @@ def write_summary(all_tasks: list[dict], report_root: Path | None = None) -> Pat
             "solved": generation_complete(task), "passed": load_cached_status(task)[1],
             "attribution": result,
         })
-    blocks, attribution_summary = [], {}
-    for dataset in datasets:
-        block, counts = render_dataset_report(dataset, records[dataset], pddl=eval_mode == "pddl")
-        blocks.append(block)
-        attribution_summary[dataset] = counts
-    report_root.mkdir(parents=True, exist_ok=True)
+    eval_root.mkdir(parents=True, exist_ok=True)
     dataset_tag = "_".join(datasets)
-    report_path = report_root / f"summary_{dataset_tag}.log"
-    report_text = "\n\n".join(blocks) + "\n"
+    report_path = eval_root / f"summary_{dataset_tag}.md"
+    report_text, attribution_summary = render_markdown_report(records, eval_root, pddl=eval_mode == "pddl")
     report_path.write_text(report_text, encoding="utf-8")
+    legacy_path = report_path.with_suffix(".log")
+    if legacy_path.is_file():
+        legacy_path.write_text(f"报告已改为 Markdown：{report_path.name}\n", encoding="utf-8")
     if eval_mode == "pddl":
-        (report_root / f"attribution_summary_{dataset_tag}.json").write_text(
+        (eval_root / f"attribution_summary_{dataset_tag}.json").write_text(
             json.dumps(attribution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
         )
     print(f"报告已保存到: {report_path}")
     return report_path
 
 
-def postprocess_one(task: dict):
-    """Repair saved candidates; isolate and invalidate only their derived results."""
-    source_dir = get_save_dir(task)
+def repair_saved_task(task: dict):
+    """Apply the same built-in repair to cached candidates before cache reuse."""
+    save_dir = task["save_dir"]
     try:
         domain, problem, changes = repair_pddl(
-            (source_dir / "domain.pddl").read_text(encoding="utf-8"),
-            (source_dir / "problem.pddl").read_text(encoding="utf-8"),
+            (save_dir / "domain.pddl").read_text(encoding="utf-8"),
+            (save_dir / "problem.pddl").read_text(encoding="utf-8"),
         )
-    except (OSError, ValueError, NotImplementedError) as error:
-        return task, False, f"静态扫描未处理: {error}"
+    except (OSError, ValueError, NotImplementedError):
+        return False
     if not changes:
-        return task, False, "unchanged"
-
-    save_dir = eval_root / "postprocessed" / source_dir.relative_to(eval_root)
-    processed_task = {**task, "save_dir": save_dir}
-    save_dir.mkdir(parents=True, exist_ok=True)
-    outputs = {"domain.pddl": domain, "problem.pddl": problem}
-    same_pddl = all(
-        (save_dir / name).is_file() and (save_dir / name).read_text(encoding="utf-8") == text
-        for name, text in outputs.items()
-    )
-    if not same_pddl or ((save_dir / "judge.json").exists() and not generation_complete(processed_task)):
-        for name in ("plan.txt", "judge.json", "attribution.json", "error.log"):
-            (save_dir / name).unlink(missing_ok=True)
-        shutil.rmtree(save_dir / "attribution_solver", ignore_errors=True)
-        for name, text in outputs.items():
-            (save_dir / name).write_text(text, encoding="utf-8")
+        return False
+    for name in ("plan.txt", "judge.json", "attribution.json", "error.log"):
+        (save_dir / name).unlink(missing_ok=True)
+    shutil.rmtree(save_dir / "attribution_solver", ignore_errors=True)
+    (save_dir / "domain.pddl").write_text(domain, encoding="utf-8")
+    (save_dir / "problem.pddl").write_text(problem, encoding="utf-8")
     (save_dir / "postprocess.json").write_text(
         json.dumps(changes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
-
-    if load_cached_status(processed_task)[0] is not None or generation_complete(processed_task):
-        return processed_task, True, "cached"
-    solved = solve_pddl(save_dir / "domain.pddl", save_dir / "problem.pddl")
-    return processed_task, True, "可解" if solved else "不可解"
+    solve_pddl(save_dir / "domain.pddl", save_dir / "problem.pddl", reorder_plan=False)
+    return True
 
 
-def evaluate_postprocessed(all_tasks: list[dict]):
-    """Re-evaluate changed tasks and merge them with unchanged baseline results."""
-    print("\n开始规则后处理：一次静态扫描，补全缺失声明")
-    report_tasks, changed_tasks = [], []
-    with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
-        futures = [executor.submit(postprocess_one, task) for task in all_tasks]
-        for future in as_completed(futures):
-            task, changed, info = future.result()
-            report_tasks.append(task)
-            if changed:
-                changed_tasks.append(task)
-            if info != "unchanged":
-                print(f"[后处理] {task['dataset']}/{task['task']}/{task['episode']}: {info}")
-    print(f"规则补全修改了 {len(changed_tasks)}/{len(all_tasks)} 个任务")
-    judge_tasks = [task for task in changed_tasks
-                   if generation_complete(task) and load_cached_status(task)[0] is None]
-    evaluate_results(changed_tasks, judge_tasks)
-    write_summary(report_tasks, report_root=eval_root / "postprocessed")
-
-
-# =========================
-# 主流程
-# =========================
 def main():
     all_tasks = load_tasks()
-    total_all = len(all_tasks)
+    prefix = f"[{eval_model}/{prompt_path.stem}]"
+    print(f"{prefix} 开始：{len(all_tasks)} 个任务", flush=True)
+    if eval_mode == "pddl":
+        with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
+            list(executor.map(repair_saved_task, all_tasks))
 
     generation_tasks = []
     judge_tasks = []
-    skipped = 0
-
     for task in all_tasks:
         cached_status, _ = load_cached_status(task)
-
-        if cached_status in {"judge", "error"}:
-            skipped += 1
+        failed_candidate = cached_status == "error" and (
+            all((task["save_dir"] / name).is_file() for name in ("domain.pddl", "problem.pddl"))
+            if eval_mode == "pddl" else generation_complete(task)
+        )
+        if cached_status == "judge" or failed_candidate:
             continue
-
         if generation_complete(task):
             judge_tasks.append(task)
         else:
             generation_tasks.append(task)
 
-    generation_total = len(generation_tasks)
-
-    print(f"测试集: {datasets}")
-    print(f"任务总数: {total_all}")
-    print(f"已有 Judge 或已记录错误: {skipped}")
-    print(f"已有生成结果、待 Judge: {len(judge_tasks)}")
-    print(f"待生成 {eval_mode.upper()} 结果: {generation_total}")
-
-    # =========================
-    # 阶段一：所有测试集一起并发生成
-    # =========================
+    skipped = len(all_tasks) - len(generation_tasks) - len(judge_tasks)
+    print(f"{prefix} 缓存 {skipped}，待生成 {len(generation_tasks)}，待判定 {len(judge_tasks)}", flush=True)
     with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
         futures = [executor.submit(generate_one, task) for task in generation_tasks]
-
-        for i, future in enumerate(as_completed(futures), 1):
-            task, ok, info = future.result()
-
-            dataset_name = task["dataset"]
-            task_name = task["task"]
-            episode_name = task["episode"]
-            # 注意，dataset_name一定等于task_name，所以可以简化相关代码。
-            print(f"\n[生成 {i}/{generation_total}] {dataset_name}/{episode_name}")
-
+        for future in as_completed(futures):
+            task, ok, _ = future.result()
             if ok:
                 judge_tasks.append(task)
-                print("✅ 可解")
-            else:
-                if info == "pddl_unsolvable":
-                    print("⚠️ PDDL 不可解")
-                else:
-                    print(f"❌ 生成失败: {info}")
 
-    evaluate_results(all_tasks, judge_tasks)
-    write_summary(all_tasks)
-    if rule_postprocess and eval_mode == "pddl":
-        evaluate_postprocessed(all_tasks)
-
-
-def evaluate_results(all_tasks: list[dict], judge_tasks: list[dict]):
-    """Share the existing Judge and attribution stages between both evaluations."""
-    print("\n" + "=" * 80)
-    print(f"开始 Judge 共 {len(judge_tasks)} 个任务")
-
-    # =========================
-    # 阶段二：先串行生成第一个 Judge，失败则立即退出
-    # =========================
+    print(f"{prefix} 判定 {len(judge_tasks)} 个任务", flush=True)
+    # 先验证 Judge 可用，再并发判定其余任务。
     if judge_tasks:
-        first_task = judge_tasks[0]
-        task, ok, passed, info = judge_one(first_task)
-        dataset_name = task["dataset"]
-        task_name = task["task"]
-        episode_name = task["episode"]
-
-        print(f"\n[Judge 1/{len(judge_tasks)}] {dataset_name}/{task_name}/{episode_name}")
-
+        _, ok, _, info = judge_one(judge_tasks[0])
         if not ok:
             raise SystemExit(
                 f"❌ Judge 生成失败: {info}\n"
                 "PDDL 结果已保留；请在可访问 Judge API 的环境中重新运行本脚本。"
             )
 
-        if passed:
-            print("✅ Judge 通过")
-        else:
-            print("⚠️ Judge 未通过")
-
-    # 首个 Judge 成功说明在线服务可用，再并发处理其余任务。
     with ThreadPoolExecutor(max_workers=judge_max_workers) as executor:
         futures = [executor.submit(judge_one, task) for task in judge_tasks[1:]]
 
-        for i, future in enumerate(as_completed(futures), 2):
-            task, ok, passed, info = future.result()
-
-            dataset_name = task["dataset"]
-            task_name = task["task"]
-            episode_name = task["episode"]
-
-            print(f"\n[Judge {i}/{len(judge_tasks)}] {dataset_name}/{task_name}/{episode_name}")
-
-            if ok:
-                if passed:
-                    print("✅ Judge 通过")
-
-                else:
-                    print("⚠️ Judge 未通过")
-            else:
+        for future in as_completed(futures):
+            task, ok, _, info = future.result()
+            if not ok:
                 raise SystemExit(
                     f"❌ Judge 生成失败: "
-                    f"{dataset_name}/{task_name}/{episode_name}: {info}\n"
+                    f"{task['dataset']}/{task['task']}/{task['episode']}: {info}\n"
                     "已生成的 PDDL 和 Judge 结果均已保留，重新运行将自动续传。"
                 )
 
     # 只给非通过的 PDDL 任务归因；不可解、无 plan/无 judge 同样进入。
     if eval_mode == "pddl":
         attribution_tasks = [task for task in all_tasks if not load_cached_status(task)[1]]
-        print(f"开始错误归因，共 {len(attribution_tasks)} 个任务")
+        print(f"{prefix} 归因 {len(attribution_tasks)} 个任务", flush=True)
         with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = [executor.submit(attribute_one, task) for task in attribution_tasks]
-            for i, future in enumerate(as_completed(futures), 1):
-                task, result = future.result()
-                if result is None:  # Judge was updated to pass in the meantime.
-                    continue
-                label = result["label"]
-                # print(f"[归因 {i}/{len(attribution_tasks)}] {task['dataset']}/{task['episode']}: {label}")
+            futures = [executor.submit(
+                attribute_failure, task["save_dir"], task["gt_dir"], task["instruction"], task["image"],
+                model=attribution_model, reasoning_effort="medium",
+            ) for task in attribution_tasks]
+            for future in as_completed(futures):
+                future.result()
+    write_summary(all_tasks)
+
+
+def evaluate_model(model: str, port: int):
+    """Each model has its own process; run both prompts with isolated globals."""
+    for prompt_file in prompt_files:
+        configure_eval(model, prompt_file, port)
+        print(f"\n模型: {eval_model} | 服务: {eval_base_url} | 模板: {prompt_file}", flush=True)
+        main()
 
 
 if __name__ == "__main__":
-    main()
+    if len(set(eval_models)) != len(eval_models):
+        raise ValueError("模型名不能重复，否则评测结果目录会冲突")
+    with ProcessPoolExecutor(max_workers=len(eval_models)) as executor:
+        futures = [executor.submit(evaluate_model, model, 8001 + i)
+                   for i, model in enumerate(eval_models)]
+        for future in as_completed(futures):
+            future.result()

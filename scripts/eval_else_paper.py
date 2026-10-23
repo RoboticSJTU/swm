@@ -11,7 +11,7 @@ from swm.llm import call_gpt
 from swm.pddl.validate import validate_plan_feasibility
 from swm.pddl.gt_validation import VALIDATOR_VERSION, validate_gt_plan
 from swm.pddl.planner import solve_pddl
-from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
+from swm.pddl.strips import format_pddl, validate_untyped_pddl
 
 # =========================
 # 基本配置
@@ -191,7 +191,8 @@ def generate_one(task: dict):
         plan_file.unlink(missing_ok=True)
         validate_untyped_pddl(domain)
         validate_untyped_pddl(problem)
-        domain_file.write_text(format_action_conditions(domain), encoding="utf-8")
+        domain_file.write_text(format_pddl(domain), encoding="utf-8")
+        problem_file.write_text(format_pddl(problem), encoding="utf-8")
 
         if not solve_pddl(domain_file, problem_file):
             return task, False, "pddl_unsolvable"

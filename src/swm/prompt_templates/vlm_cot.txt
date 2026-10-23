@@ -1,4 +1,4 @@
-Now you need to help a single-armed robot to plan to finish the given task.
+Now you need to help a single_armed robot to plan to finish the given task.
 The given image shows the initial scene.
 
 Here are the only available action APIs for the robot.
@@ -25,7 +25,7 @@ Here are the only available action APIs for the robot.
 (21) unscrew: unscrew object such as bottle cap, jar lid, etc. from object.
 
 When you make decisions, you should consider constraints based on your common sense.
-For example, the robot cannot pick up another object when it is already holding one because it is single-armed.
+For example, the robot cannot pick up another object when it is already holding one because it is single_armed.
 
 Instruction: {instruction}
 

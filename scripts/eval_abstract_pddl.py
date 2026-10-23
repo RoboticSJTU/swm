@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import re
 import subprocess
 import sys
@@ -10,21 +11,25 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Event
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
-from swm.llm import call_gpt, call_gpt_json
+from swm.llm import call_gpt
 from swm.pddl.generation import parse_pddl_output
 from swm.pddl.planner import _run_fast_downward, fast_downward_path as FD, _output_text
+from swm.pddl.postprocess import repair_pddl
 from swm.pddl.strips import validate_untyped_pddl
 from swm.abstract_planning.model import parse_sexpr, section, fields, condition, apply_effect
 from swm.abstract_planning import novel_games, visual_games
 from swm.abstract_planning.instructions import names_only
 from swm.abstract_planning.test_contract import DATASETS as ABSTRACT_SPLITS, task_id, verify_plan
-from swm.abstract_planning.action_alignment import align_actions, to_reference, to_candidate, AmbiguousActionMapping
+from swm.abstract_planning.action_alignment import align_actions, to_reference, AmbiguousActionMapping
+from swm.abstract_planning.eval_report import ERROR_TYPES, SPLIT_LABELS, diagnostic_group, render_abstract_report
+from swm.abstract_planning.diagnostics import diagnose_failure, initial_conflict
 
 # 固定路径；只保留模型、数据集、并发这些实验配置。
-eval_model = '9B_full_106'
+eval_model = '9B_human_abstact'
 mapping_model = 'Qwen3.8-27B'
 datasets = ['abs_a_id', 'abs_a_scale', 'abs_b_base', 'abs_b_rule']
 max_workers = 200
@@ -34,6 +39,7 @@ VAL = ROOT / 'downloads/visual_pddl_v1/VAL/build/bin/Validate'
 eval_root = ROOT / 'eval_results' / eval_model / MANIFEST.parent.name
 UNRESOLVED = {'generation_error', 'mapping_error', 'mapping_incomplete', 'solver_timeout',
               'solver_memory_limit', 'search_incomplete', 'unsupported_pddl', 'infrastructure_error', 'action_mapping_ambiguous'}
+MAPPING_STOP = Event()
 
 
 def file_revision(path):
@@ -134,57 +140,6 @@ def execute(model, actions):
     return {'executable':True, 'goal_reached':condition(model['goal'], state, {}, model['objects']), 'trace':trace}
 
 
-def distance(a, b):
-    if re.fullmatch(r'r\d+c\d+', a) and re.fullmatch(r'r\d+c\d+', b):
-        return (0, abs(int(a[1:3])-int(b[1:3])) + abs(int(a[4:6])-int(b[4:6])), b)
-    prefix = lambda x: re.sub(r'\d+$', '', x)
-    return (int(prefix(a) != prefix(b)), 0, b)
-
-
-def prepare_probes(row):
-    oracle, reference = row['_oracle'], row['_reference_plan']
-    trace = execute(oracle, reference)['trace']
-    probes, seen, failure_patterns = [], set(), set()
-    def add(kind, actions):
-        key = tuple(tuple(a) for a in actions)
-        if (kind, key) in seen: return
-        expected = execute(oracle, key)
-        probes.append({'kind':kind, 'actions':[list(a) for a in key], **{k:v for k,v in expected.items() if k != 'trace'}})
-        seen.add((kind,key))
-    add('initial_goal', []); add('reference_plan', reference)
-    indices = defaultdict(list)
-    for i, act in enumerate(reference): indices[act[0]].append(i)
-    for occurrences in indices.values():
-        for i in occurrences:
-            act, state = reference[i], trace[i]
-            representative = i in {occurrences[0],occurrences[-1]}
-            if representative: add('legal_action', reference[:i+1])
-            op = oracle['ops'][act[0]]; pre = op[':precondition']
-            parts = pre[1:] if pre[0] == 'and' else [pre]
-            for position in range(1, len(act)):
-                alternatives = []
-                for other in oracle['objects']:
-                    if other == act[position]: continue
-                    changed = (*act[:position], other, *act[position+1:])
-                    binding = dict(zip(op[':parameters'], changed[1:]))
-                    violations = tuple(j for j,part in enumerate(parts) if not condition(part, state, binding, oracle['objects']))
-                    alternatives.append((len(violations), distance(act[position],other), violations, changed))
-                alternatives.sort(key=lambda item:(item[0],item[1]))
-                legal = next((a[-1] for a in alternatives if a[0] == 0), None)
-                if legal and representative: add('alternative_legal_action', [*reference[:i],legal])
-                masks = set()
-                for count, _, mask, changed in alternatives:
-                    if not count or mask in masks: continue
-                    pattern = (act[0],position,mask)
-                    if pattern not in failure_patterns:
-                        add('illegal_action', [*reference[:i],changed])
-                        failure_patterns.add(pattern)
-                    masks.add(mask)
-                    if len(masks) == 2: break
-    if row.get('_paired_reference'): add('rule_difference', row['_paired_reference'])
-    return probes
-
-
 def load_tasks(manifest=MANIFEST, selected_datasets=None):
     manifest = Path(manifest)
     source = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()]
@@ -219,7 +174,7 @@ def load_tasks(manifest=MANIFEST, selected_datasets=None):
     if not rows: raise ValueError('No selected tasks')
     for row in rows:
         dataset = row['dataset']; row['id'] = task_id(row)
-        row['split'] = {'abs_a_id':'A-ID','abs_a_scale':'A-scale','abs_b_base':'B-base','abs_b_rule':'B-rule'}[dataset]
+        row['split'] = SPLIT_LABELS[dataset]
         prompt = inputs[dataset][row['task']]
         image = ROOT/'tasks/images/abstract_planning_test'/(row['task']+'.png')
         if prompt != row['instruction'] or Path(row['image']).resolve() != image.resolve() or not image.is_file():
@@ -251,8 +206,6 @@ def load_tasks(manifest=MANIFEST, selected_datasets=None):
             paired = by_id[task_id(pair)]
             if paired['game'] != row['game'] or Path(paired['image']).read_bytes() != Path(row['image']).read_bytes():
                 raise ValueError('Rule pair differs in game or image: ' + row['id'])
-            row['_paired_reference'] = read_plan(Path(paired['gt'])/'round1/plan.txt')
-        row['_probes'] = prepare_probes(row)
     return rows
 
 
@@ -275,75 +228,75 @@ def align_objects(row, candidate, directory):
     fixed = {x:x for x in source & target}
     identity = {'model':mapping_model, 'candidate':[(directory/n).read_text() for n in ['domain.pddl','problem.pddl']],
                 'image':file_revision(row['image']), 'oracle':row['_scenario']['problem'], 'instruction':row['instruction']}
-    capture, evidence = {}, {'source':'identity', 'objects':fixed}
+    evidence = {'source':'identity', 'objects':fixed}
     if source-set(fixed):
-        path = directory/'mapping.json'; saved = json.loads(path.read_text()) if path.exists() else {}
-        if saved.get('identity') == identity and 'response' in saved and not saved.get('error'):
-            response = saved['response']; capture = saved.get('capture',{})
-        else:
-            data = {'instruction':row['instruction'],'candidate_objects':sorted(source-set(fixed)),
-                    'eligible_visible_ids':sorted(target-set(fixed.values())), 'fixed_identity':fixed,
-                    'candidate_initial_facts':[list(a) for a in sorted(candidate['init'])]}
-            prompt = ('Map candidate aliases to visible scene IDs or numeric symbols defined by the rules. '
-                      'Use the image, labels and initial facts; preserve fixed identities. Each target may be used once. '
-                      'Use null for unsupported or ambiguous identities. Return only JSON {"objects":{"candidate_alias":"visible_id_or_null"}}.\n'
-                      + json.dumps(data,ensure_ascii=False))
-            try:
-                response = call_gpt_json(mapping_model,prompt,[Path(row['image'])],response_format={'type':'json_object'},attempts=1,temperature=0,capture=capture)
-            except Exception as error:
-                write_json(path,{'source':'vlm','identity':identity,'objects':fixed,'capture':capture,'error':f'{type(error).__name__}: {error}'})
-                raise
+        path = directory/'mapping.json'; saved = {}; last_error = None
         try:
-            aligned = validate_mapping(response,source,target,fixed)
-        except ValueError as error:
-            write_json(path,{'source':'vlm','identity':identity,'objects':fixed,'response':response,'capture':capture,'error':str(error)})
-            raise
-        evidence = {'source':'vlm','objects':aligned,'response':response,'capture':capture}
+            if path.exists():
+                saved = json.loads(path.read_text())
+                if not isinstance(saved,dict): raise ValueError('Mapping cache must be a JSON object')
+        except (OSError,ValueError) as error:
+            saved = {}; last_error = f'{type(error).__name__}: {error}'
+        use_cache = saved.get('identity') == identity and 'response' in saved and not saved.get('error')
+        data = {'instruction':row['instruction'],'candidate_objects':sorted(source-set(fixed)),
+                'eligible_visible_ids':sorted(target-set(fixed.values())), 'fixed_identity':fixed,
+                'candidate_initial_facts':[list(a) for a in sorted(candidate['init'])]}
+        prompt = ('Map candidate aliases to visible scene IDs or numeric symbols defined by the rules. '
+                  'Use the image, labels and initial facts; preserve fixed identities. Each target may be used once. '
+                  'Use null for unsupported or ambiguous identities. Return only JSON {"objects":{"candidate_alias":"visible_id_or_null"}}.\n'
+                  + json.dumps(data,ensure_ascii=False))
+        attempts = 0
+        while True:
+            if MAPPING_STOP.is_set(): raise RuntimeError('Object mapping cancelled before validation')
+            response, capture = None, {}
+            try:
+                if use_cache:
+                    response, capture = saved['response'], saved.get('capture',{})
+                else:
+                    attempts += 1
+                    feedback = (f'\nMapping attempt {attempts}: correct the previous JSON/schema error: {last_error[:500]}'
+                                if last_error else '')
+                    raw = call_gpt(mapping_model,prompt+feedback,[Path(row['image'])],
+                                   response_format={'type':'json_object'},temperature=0,capture=capture)
+                    capture['raw_output'] = raw
+                    response = json.loads(raw)
+                aligned = validate_mapping(response,source,target,fixed)
+            except Exception as error:
+                last_error = f'{type(error).__name__}: {error}'
+                write_json(path,{'source':'vlm','identity':identity,'objects':fixed,'response':response,
+                                 'capture':capture,'attempts':attempts,'error':last_error})
+                if use_cache:
+                    use_cache = False
+                    continue
+                # 重试只依据解析与映射约束；不使用计划执行结果挑选对象身份。
+                if MAPPING_STOP.wait(min(2**min(attempts-1,5),30)):
+                    raise RuntimeError('Object mapping cancelled before validation') from error
+            else:
+                break
+        evidence = {'source':'vlm','objects':aligned,'response':response,'capture':capture,
+                    'attempts':attempts or saved.get('attempts',0)}
+        if last_error: evidence['last_error'] = last_error
     evidence['identity'] = identity; evidence['unmapped'] = sorted(source-set(evidence['objects']))
     write_json(directory/'mapping.json',evidence)
     return evidence
 
 
-def evaluate_probes(candidate, probes, mapping, adapters):
-    inverse = {v:k for k,v in mapping.items()}; cache = {():{'executable':True,'state':candidate['init']}}
-    results = []
-    for probe in probes:
-        prefix = (); actual = cache[prefix]
-        for index,reference_act in enumerate(probe['actions'],1):
-            try: act = to_candidate(reference_act,inverse,adapters)
-            except KeyError:
-                actual = {'executable':False,'failed_step':index,'error':'Unmapped probe object'}; break
-            except ValueError as error:
-                actual = {'executable':False,'failed_step':index,'error':str(error)}; break
-            previous, prefix = cache[prefix], (*prefix,act)
-            if prefix not in cache:
-                if not previous['executable']: cache[prefix] = previous
-                else:
-                    try: cache[prefix] = {'executable':True,'state':step(candidate,previous['state'],act)}
-                    except ValueError as error: cache[prefix] = {'executable':False,'failed_step':index,'error':str(error)}
-            actual = cache[prefix]
-            if not actual['executable']:break
-        reached = actual['executable'] and condition(candidate['goal'],actual['state'],{},candidate['objects'])
-        passed = actual['executable'] == probe['executable'] and reached == probe['goal_reached']
-        if not probe['executable']: passed = passed and actual.get('failed_step') == probe['failed_step']
-        results.append({'kind':probe['kind'],'pass':passed, 'expected':{k:probe[k] for k in ['executable','goal_reached']},
-                        'actual':{'executable':actual['executable'],'goal_reached':reached,
-                                  **{k:actual[k] for k in ['failed_step','error'] if k in actual}}})
-    return {'pass':bool(results) and all(p['pass'] for p in results), 'passed':sum(p['pass'] for p in results),
-            'total':len(results),'results':results,'scope':'Finite behavioral probes, not complete domain equivalence.'}
-
-
 def evaluate_candidate(row, raw_output, directory):
     directory.mkdir(parents=True,exist_ok=True)
-    for name in ['plan.txt','canonical_plan.txt','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','domain.pddl','problem.pddl','action_mapping.json']:
+    for name in ['plan.txt','canonical_plan.txt','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','domain.pddl','problem.pddl','action_mapping.json','postprocess.json','result.json','result.md']:
         (directory/name).unlink(missing_ok=True)
     result = {k:row[k] for k in ['id','dataset','split','game','task']}
-    result.update(task_success=False,behavior_success=False,status='invalid_output',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
+    result.update(task_success=False,status='invalid_output')
     try:
         domain,problem = parse_pddl_output(raw_output)
+        # 保留修复前的输入；无法确定修复方式时仍能查看原始证据。
         (directory/'domain.pddl').write_text(domain+'\n'); (directory/'problem.pddl').write_text(problem+'\n')
+        domain,problem,changes = repair_pddl(domain,problem)
+        (directory/'domain.pddl').write_text(domain+'\n'); (directory/'problem.pddl').write_text(problem+'\n')
+        if changes:
+            write_json(directory/'postprocess.json',changes)
         candidate = machine(domain,problem)
-    except (ValueError,KeyError,TypeError,IndexError) as error:
+    except (ValueError,KeyError,TypeError,IndexError,NotImplementedError) as error:
         (directory/'mapping.json').unlink(missing_ok=True)
         result['error'] = str(error); return result
     expected = {name:len(op[':parameters']) for name,op in row['_oracle']['ops'].items()}
@@ -387,27 +340,58 @@ def evaluate_candidate(row, raw_output, directory):
         result.update(status='infrastructure_error',error='Independent rules disagree with reference PDDL'); return result
     if reference != (oracle['executable'] and oracle['goal_reached']):
         result.update(status='infrastructure_error',error='VAL and reference interpreter disagree'); return result
-    result['probes'] = evaluate_probes(candidate,row['_probes'],mapping,adapters)
-    write_json(directory/'probes.json',{'definitions':row['_probes'],**result['probes']})
     result['task_success'] = result['interface_ok'] and own and reference
-    result['behavior_success'] = result['task_success'] and result['probes']['pass']
     result['status'] = ('success' if result['task_success'] else 'interface_mismatch' if not result['interface_ok']
                         else 'illegal_environment_action' if not oracle['executable'] else 'real_goal_not_reached')
     return result
 
 
 def save_result(directory,result):
-    write_json(directory/'result.json',result); probes = result['probes']
+    write_json(directory/'result.json',result)
     lines = [f"任务：{result['id']}", f"游戏：{result['game']}", f"状态：{result['status']}",
-             f"真实任务完成：{'是' if result['task_success'] else '否'}", f"规则探针：{probes['passed']}/{probes['total']}（有限覆盖）"]
-    if result.get('error'): lines.append('错误：'+result['error'])
-    links = [f'[{name}]({name})' for name in ['raw_output.txt','domain.pddl','problem.pddl','plan.txt','mapping.json','canonical_plan.txt','probes.json','result.json'] if (directory/name).exists()]
+             f"真实任务完成：{'是' if result['task_success'] else '否'}"]
+    if proof := result.get('diagnosis'):
+        lines.append('错误：'+proof['evidence'])
+    elif result.get('error'):
+        lines.append('错误：'+result['error'])
+    links = [f'[{name}]({name})' for name in ['raw_output.txt','domain.pddl','problem.pddl','postprocess.json','plan.txt','mapping.json','canonical_plan.txt','result.json'] if (directory/name).exists()]
     (directory/'result.md').write_text('\n\n'.join(lines+[' · '.join(links)])+'\n')
+
+
+def diagnose_result(result,row,directory):
+    """Reuse saved models, mappings and this task's plan; never call a model or solver."""
+    if result['task_success'] or result['status'] in UNRESOLVED:
+        return None
+    try:
+        problem = (directory/'problem.pddl').read_text()
+        if conflict := initial_conflict(problem):
+            return conflict
+        if result['status'] not in {'interface_mismatch','illegal_environment_action','real_goal_not_reached'}:
+            return None
+        domain = (directory/'domain.pddl').read_text()
+        candidate = machine(domain,problem)
+        reference = row.get('_oracle')
+        if reference is None:
+            gt = Path(row['gt'])/'round1'
+            reference = machine((gt/'domain.pddl').read_text(),(gt/'problem.pddl').read_text())
+        if result['status'] == 'interface_mismatch':
+            return diagnose_failure(result,candidate,reference,{},[],[],execute)
+        source,targets = set(candidate['objects']),set(reference['objects'])
+        mapping = {name:name for name in source & targets}
+        if source-set(mapping):
+            saved = json.loads((directory/'mapping.json').read_text())
+            if saved.get('error') or saved.get('identity',{}).get('candidate') != [domain,problem]:
+                return None
+            mapping = validate_mapping(saved['response'],source,targets,mapping)
+        return diagnose_failure(result,candidate,reference,mapping,read_plan(directory/'plan.txt'),
+                                read_plan(directory/'canonical_plan.txt'),execute)
+    except (OSError,ValueError,KeyError,TypeError,IndexError,NotImplementedError):
+        return None
 
 
 def run_one(row,template,code_revision):
     directory = eval_root/row['dataset']/row['task']; directory.mkdir(parents=True,exist_ok=True)
-    prompt = template.format(instruction=names_only(row['instruction'],row['_scenario']['domain']),robot_configuration='single-arm')
+    prompt = template.format(instruction=names_only(row['instruction'],row['_scenario']['domain']),robot_configuration='single_arm')
     identity = {'model':eval_model,'prompt':prompt,'image':file_revision(row['image'])}
     start = time.monotonic(); stage = 'generation_error'
     try:
@@ -415,25 +399,27 @@ def run_one(row,template,code_revision):
         raw_path = directory/'raw_output.txt'
         if saved.get('identity') == identity and raw_path.exists() and saved.get('output') == raw_path.read_text(): raw = raw_path.read_text()
         else:
-            for name in ['raw_output.txt','generation.json','domain.pddl','problem.pddl','plan.txt','canonical_plan.txt','mapping.json','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log']:
+            for name in ['raw_output.txt','generation.json','domain.pddl','problem.pddl','plan.txt','canonical_plan.txt','mapping.json','candidate_val.log','reference_val.log','environment_trace.json','probes.json','solver.log','postprocess.json']:
                 (directory/name).unlink(missing_ok=True)
             capture = {}; raw = call_gpt(eval_model,prompt,[Path(row['image'])],temperature=0,capture=capture)
             raw_path.write_text(raw); write_json(directory/'generation.json',{'identity':identity,'output':raw,'capture':capture})
         stage = 'infrastructure_error'; result = evaluate_candidate(row,raw,directory)
     except Exception as error:
         result = {k:row[k] for k in ['id','dataset','split','game','task']}
-        result.update(task_success=False,behavior_success=False,status=stage,error=f'{type(error).__name__}: {error}',probes={'pass':False,'passed':0,'total':len(row['_probes']),'results':[]})
+        result.update(task_success=False,status=stage,error=f'{type(error).__name__}: {error}')
     result.update(model=eval_model,elapsed_seconds=round(time.monotonic()-start,3),evaluator_revision=code_revision)
+    if not result['task_success']: result['diagnosis'] = diagnose_result(result,row,directory)
     save_result(directory,result); return result
 
 
 def aggregate(results):
     evaluated = [r for r in results if r['status'] not in UNRESOLVED]
-    successes = sum(r['task_success'] for r in evaluated); behavior = sum(r['behavior_success'] for r in evaluated)
+    successes = sum(r['task_success'] for r in evaluated)
+    errors = Counter(diagnostic_group(r,UNRESOLVED) for r in evaluated if not r['task_success'])
     return {'total':len(results),'evaluated':len(evaluated),'unresolved':len(results)-len(evaluated),
             'task_success':successes,'task_success_rate':successes/len(evaluated) if evaluated else None,
-            'behavior_success':behavior,'behavior_success_rate':behavior/len(evaluated) if evaluated else None,
-            'probe_passed':sum(r['probes']['passed'] for r in results),'probe_total':sum(r['probes']['total'] for r in results),
+            'error_counts':{key:errors[key] for key in ERROR_TYPES},
+            'error_rates':{key:errors[key]/len(evaluated) if evaluated else None for key in ERROR_TYPES},
             'statuses':dict(Counter(r['status'] for r in results))}
 
 
@@ -466,36 +452,71 @@ def summarize(results,rows):
         a,b = by_id[base_id],by_id[row['id']]
         summary['pairs'].append({'base':base_id,'variant':row['id'],
                                  'evaluated':a['status'] not in UNRESOLVED and b['status'] not in UNRESOLVED,
-                                 'both_tasks_pass':a['task_success'] and b['task_success'], 'both_behaviors_pass':a['behavior_success'] and b['behavior_success']})
+                                 'both_tasks_pass':a['task_success'] and b['task_success']})
     evaluated_pairs = [p for p in summary['pairs'] if p['evaluated']]
     summary['pairs_evaluated'] = len(evaluated_pairs)
     summary['pairs_unresolved'] = len(summary['pairs'])-len(evaluated_pairs)
     summary['pair_success_rate'] = sum(p['both_tasks_pass'] for p in evaluated_pairs)/len(evaluated_pairs) if evaluated_pairs else None
     write_json(eval_root/'summary_abs.json',summary)
-    lines = [f'# 抽象规划评测：{eval_model}', 'VLM 仅映射对象身份，程序判定任务与规则；API/映射/资源限制另列为未完成评测。',
-             '| 分类 | 总数 | 已评测 | 未完成 | 真实任务成功 | 成功且规则探针全通过 |', '| --- | ---: | ---: | ---: | ---: | ---: |']
-    for split,s in summary['by_split'].items(): lines.append(f"| {split} | {s['total']} | {s['evaluated']} | {s['unresolved']} | {s['task_success']} | {s['behavior_success']} |")
-    lines += ['', f"规则配对成功：{sum(p['both_tasks_pass'] for p in evaluated_pairs)}/{len(evaluated_pairs)}；未完成：{summary['pairs_unresolved']}", '', '| 任务 | 游戏 | 状态 | 任务完成 | 规则探针 |', '| --- | --- | --- | --- | --- |']
-    for r in sorted(results,key=lambda r:r['id']):
-        p=r['probes']; lines.append(f"| [{r['id']}]({r['id']}/result.md) | {r['game']} | {r['status']} | {'是' if r['task_success'] else '否'} | {p['passed']}/{p['total']} |")
-    lines += ['', '规则探针只覆盖已检查行为；五个新增训练游戏和四个未训练游戏另以独立原生规则模拟器核验计划。']
-    (eval_root/'report_abs.md').write_text('\n'.join(lines)+'\n'); return summary
+    (eval_root/'report_abs.md').write_text(render_abstract_report(results,summary,eval_root,UNRESOLVED))
+    return summary
 
 
-def main():
-    eval_root.mkdir(parents=True,exist_ok=True); rows = load_tasks(MANIFEST,datasets); template = PROMPT.read_text()
-    code_revision = [file_revision(p) for p in [__file__, MANIFEST, novel_games.__file__]]
-    print(f'开始评测：{eval_model}，{len(rows)} 条；映射模型 {mapping_model}。',flush=True)
+def load_saved_results(rows):
+    """Load decisions and derive local diagnoses without generation or solving."""
     results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(run_one,row,template,code_revision) for row in rows]
-        for future in as_completed(futures):
-            result = future.result(); results.append(result)
-            print(f"{result['id']}: {result['status']} ({len(results)}/{len(rows)})",flush=True)
+    for row in rows:
+        identity = {key:row[key] for key in ['dataset','game','task']}
+        identity.update(id=task_id(row),split=SPLIT_LABELS[row['dataset']])
+        try:
+            result = json.loads((eval_root/row['dataset']/row['task']/'result.json').read_text())
+            if not isinstance(result,dict) or any(result.get(key) != value for key,value in identity.items()):
+                raise ValueError('Result identity differs from manifest')
+            if not isinstance(result.get('status'),str) or type(result.get('task_success')) is not bool:
+                raise ValueError('Result is missing a decision')
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            result = {**identity,'task_success':False,'status':'infrastructure_error',
+                      'error':f'结果文件无法读取：{type(error).__name__}: {error}'}
+        if not result['task_success']:
+            result['diagnosis'] = diagnose_result(result,row,eval_root/row['dataset']/row['task'])
+        results.append(result)
+    return results
+
+
+def main(*,report_only=False):
+    eval_root.mkdir(parents=True,exist_ok=True)
+    if report_only:
+        rows = [json.loads(line) for line in MANIFEST.read_text().splitlines() if line.strip()]
+        rows = [row for row in rows if row['dataset'] in datasets]
+        for row in rows: row['id'] = task_id(row)
+        results = load_saved_results(rows)
+    else:
+        MAPPING_STOP.clear()
+        rows = load_tasks(MANIFEST,datasets); template = PROMPT.read_text()
+        code_revision = [file_revision(p) for p in [__file__, MANIFEST, novel_games.__file__]]
+        print(f'开始评测：{eval_model}，{len(rows)} 条；映射模型 {mapping_model}。',flush=True)
+        results = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = []
+            try:
+                for row in rows: futures.append(pool.submit(run_one,row,template,code_revision))
+                for future in as_completed(futures): results.append(future.result())
+            except BaseException:
+                MAPPING_STOP.set()
+                for future in futures: future.cancel()
+                raise
     summary = summarize(results,rows)
-    print(json.dumps(summary['overall'],ensure_ascii=False,indent=2),flush=True)
-    print(f'详细结果：  {eval_root / "report_abs.md"}',flush=True)
+    overall = summary['overall']
+    print(f"{eval_model}：任务成功 {overall['task_success']}/{overall['evaluated']}，未完成 {overall['unresolved']}；报告：{eval_root / 'report_abs.md'}",flush=True)
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Evaluate abstract PDDL or rebuild compact reports from cached results.')
+    parser.add_argument('--report-only',action='store_true',help='rebuild reports and local diagnoses without model calls or solving')
+    parser.add_argument('--report-root',type=Path,help='saved abstract results directory; requires --report-only')
+    args = parser.parse_args()
+    if args.report_root:
+        if not args.report_only: parser.error('--report-root requires --report-only')
+        eval_root = args.report_root.resolve()
+        eval_model = eval_root.parent.name
+    main(report_only=args.report_only)

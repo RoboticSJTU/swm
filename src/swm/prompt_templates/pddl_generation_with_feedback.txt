@@ -32,6 +32,10 @@ Repair the failed PDDL using the evidence and feedback. Preserve valid modeling 
 
 {predicates}
 
+# OPTIONAL OPERATOR REFERENCES
+
+{action_template}
+
 # REASONING PROCESS
 
 Diagnose the failure, recheck initial identities/relations/resources, and correct the affected transitions or problem facts. Goals express required final results, not temporary staging; conjunct order does not impose action order.

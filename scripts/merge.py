@@ -14,7 +14,7 @@ from typing import Union
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
+from swm.pddl.strips import format_pddl, validate_untyped_pddl
 
 
 # 只需要修改这里；多个数据集会合并到同一份算子库。
@@ -415,7 +415,7 @@ def parse_domain_file(domain_path: Path):
                     fields[":precondition"],
                     fields[":effect"],
                 )
-                block_text = format_action_conditions(action_block)
+                block_text = format_pddl(action_block).strip()
             except (ValueError, TypeError, IndexError) as error:
                 warnings.append(f"{action_name}：{error}；保留原始动作")
                 param_arity = sum(

@@ -1,54 +1,86 @@
+These are scenario-specific examples, not a complete domain. Select and adapt them using PREDICATE_TEMPLATE and RULES; examples omit merge-generated numeric suffixes and select one causal variant per action. An object's category alone does not require clear. Once clear is tracked for an object, maintain it in every relevant pickup, release, handoff, and upper-load change, including releases onto ordinary supports. Keep it false while any hand directly holds the object.
+
+The strict stack examples below assume each base has at most one direct upper load and remains unheld while loaded. Establish these invariants from the initial state and all relevant actions before using their unconditional clear-restoration effects. For multiple loads or supports, update the actual affected objects and restore clear only after the last upper load is removed and the object is unheld. Use uncovered separately when a task needs container-opening access, including access to a held container.
+
 ## 1. Spatial Change.
 
 ### (1) Source only.
 
-; Pick up apple ?a from table ?t with hand ?h.
-(:action pick_apple_from_table
-:parameters (?h ?a ?t)
-:precondition (and (hand ?h) (apple ?a) (table ?t) (hand_free ?h) (on ?a ?t))
-:effect (and (not (hand_free ?h)) (holding ?h ?a) (not (on ?a ?t)))
-)
-
-; Pick up apple ?a from cabinet top ?c with hand ?h.
-(:action pick_apple_from_cabinet_top
+; Pick up apple ?a from counter ?c with hand ?h.
+(:action pick_apple_from_counter
 :parameters (?h ?a ?c)
-:precondition (and (hand ?h) (apple ?a) (cabinet ?c) (hand_free ?h) (on ?a ?c))
+:precondition (and (hand ?h) (apple ?a) (counter ?c) (hand_free ?h) (on ?a ?c))
 :effect (and (not (hand_free ?h)) (holding ?h ?a) (not (on ?a ?c)))
 )
 
-; Pick up apple ?a from pot ?p with hand ?h.
-(:action pick_apple_from_pot
-:parameters (?h ?a ?p)
-:precondition (and (hand ?h) (apple ?a) (pot ?p) (hand_free ?h) (open ?p) (in ?a ?p))
-:effect (and (not (hand_free ?h)) (holding ?h ?a) (not (in ?a ?p)))
+; Pick up unloaded block ?b from cabinet top ?c with hand ?h; clear is tracked for this block.
+(:action pick_block_from_cabinet_top
+:parameters (?h ?b ?c)
+:precondition (and (hand ?h) (block ?b) (cabinet ?c) (hand_free ?h) (clear ?b) (on ?b ?c))
+:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (clear ?b)) (not (on ?b ?c)))
 )
 
-; Pick up block ?b1 from block ?b2 with hand ?h.
-(:action pick_block_from_block
+; Pick up banana ?b1 from open box ?b2 with hand ?h.
+(:action pick_banana_from_box
 :parameters (?h ?b1 ?b2)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (hand_free ?h) (clear ?b1) (on ?b1 ?b2))
-:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)))
-)
-
-; Pick nested bowl ?b1 from bowl ?b2 with hand ?h.
-(:action pick_nested_bowl_from_bowl
-:parameters (?h ?b1 ?b2)
-:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (hand_free ?h) (in ?b1 ?b2))
+:precondition (and (hand ?h) (banana ?b1) (box ?b2) (hand_free ?h) (open ?b2) (in ?b1 ?b2))
 :effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (in ?b1 ?b2)))
 )
 
-; Pick up cup ?c from laptop ?l with hand ?h.
-(:action pick_cup_from_laptop
-:parameters (?h ?c ?l)
-:precondition (and (hand ?h) (cup ?c) (laptop ?l) (hand_free ?h) (on ?c ?l))
-:effect (and (not (hand_free ?h)) (holding ?h ?c) (clear ?l) (not (on ?c ?l)))
+; Strict stack: pick up the top block ?b1 from block ?b2 with hand ?h.
+(:action pick_block_from_block
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (block ?b1) (block ?b2) (hand_free ?h) (clear ?b1) (on ?b1 ?b2) (not (= ?b1 ?b2)))
+:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)))
+)
+
+; Strict nested stack: pick up the top bowl ?b1 from bowl ?b2 with hand ?h.
+(:action pick_bowl_from_bowl
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (hand_free ?h) (clear ?b1) (in ?b1 ?b2) (not (= ?b1 ?b2)))
+:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (in ?b1 ?b2)))
+)
+
+; Remove towel ?t, the sole upper load on unheld lid ?l; only the lid tracks clear here.
+(:action pick_towel_from_lid
+:parameters (?h ?t ?l)
+:precondition (and (hand ?h) (towel ?t) (lid ?l) (hand_free ?h) (on ?t ?l))
+:effect (and (not (hand_free ?h)) (holding ?h ?t) (clear ?l) (not (on ?t ?l)))
+)
+
+; Pick up cup ?c from lid ?ll of closed laptop ?l, removing its sole opening obstruction.
+(:action pick_cup_from_laptop_lid
+:parameters (?h ?c ?ll ?l)
+:precondition (and (hand ?h) (cup ?c) (laptop_lid ?ll) (laptop ?l) (hand_free ?h) (closed ?l) (part_of ?ll ?l) (on ?c ?ll))
+:effect (and (not (hand_free ?h)) (holding ?h ?c) (opening_clear ?l) (not (on ?c ?ll)))
+)
+
+; Pick up plate ?p from table ?t; this plate has no strict stack role. Preserve carried contents.
+(:action pick_plate_from_table
+:parameters (?h ?p ?t)
+:precondition (and (hand ?h) (plate ?p) (table ?t) (hand_free ?h) (on ?p ?t))
+:effect (and (not (hand_free ?h)) (holding ?h ?p) (not (on ?p ?t)))
+)
+
+; Pick up trash bin ?tb from floor ?f, removing its obstruction of drawer ?d.
+(:action pick_trash_bin_from_floor
+:parameters (?h ?tb ?f ?d)
+:precondition (and (hand ?h) (trash_bin ?tb) (floor ?f) (drawer ?d) (hand_free ?h) (blocks_opening ?tb ?d) (on ?tb ?f))
+:effect (and (not (hand_free ?h)) (holding ?h ?tb) (not (blocks_opening ?tb ?d)) (opening_clear ?d) (not (on ?tb ?f)))
+)
+
+; Ordinary non-stack bowl: pick up bowl ?b from sink ?s with hand ?h.
+(:action pick_bowl_from_sink
+:parameters (?h ?b ?s)
+:precondition (and (hand ?h) (bowl ?b) (sink ?s) (hand_free ?h) (in ?b ?s))
+:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (in ?b ?s)))
 )
 
 ; Fill kettle ?k with water ?w from faucet ?f while holding it with hand ?h.
 (:action fill_kettle_from_faucet
-:parameters (?h ?k ?w ?f)
-:precondition (and (hand ?h) (kettle ?k) (water ?w) (faucet ?f) (holding ?h ?k) (open ?k) (is_on ?f) (dispenses ?f ?w))
-:effect (and (in ?w ?k))
+:parameters (?h ?w ?f ?k)
+:precondition (and (hand ?h) (water ?w) (faucet ?f) (kettle ?k) (holding ?h ?k) (open ?k) (is_on ?f) (dispenses ?f ?w) (in ?w ?f))
+:effect (and (not (boiled ?w)) (not (in ?w ?f)) (in ?w ?k))
 )
 
 ; Scoop soup ?sp from pot ?p with spoon ?s held by hand ?h.
@@ -58,18 +90,18 @@
 :effect (and (not (in ?sp ?p)) (in ?sp ?s))
 )
 
-; Insert key ?k, held by hand ?h, into lock ?l of cabinet ?c.
-(:action insert_key_in_lock
-:parameters (?h ?k ?l ?c)
-:precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (holding ?h ?k) (lock_of ?l ?c))
+; Insert key ?k into lock ?l and release it with hand ?h.
+(:action insert_key_into_lock
+:parameters (?h ?k ?l)
+:precondition (and (hand ?h) (key ?k) (lock ?l) (holding ?h ?k))
 :effect (and (not (holding ?h ?k)) (hand_free ?h) (inserted ?k ?l))
 )
 
-; Remove lid ?l from pot ?p to open the pot with hand ?h.
+; Remove uncovered lid ?l from pot ?p with hand ?h; clear is tracked for this lid.
 (:action remove_lid_from_pot
 :parameters (?h ?l ?p)
-:precondition (and (hand ?h) (lid ?l) (pot ?p) (hand_free ?h) (closed ?p) (on ?l ?p))
-:effect (and (not (hand_free ?h)) (holding ?h ?l) (not (closed ?p)) (open ?p) (not (on ?l ?p)))
+:precondition (and (hand ?h) (lid ?l) (pot ?p) (hand_free ?h) (clear ?l) (closed ?p) (on ?l ?p))
+:effect (and (not (hand_free ?h)) (holding ?h ?l) (not (clear ?l)) (not (closed ?p)) (open ?p) (not (on ?l ?p)))
 )
 
 ; Unscrew cap ?cp from bottle ?b to open the bottle with hand ?h.
@@ -81,67 +113,88 @@
 
 ### (2) Target only.
 
-; Place apple ?a in bowl ?b with hand ?h.
+; Strict stack: release unloaded block ?b1 onto available block ?b2.
+(:action place_block_on_block
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (block ?b1) (block ?b2) (holding ?h ?b1) (clear ?b2) (not (= ?b1 ?b2)))
+:effect (and (not (holding ?h ?b1)) (hand_free ?h) (on ?b1 ?b2) (not (clear ?b2)) (clear ?b1))
+)
+
+; Strict nested stack: release bowl ?b1, with no upper stack load, into available bowl ?b2.
+(:action place_bowl_in_bowl
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (holding ?h ?b1) (clear ?b2) (not (= ?b1 ?b2)))
+:effect (and (not (holding ?h ?b1)) (hand_free ?h) (in ?b1 ?b2) (not (clear ?b2)) (clear ?b1))
+)
+
+; A bowl tracked for strict stacking is released onto an ordinary flat plate. Restore only the bowl's clear; the plate has no stack role here.
+(:action place_bowl_on_flat_plate
+:parameters (?h ?b ?p)
+:precondition (and (hand ?h) (bowl ?b) (plate ?p) (holding ?h ?b) (flat ?p))
+:effect (and (not (holding ?h ?b)) (hand_free ?h) (on ?b ?p) (clear ?b))
+)
+
+; Ordinary contents: place apple ?a in bowl ?b. This transfer itself leaves any tracked bowl clear unchanged; add an opening-access guard only when needed.
 (:action place_apple_in_bowl
 :parameters (?h ?a ?b)
 :precondition (and (hand ?h) (apple ?a) (bowl ?b) (holding ?h ?a))
 :effect (and (not (holding ?h ?a)) (hand_free ?h) (in ?a ?b))
 )
 
-; Place plate ?p flat on counter ?c with hand ?h.
+; Ordinary non-stack plate: place plate ?p flat on counter ?c with hand ?h.
 (:action place_plate_flat_on_counter
 :parameters (?h ?p ?c)
 :precondition (and (hand ?h) (plate ?p) (counter ?c) (holding ?h ?p) (vertical ?p))
 :effect (and (not (holding ?h ?p)) (hand_free ?h) (not (vertical ?p)) (flat ?p) (on ?p ?c))
 )
 
-; Place bowl ?b upright on table ?t with hand ?h.
+; Ordinary non-stack bowl: place non-upright bowl ?b upright on table ?t; the modeled poses are upright, upside_down, or vertical.
 (:action place_bowl_upright_on_table
 :parameters (?h ?b ?t)
-:precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b) (upside_down ?b))
-:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (upright ?b) (on ?b ?t))
+:precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b) (not (upright ?b)))
+:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (not (vertical ?b)) (upright ?b) (on ?b ?t))
 )
 
 ; Screw cap ?cp onto bottle ?b to close the bottle with hand ?h.
-(:action screw_cap_onto_bottle
+(:action screw_cap_on_bottle
 :parameters (?h ?cp ?b)
 :precondition (and (hand ?h) (cap ?cp) (bottle ?b) (holding ?h ?cp) (open ?b))
 :effect (and (not (holding ?h ?cp)) (hand_free ?h) (not (open ?b)) (closed ?b) (on ?cp ?b))
 )
 
-; Place lid ?l on pot ?p to close the pot with hand ?h.
+; Place unloaded lid ?l on pot ?p to close it and restore the lid's clear.
 (:action place_lid_on_pot
 :parameters (?h ?l ?p)
 :precondition (and (hand ?h) (lid ?l) (pot ?p) (holding ?h ?l) (open ?p))
-:effect (and (not (holding ?h ?l)) (hand_free ?h) (not (open ?p)) (closed ?p) (on ?l ?p))
+:effect (and (not (holding ?h ?l)) (hand_free ?h) (not (open ?p)) (closed ?p) (on ?l ?p) (clear ?l))
 )
 
-; Place trash can ?tc on floor ?f to unblock drawer ?d with hand ?h.
-(:action place_trash_can_on_floor_away_from_drawer
-:parameters (?h ?tc ?f ?d)
-:precondition (and (hand ?h) (trash_can ?tc) (floor ?f) (drawer ?d) (holding ?h ?tc) (blocking ?tc ?d))
-:effect (and (not (holding ?h ?tc)) (hand_free ?h) (not (blocking ?tc ?d)) (unblocked ?d) (on ?tc ?f))
+; Place trash bin ?tb on floor ?f to the right of cabinet ?c with hand ?h.
+(:action place_trash_bin_on_floor_right_of_cabinet
+:parameters (?h ?tb ?f ?c)
+:precondition (and (hand ?h) (trash_bin ?tb) (floor ?f) (cabinet ?c) (holding ?h ?tb))
+:effect (and (not (holding ?h ?tb)) (hand_free ?h) (on ?tb ?f) (right_of ?tb ?c))
 )
 
 ### (3) From source to target.
 
-; Pour milk ?m from milk carton ?mc into cup ?c with hand ?h.
-(:action pour_milk_from_milk_carton_into_cup
-:parameters (?h ?m ?mc ?c ?t)
-:precondition (and (hand ?h) (milk ?m) (milk_carton ?mc) (cup ?c) (table ?t) (holding ?h ?mc) (open ?mc) (in ?m ?mc) (on ?c ?t))
-:effect (and (not (in ?m ?mc)) (in ?m ?c))
+; Pour milk ?m from milk carton ?mc into paper cup ?pc on counter ?c with hand ?h.
+(:action pour_milk_from_milk_carton_into_paper_cup_on_counter
+:parameters (?h ?m ?mc ?pc ?c)
+:precondition (and (hand ?h) (milk ?m) (milk_carton ?mc) (paper_cup ?pc) (counter ?c) (holding ?h ?mc) (open ?mc) (in ?m ?mc) (on ?pc ?c))
+:effect (and (not (in ?m ?mc)) (in ?m ?pc))
 )
 
-; Pour contents ?ct from cup ?c into bowl ?b on table ?t with hand ?h.
-(:action pour_contents_from_cup_into_bowl
-:parameters (?h ?ct ?c ?b ?t)
-:precondition (and (hand ?h) (contents ?ct) (cup ?c) (bowl ?b) (table ?t) (holding ?h ?c) (in ?ct ?c) (on ?b ?t))
-:effect (and (not (in ?ct ?c)) (in ?ct ?b))
+; Pour water ?w from open bottle ?b1 into bowl ?b2; this bowl has no opening-occlusion constraint.
+(:action pour_water_from_bottle_into_bowl
+:parameters (?h ?w ?b1 ?b2)
+:precondition (and (hand ?h) (water ?w) (bottle ?b1) (bowl ?b2) (holding ?h ?b1) (open ?b1) (in ?w ?b1))
+:effect (and (not (in ?w ?b1)) (in ?w ?b2))
 )
 
 ## 2. State Change.
 
-; Open drawer ?d with hand ?h.
+; Open drawer ?d with hand ?h; this scenario has no lock or opening obstruction.
 (:action open_drawer
 :parameters (?h ?d)
 :precondition (and (hand ?h) (drawer ?d) (hand_free ?h) (closed ?d))
@@ -155,10 +208,10 @@
 :effect (and (not (closed ?d)) (open ?d))
 )
 
-; Open washing machine ?wm with hand ?h.
+; Open switched-off washing machine ?wm with hand ?h.
 (:action open_washing_machine
 :parameters (?h ?wm)
-:precondition (and (hand ?h) (washing_machine ?wm) (hand_free ?h) (closed ?wm))
+:precondition (and (hand ?h) (washing_machine ?wm) (hand_free ?h) (closed ?wm) (is_off ?wm))
 :effect (and (not (closed ?wm)) (open ?wm))
 )
 
@@ -176,32 +229,39 @@
 :effect (and (not (closed ?k)) (open ?k))
 )
 
-; Turn key ?k already inserted in lock ?l to lock cabinet ?c with free hand ?h.
+; Lock cabinet ?c with inserted key ?k and free hand ?h after its three distinct drawers are closed.
 (:action lock_cabinet_with_key
-:parameters (?h ?k ?l ?c)
-:precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (hand_free ?h) (inserted ?k ?l) (lock_of ?l ?c) (unlocked ?c))
+:parameters (?h ?c ?k ?l ?d1 ?d2 ?d3)
+:precondition (and (hand ?h) (cabinet ?c) (key ?k) (lock ?l) (drawer ?d1) (drawer ?d2) (drawer ?d3) (hand_free ?h) (unlocked ?c) (inserted ?k ?l) (lock_of ?l ?c) (drawer_of ?d1 ?c) (drawer_of ?d2 ?c) (drawer_of ?d3 ?c) (closed ?d1) (closed ?d2) (closed ?d3) (not (= ?d1 ?d2)) (not (= ?d1 ?d3)) (not (= ?d2 ?d3)))
 :effect (and (not (unlocked ?c)) (locked ?c))
 )
 
 ; Turn key ?k already inserted in lock ?l to unlock cabinet ?c with free hand ?h.
 (:action unlock_cabinet_with_key
-:parameters (?h ?k ?l ?c)
+:parameters (?h ?c ?k ?l)
 :precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (hand_free ?h) (inserted ?k ?l) (lock_of ?l ?c) (locked ?c))
 :effect (and (not (locked ?c)) (unlocked ?c))
 )
 
-; Turn on microwave ?m to heat apple ?a inside with hand ?h.
+; Turn on closed microwave ?m with hand ?h; heating completes in a separate waiting event.
 (:action turn_on_microwave
-:parameters (?h ?m ?a)
-:precondition (and (hand ?h) (microwave ?m) (apple ?a) (hand_free ?h) (closed ?m) (is_off ?m) (in ?a ?m))
+:parameters (?h ?m)
+:precondition (and (hand ?h) (microwave ?m) (hand_free ?h) (closed ?m) (is_off ?m))
 :effect (and (not (is_off ?m)) (is_on ?m))
 )
 
-; Turn off microwave ?m after heating apple ?a inside with hand ?h.
+; Wait for corn ?c on plate ?p inside running, closed microwave ?m to heat; no hand is occupied.
+(:action wait_until_corn_heated_in_microwave
+:parameters (?c ?m ?p)
+:precondition (and (corn ?c) (microwave ?m) (plate ?p) (closed ?m) (is_on ?m) (on ?c ?p) (in ?p ?m))
+:effect (and (heated ?c))
+)
+
+; Turn off microwave ?m with hand ?h.
 (:action turn_off_microwave
-:parameters (?h ?m ?a)
-:precondition (and (hand ?h) (microwave ?m) (apple ?a) (hand_free ?h) (closed ?m) (is_on ?m) (in ?a ?m))
-:effect (and (not (is_on ?m)) (is_off ?m) (heated ?a))
+:parameters (?h ?m)
+:precondition (and (hand ?h) (microwave ?m) (hand_free ?h) (is_on ?m))
+:effect (and (not (is_on ?m)) (is_off ?m))
 )
 
 ; Turn on faucet ?f with hand ?h.
@@ -218,67 +278,32 @@
 :effect (and (not (is_on ?f)) (is_off ?f))
 )
 
-; Turn off faucet ?f after rinsing bowl ?b in sink ?s with hand ?h.
-(:action turn_off_faucet_after_rinsing_bowl
-:parameters (?h ?f ?b ?s)
-:precondition (and (hand ?h) (faucet ?f) (bowl ?b) (sink ?s) (hand_free ?h) (is_on ?f) (in ?b ?s))
-:effect (and (not (is_on ?f)) (is_off ?f) (rinsed ?b) (not (empty ?b)) (has_water ?b))
+; Wait for bowl ?b already under running faucet ?f in sink ?s to rinse; empty is tracked here.
+(:action wait_until_bowl_rinsed_under_faucet
+:parameters (?b ?f ?s ?w)
+:precondition (and (bowl ?b) (faucet ?f) (sink ?s) (water ?w) (is_on ?f) (part_of ?f ?s) (in ?b ?s) (under ?b ?f) (dispenses ?f ?w))
+:effect (and (rinsed ?b) (not (empty ?b)) (in ?w ?b))
 )
 
-; Hold bowl ?b under running faucet ?f with hand ?h until rinsed.
-(:action hold_bowl_under_running_faucet_until_rinsed
-:parameters (?h ?b ?f)
-:precondition (and (hand ?h) (bowl ?b) (faucet ?f) (holding ?h ?b) (is_on ?f))
-:effect (and (rinsed ?b) (not (empty ?b)) (has_water ?b))
+; Rinse bowl ?b while holding it under running faucet ?f; empty is not tracked in this scenario.
+(:action rinse_bowl_under_faucet
+:parameters (?h ?b ?f ?w)
+:precondition (and (hand ?h) (bowl ?b) (faucet ?f) (water ?w) (holding ?h ?b) (is_on ?f) (dispenses ?f ?w))
+:effect (and (rinsed ?b) (in ?w ?b))
 )
 
-; Hold sponge ?s under running faucet ?f with hand ?h until wet.
-(:action hold_sponge_under_running_faucet_until_wet
+; Soak sponge ?s under running faucet ?f while holding it with hand ?h.
+(:action soak_sponge
 :parameters (?h ?s ?f)
 :precondition (and (hand ?h) (sponge ?s) (faucet ?f) (holding ?h ?s) (is_on ?f))
 :effect (and (wet ?s))
 )
 
-; Pick up rinsed bowl ?b from sink ?s after faucet ?f is off with hand ?h.
-(:action pick_bowl_from_sink
-:parameters (?h ?b ?s ?f)
-:precondition (and (hand ?h) (bowl ?b) (sink ?s) (faucet ?f) (hand_free ?h) (is_off ?f) (rinsed ?b) (in ?b ?s))
-:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (in ?b ?s)))
-)
-
-; Wipe counter ?c with cloth ?cl with hand ?h.
-(:action wipe_counter_with_cloth
-:parameters (?h ?c ?cl)
-:precondition (and (hand ?h) (counter ?c) (cloth ?cl) (holding ?h ?cl))
-:effect (and (wiped ?c))
-)
-
-; Fold towel ?tw on table ?t with hand ?h.
-(:action fold_towel_on_table
-:parameters (?h ?tw ?t)
-:precondition (and (hand ?h) (towel ?tw) (table ?t) (hand_free ?h) (unfolded ?tw) (on ?tw ?t))
-:effect (and (not (unfolded ?tw)) (folded ?tw))
-)
-
-; Unfold cloth ?cl on counter ?c with hand ?h.
-(:action unfold_cloth_on_counter
-:parameters (?h ?cl ?c)
-:precondition (and (hand ?h) (cloth ?cl) (counter ?c) (hand_free ?h) (on ?cl ?c) (folded ?cl))
-:effect (and (not (folded ?cl)) (unfolded ?cl))
-)
-
-; Align rope ?r with black object ?o.
-(:action align_rope_with_black_object
-:parameters (?h ?r ?o)
-:precondition (and (hand ?h) (rope ?r) (black_object ?o) (holding ?h ?r))
-:effect (and (aligned ?r ?o))
-)
-
-; Wash cup ?c with faucet ?f while holding it with hand ?h.
-(:action wash_cup_with_faucet
-:parameters (?h ?c ?f)
-:precondition (and (hand ?h) (cup ?c) (faucet ?f) (holding ?h ?c) (is_on ?f))
-:effect (and (washed ?c))
+; Wipe water stain ?ws with sponge ?s held by hand ?h.
+(:action wipe_water_stain_with_sponge
+:parameters (?h ?ws ?s)
+:precondition (and (hand ?h) (water_stain ?ws) (sponge ?s) (holding ?h ?s))
+:effect (and (wiped ?ws))
 )
 
 ; Stir soup ?sp in pot ?p with spoon ?s held by hand ?h.

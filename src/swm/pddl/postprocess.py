@@ -1,4 +1,4 @@
-"""Complete missing declarations without changing facts or action logic."""
+"""Repair declarations without changing facts or action logic."""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -61,7 +61,7 @@ def _format(root):
 
 
 def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
-    """Scan once; complete predicates, problem objects and free action parameters.
+    """Complete missing declarations and remove identical duplicate actions.
 
     Arity conflicts are left for the planner. Unsupported/malformed structures
     raise instead of guessing; an unchanged document is returned verbatim.
@@ -78,6 +78,31 @@ def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
                 node[0] == ":requirements" and ":typing" in node
             ):
                 raise NotImplementedError("Declaration repair requires untyped PDDL without functions/derived rules")
+
+    actions = {}
+    duplicate_actions = defaultdict(int)
+    for action in domain_root[2:]:
+        if action[:1] != [":action"] or len(action) < 2:
+            continue
+        name = action[1]
+        if not isinstance(name, str):
+            raise ValueError("Action name must be a symbol")
+        if name in actions:
+            if action != actions[name]:
+                raise ValueError(f"Conflicting action definitions: {name}")
+            duplicate_actions[name] += 1
+        else:
+            actions[name] = action
+    if duplicate_actions:
+        seen = set()
+        nodes = []
+        for node in domain_root[2:]:
+            if node[:1] == [":action"]:
+                if node[1] in seen:
+                    continue
+                seen.add(node[1])
+            nodes.append(node)
+        domain_root[2:] = nodes
 
     predicates = _section(domain_root, ":predicates")
     objects = _section(problem_root, ":objects")
@@ -143,9 +168,10 @@ def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
 
     changes = {key: value for key, value in {
         "predicates": added_predicates, "objects": added_objects, "parameters": added_parameters,
+        "duplicate_actions": dict(duplicate_actions),
     }.items() if value}
     return (
-        _format(domain_root) if added_predicates or added_parameters else domain,
+        _format(domain_root) if added_predicates or added_parameters or duplicate_actions else domain,
         _format(problem_root) if added_objects else problem,
         changes,
     )

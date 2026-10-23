@@ -13,15 +13,14 @@ from swm.llm import call_gpt_json
 from swm.pddl.reorder import ReorderModel, evaluate, expression_bits, search_plan_classes
 from swm.pddl.strips import parse_sexpr_file
 from swm.pddl.plan_branches import factor_plan_orders, render_plan_orders, render_named_orders
+from swm.prompts import read_prompt
 
 
 def format_kf_actions(text: str) -> str:
-    """Give judges only numbered actions, without extraction labels or states."""
+    """Give judges numbered actions without extraction labels."""
     actions = []
     for line in text.splitlines():
-        action = line.split('|', 1)[0].strip()
-        if re.match(r'^(?:Before|After)\s*:', action, re.IGNORECASE):
-            continue
+        action = line.strip()
         action = re.sub(r'^(?:(?:\[G\d+\]|\d+[.)])\s*)+', '', action).strip()
         if action:
             actions.append(action)
@@ -190,7 +189,7 @@ def build_group_judge_prompt(
     multiview: bool = False,
     presentation: str = "plain",
 ) -> str:
-    """Reuse the single-plan audit with shared operations and labelled paths.
+    """Fill the soundness template with shared operations and labelled paths.
 
     Only bound operator descriptions enter the trace. Predicted problem init
     and simulated states are deliberately absent from this interface.
@@ -214,22 +213,7 @@ def build_group_judge_prompt(
 
     if presentation not in {"branches", "linear", "plain", "named"}:
         raise ValueError("Unknown group presentation")
-    if presentation in {"linear", "plain", "named"}:
-        trace = [
-            "All plans start from the same actual initial scene. Action IDs are unordered labels, not step numbers. "
-            "Keep each plan's state, completed operations and verdict separate.",
-            "Each row is one complete plan. Follow its action IDs left to right.",
-        ]
-    else:
-        trace = [
-            "All plans start from the same actual initial scene. Track a shared prefix once, "
-            "then follow each plan's branch from that prefix state.",
-            "Each line names its plans and execution steps. Read action IDs left to right; "
-            "the action dictionary is unordered.",
-            "Shared continuations apply separately to each branch using that branch's state and audit history. "
-            "Keep states and verdicts separate after a fork.",
-        ]
-    trace.append("Shared actions:")
+    trace = ["Shared actions:"]
     definitions = {}
     for identifier, description in sorted(actions.items()):
         definitions.setdefault(description, []).append(f"A{identifier:02d}")
@@ -244,23 +228,10 @@ def build_group_judge_prompt(
     else:
         trace.append("Plan branches:")
         trace.append(render_plan_orders(factor_plan_orders(candidates)))
-    if comparison_question:
-        if presentation in {"linear", "plain", "named"}:
-            trace.append("Shared review question: " + comparison_question + " Apply the complete audit to every plan.")
-        else:
-            trace.append("Shared review question: " + comparison_question)
-            trace.append("Apply the full audit to every plan; sharing a question does not imply a shared verdict.")
-
-    template = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
-    audit, marker, _ = template.read_text(encoding="utf-8").rpartition("\n# Output\n")
-    if not marker:
-        raise ValueError("Judge template is missing its output section")
-    prompt = audit.format(instruction=instruction, kf_actions=format_kf_actions(kf_actions),
-                          evaluated_symbolic_trace="\n".join(trace))
-    prompt += ('\n# Output\nReturn exactly one JSON object: {"results":[{"candidate_id":"...","reasoning":"...",'
-               '"pass":true,"feedback":""}]}. '
-               'Return one independent result for each supplied candidate ID. '
-               'feedback must be empty if pass=true; otherwise identify the first invalid action or unmet requirement and its evidence.\n')
+    prompt = read_prompt("verify_soundness.txt").format(
+        instruction=instruction, kf_actions=format_kf_actions(kf_actions),
+        evaluated_symbolic_trace="\n".join(trace), comparison_question=comparison_question,
+    )
     if multiview:
         prompt = "All attached images show the same initial scene; preserve object identity across views.\n\n" + prompt
     return prompt
@@ -279,8 +250,7 @@ def validate_plan_feasibility(
 ):
     kf_actions = format_kf_actions(kf_actions)
     candidate_plan = candidate_plan.strip()
-    prompt_path = Path(__file__).parent.parent / "prompt_templates" / "pddl_judge.txt"
-    prompt = prompt_path.read_text(encoding="utf-8").format(
+    prompt = read_prompt("verify_feasibility.txt").format(
         instruction=instruction,
         kf_actions=kf_actions,
         evaluated_symbolic_trace=_evaluated_symbolic_trace(
@@ -294,7 +264,7 @@ def validate_plan_feasibility(
     return _call_validated_judge(model, prompt, first_img, capture)
 
 
-# One declared state policy for single- and dual-arm plans.
+# One declared state policy for single- and dual_arm plans.
 PROCESS_SCHEMA = {'version': 2,
  'location_relations': {'on': [1, 2], 'in': [1, 2], 'at': [1, 2]},
  'hierarchy_relations': {'part_of': [1, 2], 'drawer_of': [1, 2], 'lock_of': [1, 2]},
@@ -710,43 +680,26 @@ def group_plan_classes(model, representatives, observer, instruction, kf_actions
     return library, batches
 
 
-def validation_inputs(round_dir, model, first_img, instruction, kf_actions):
-    """Bind resumable verdicts to the actual round and review evidence."""
-    images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
-    template = Path(__file__).parent.parent / 'prompt_templates/pddl_judge.txt'
-    reference = Path(round_dir).parent / 'kf_actions.txt'
-    return {
-        'model': model, 'instruction': instruction, 'kf_actions': format_kf_actions(kf_actions),
-        'files': {n: (Path(round_dir) / n).read_text() for n in ('domain.pddl', 'problem.pddl', 'plan.txt')},
-        'images': [[str(Path(p).resolve()), Path(p).stat().st_size, Path(p).stat().st_mtime_ns] for p in images],
-        'audit_template': template.read_text(), 'state_policy': PROCESS_SCHEMA,
-        'reference_source': format_kf_actions(reference.read_text()) if reference.is_file() else None,
-    }
-
-
-def save_validation(round_dir, pfv, psv, inputs):
-    """One atomic round result; pass is the final PFV-and-PSV decision."""
-    passed, feedback = None, ''
-    reasoning = 'PFV has not completed.' if pfv is None else pfv['reasoning']
-    if pfv is not None and not pfv['pass']:
-        passed, feedback = False, pfv['feedback']
-    elif pfv is not None and psv is not None:
-        if psv['status'] == 'rejected':
-            passed = False
-            feedback = '[PSV] ' + psv['counterexample']['feedback']
-            reasoning += '\nPSV counterexample: ' + psv['counterexample']['reasoning']
-        elif psv['status'] == 'passed':
-            passed = True
-            reasoning += '\nPSV: complete operation-logic class coverage; no rejected representative.'
-        else:
-            reasoning += '\nPSV incomplete; resume this round to finish review.'
-    result = {'pass': passed, 'reasoning': reasoning, 'feedback': feedback,
-              'pfv': pfv, 'psv': psv, 'inputs': inputs}
+def save_validation(round_dir, pfv, psv):
+    """Persist only the PFV and PSV output verdicts; unfinished output is null."""
+    verdict = None
+    if psv is not None and psv['status'] == 'rejected':
+        verdict = {k: psv['counterexample'][k] for k in ('reasoning', 'pass', 'feedback')}
+    elif psv is not None and psv['status'] == 'passed':
+        verdict = {'reasoning': 'Complete operation-logic class coverage; no rejected representative.',
+                   'pass': True, 'feedback': ''}
+    result = {'pfv': pfv, 'psv': verdict}
     path = Path(round_dir) / 'judge.json'
     temporary = path.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     temporary.replace(path)
-    return result
+    passed, feedback = None, ''
+    if pfv is not None and not pfv['pass']:
+        passed, feedback = False, pfv['feedback']
+    elif pfv is not None and verdict is not None:
+        passed = verdict['pass']
+        feedback = '[PSV] ' + verdict['feedback'] if not passed else ''
+    return {**result, 'pass': passed, 'feedback': feedback}
 
 
 def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir):
@@ -758,17 +711,13 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
     kf_actions = format_kf_actions(kf_actions)
     directory = Path(round_dir)
     record = json.loads((directory / 'judge.json').read_text())
-    inputs = validation_inputs(directory, model, first_img, instruction, kf_actions)
-    if record['inputs'] != inputs or not record['pfv']['pass']:
-        raise ValueError('PSV requires a passed PFV for these exact inputs')
-    pfv, previous = record['pfv'], record['psv']
+    pfv = _validate_verdict(record['pfv'])
+    if not pfv['pass']:
+        raise ValueError('PSV requires a passed PFV')
     psv = {'status': 'incomplete', 'search_complete': False, 'reviews': [], 'requests': [],
            'instruction_verdict_inherited': False, 'scope': 'fixed_reference_action_multiset'}
-    if previous is not None:
-        psv['requests'] = previous['requests']
-
     def save():
-        save_validation(directory, pfv, psv, inputs)
+        save_validation(directory, pfv, psv)
 
     try:
         symbolic = ReorderModel(*(directory / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
@@ -781,13 +730,7 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
                    factorization=proof['factorization'])
         # The exact reference representative already has this round's PFV.
         pending = [c for c in representatives if c['id'] != 'reference']
-        by_id = {c['id']: c for c in pending}
         found = {}
-        if previous is not None:
-            for row in previous['reviews']:
-                if row['candidate_id'] in by_id and row['order'] == by_id[row['candidate_id']]['order']:
-                    verdict = _validate_verdict({k: row[k] for k in ('reasoning', 'pass', 'feedback')})
-                    found[row['candidate_id']] = {**row, **verdict}
         images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
         library, batches = group_plan_classes(symbolic, pending, observer, instruction, kf_actions,
                                              multiview=len(images) > 1)
@@ -812,12 +755,12 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
 
         def review(candidates, prompt):
             capture = {}
-            request = {'candidates': candidates, 'prompt': prompt, 'capture': capture, 'status': 'in_progress'}
+            request = {'candidates': candidates, 'status': 'in_progress'}
             psv['requests'].append(request)
             save()
             try:
                 response = call_gpt_json(model, prompt, images, response_format={'type': 'json_object'},
-                                         attempts=1, reasoning_effort='xhigh', max_tokens=16384,
+                                         attempts=1, reasoning_effort='xhigh',
                                          temperature=0, capture=capture)
                 request['response'] = response
                 if set(response) != {'results'} or not isinstance(response['results'], list):
@@ -848,6 +791,7 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
                 request['status'] = 'complete'
             except Exception as error:
                 request.update(status='request_error', error_type=type(error).__name__, error=str(error))
+            request['capture'] = {k: v for k, v in capture.items() if k not in {'raw_output', 'json_text'}}
             checkpoint()
 
         for batch in batches:

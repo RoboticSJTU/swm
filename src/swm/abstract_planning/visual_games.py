@@ -52,8 +52,8 @@ def make(game, candidate, spec, state, objects, static, goal, actions, rules, re
     section(domain, ":requirements")[:] = [":requirements", ":strips", *requirements]
     problem = parse_sexpr(make_problem(game, objects, initial, goal))
     problem[1][1] = f"{game}_{candidate:06d}"
-    task["domain"] = sharegpt.format_domain(domain, problem, [a[1] for a in actions], preserve_identity=True) + "\n"
-    task["problem"] = sharegpt.format_problem(problem, preserve_identity=True) + "\n"
+    task["domain"] = sharegpt.format_domain(domain, problem, [a[1] for a in actions]) + "\n"
+    task["problem"] = sharegpt.format_problem(problem) + "\n"
     from .instructions import operation_list
     task["instruction"] = rules + "\n" + operation_list(task["domain"])
     visual_rng = random.Random(3046101000 + GAMES.index(game) * 100000 + candidate)

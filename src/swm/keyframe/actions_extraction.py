@@ -1,12 +1,12 @@
-"""Extract grounded actions and states: ordered Generator groups, one Compiler."""
+"""Extract grounded actions: ordered Generator groups, one Compiler."""
 
 import json
 import re
 import time
 from collections import Counter
-from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock
 
 from PIL import Image, ImageDraw, ImageFont
@@ -47,20 +47,6 @@ def _normalize_action_text(value: str) -> str:
     return action if action.endswith(".") else action + "."
 
 
-def _normalize_state_text(value: str) -> str:
-    if not isinstance(value, str) or "|" in value:
-        raise OutputContractError("before and after must be strings without '|'")
-    return " ".join(value.split())
-
-
-def format_step(item: dict) -> str:
-    parts = [item["action"]]
-    for field in ("before", "after"):
-        if item[field]:
-            parts.append(f"{field.title()}: {item[field]}")
-    return " | ".join(parts)
-
-
 def normalize_group_result(data: dict, frame_count: int) -> dict:
     if not isinstance(data, dict) or set(data) != {"changes", "actions"}:
         raise OutputContractError("generator output must contain only changes and actions")
@@ -85,10 +71,10 @@ def normalize_group_result(data: dict, frame_count: int) -> dict:
     pair_positions = {pair: index for index, pair in enumerate(expected_pairs)}
     actions = []
     for index, item in enumerate(raw_actions, 1):
-        if (not isinstance(item, dict) or set(item) != {"action", "before", "after", "evidence"}
+        if (not isinstance(item, dict) or set(item) != {"action", "evidence"}
             or not isinstance(item["evidence"], list)):
             raise OutputContractError(
-                f"action {index} must contain only action, before, after, and evidence"
+                f"action {index} must contain only action and evidence"
             )
         evidence = [
             _normalize_pair(value, f"action {index} evidence")[0]
@@ -102,8 +88,6 @@ def normalize_group_result(data: dict, frame_count: int) -> dict:
         actions.append(
             {
                 "action": _normalize_action_text(item["action"]),
-                "before": _normalize_state_text(item["before"]),
-                "after": _normalize_state_text(item["after"]),
                 "evidence": evidence,
             }
         )
@@ -163,8 +147,8 @@ def normalize_compiler_result(data: dict, drafts: list[dict], segment_images: li
     actions = []
     uses = Counter()
     for index, item in enumerate(data["actions"], 1):
-        if not isinstance(item, dict) or set(item) != {"drafts", "reason", "group", "action", "before", "after"}:
-            raise OutputContractError(f"compiled action {index} needs drafts, reason, group, action, before and after")
+        if not isinstance(item, dict) or set(item) != {"drafts", "reason", "group", "action"}:
+            raise OutputContractError(f"compiled action {index} needs drafts, reason, group and action")
         sources = item["drafts"]
         if (not isinstance(sources, list)
                 or any(type(source) is not int or source not in originals for source in sources)
@@ -178,8 +162,6 @@ def normalize_compiler_result(data: dict, drafts: list[dict], segment_images: li
             "reason": item["reason"],
             "group": group,
             "action": _normalize_action_text(item["action"]),
-            "before": _normalize_state_text(item["before"]),
-            "after": _normalize_state_text(item["after"]),
         })
         uses.update(sources)
     missing = set(originals) - set(uses)
@@ -188,7 +170,7 @@ def normalize_compiler_result(data: dict, drafts: list[dict], segment_images: li
             f"unrepresented Drafts must be explicitly removed with evidence; "
             f"missing removal IDs={sorted(missing - removed_ids)}, still-used removal IDs={sorted(removed_ids - missing)}"
         )
-    fields = ("group", "action", "before", "after")
+    fields = ("group", "action")
     reordered = set()
     for position, left in enumerate(actions):
         for right in actions[position + 1:]:
@@ -206,12 +188,22 @@ def normalize_compiler_result(data: dict, drafts: list[dict], segment_images: li
     return {"removed": removed, "actions": actions}
 
 
-def _write_trace(path: Path, trace: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(trace, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+def _format_debug(result: dict, draft_start: int = 0) -> str:
+    lines = []
+    for section, items in result.items():
+        lines.append(f"[{section}]")
+        for index, item in enumerate(items, 1):
+            if section == "actions":
+                title = f"D{draft_start + index}" if "changes" in result else str(index)
+                lines.append(f"{title}. {item['action']}")
+            for key, value in item.items():
+                if key == "action":
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(map(str, value))
+                lines.append(f"    {key}: {value}")
+            lines.append("")
+    return "\n".join(lines)
 
 
 def _call_json(
@@ -220,87 +212,62 @@ def _call_json(
     images: list[Path],
     normalize,
     *,
-    trace_path: Path | None = None,
-    trace_images: list[Path] | None = None,
+    log_path: Path,
+    label: str,
+    draft_start: int = 0,
 ) -> dict:
     last_failure = ""
-    trace = {
-        "model": model,
-        "prompt": prompt,
-        "images": [str(path.resolve()) for path in (trace_images or images)],
-        "request_images": [str(path.resolve()) for path in images],
-        "retry_policy": "until_success",
-        "retry_backoff_max_seconds": RETRY_BACKOFF_MAX_SECONDS,
-        "input_order": "text_then_images",
-        "attempts": [],
-    }
-    trace["image_sizes"] = []
-    for path in images:
-        with Image.open(path) as image:
-            trace["image_sizes"].append(list(image.size))
     for attempt in count(1):
-        raw_output = None
-        parsed_output = None
         json_text = ""
-        api_capture = {"reasoning_effort": "medium", "temperature": 0}
+        api_capture = {}
         feedback = f"Attempt {attempt - 1} failed: {last_failure}" if last_failure else ""
         request_prompt = prompt + (
             f"\n\n{feedback}\nRegenerate ONE complete valid JSON object for the entire original scope. "
             "Include all required fields and exactly matching brackets/braces; do not append another root object."
             if feedback else ""
         )
-        record = {
-            "attempt": attempt, "retry_feedback": feedback, "request_prompt": request_prompt,
-            "status": "running", "started_at_utc": datetime.now(timezone.utc).isoformat(),
-            "raw_output": None, "parsed_output": None, "api": api_capture,
-        }
-        trace["attempts"].append(record)
-        if trace_path is not None:
-            _write_trace(trace_path, trace)
-        try:
-            raw_output = call_gpt(
-                model,
-                request_prompt,
-                images,
-                capture=api_capture,
-                reasoning_effort="medium",
-                temperature=0,
-            )
-            if api_capture.get("finish_reason") == "length":
-                raise OutputContractError(
-                    "Response hit the token limit before a complete JSON result. "
-                    "Keep the entire scope and all events; shorten evidence reasons and states."
+        with log_path.open("a", encoding="utf-8") as log:
+            print("======================== PAIR ========================",
+                  label, sep="\n", file=log, flush=True)
+            if attempt > 1:
+                print(f"[retry] {attempt - 1}", file=log, flush=True)
+            try:
+                raw_output = call_gpt(
+                    model,
+                    request_prompt,
+                    images,
+                    capture=api_capture,
+                    reasoning_effort="medium",
+                    temperature=0,
                 )
-            if not isinstance(raw_output, str):
-                raise OutputContractError("Response has no JSON text; return the complete required JSON object.")
-            if api_capture.get("finish_reason") not in (None, "stop"):
-                raise OutputContractError("Response did not finish normally; return the complete required JSON object.")
-            text = raw_output.strip()
-            match = JSON_FENCE_RE.fullmatch(text)
-            json_text = match.group(1).strip() if match else text
-            parsed_output = json.loads(json_text)
-            result = normalize(parsed_output)
-        except Exception as error:  # noqa: BLE001 - retry model and contract failures
-            if isinstance(error, json.JSONDecodeError):
-                context = json_text[max(0, error.pos - 80):error.pos + 80]
-                last_failure = f"{error}. JSON error context: {context!r}"
-            elif isinstance(error, OutputContractError):
-                last_failure = str(error)
+                if api_capture.get("finish_reason") == "length":
+                    raise OutputContractError(
+                        "Response hit the token limit before a complete JSON result. "
+                        "Keep the entire scope and all events; shorten evidence reasons."
+                    )
+                if not isinstance(raw_output, str):
+                    raise OutputContractError("Response has no JSON text; return the complete required JSON object.")
+                if api_capture.get("finish_reason") not in (None, "stop"):
+                    raise OutputContractError("Response did not finish normally; return the complete required JSON object.")
+                text = raw_output.strip()
+                match = JSON_FENCE_RE.fullmatch(text)
+                json_text = match.group(1).strip() if match else text
+                result = normalize(json.loads(json_text))
+            except Exception as error:  # noqa: BLE001 - retry model and contract failures
+                if isinstance(error, json.JSONDecodeError):
+                    context = json_text[max(0, error.pos - 80):error.pos + 80]
+                    last_failure = f"{error}. JSON error context: {context!r}"
+                elif isinstance(error, OutputContractError):
+                    last_failure = str(error)
+                else:
+                    last_failure = "The request/response did not complete successfully."
+                print(f"[error] attempt {attempt}: {error}", file=log, flush=True)
             else:
-                last_failure = "The request/response did not complete successfully."
-            record.update(status="error", raw_output=raw_output, parsed_output=parsed_output,
-                          error_type=type(error).__name__, error=str(error))
-            if trace_path is not None:
-                _write_trace(trace_path, trace)
-            delay = min(RETRY_BACKOFF_MAX_SECONDS, 2 ** min(attempt - 1, 5))
-            print(f"Request attempt {attempt} failed ({type(error).__name__}); retrying in {delay}s.", flush=True)
-            time.sleep(delay)
-            continue
-        record.update(status="ok", raw_output=raw_output, parsed_output=parsed_output,
-                      normalized_output=result)
-        if trace_path is not None:
-            _write_trace(trace_path, trace)
-        return result
+                print(_format_debug(result, draft_start), file=log, flush=True)
+                return result
+        delay = min(RETRY_BACKOFF_MAX_SECONDS, 2 ** min(attempt - 1, 5))
+        print(f"Request attempt {attempt} failed; retrying in {delay}s.", flush=True)
+        time.sleep(delay)
 
 
 def _frame_id(path: Path) -> str:
@@ -345,7 +312,6 @@ def _prepare_generator_images(images: list[Path], directory: Path, prefix: str) 
     timeline = Image.new("RGB", (columns * width, rows * (height + header)), (24, 24, 24))
     draw = ImageDraw.Draw(timeline)
     font = ImageFont.truetype("DejaVuSans.ttf", cell_long_side // 20)
-    cells = []
     for index, source in enumerate(images):
         row, column = divmod(index, columns)
         x, y = column * width, row * (height + header)
@@ -355,17 +321,8 @@ def _prepare_generator_images(images: list[Path], directory: Path, prefix: str) 
             image.thumbnail((width, height), Image.Resampling.LANCZOS)
             timeline.paste(image, (x + (width - image.width) // 2,
                                    y + header + (height - image.height) // 2))
-        cells.append({"label": f"K{index}", "frame": int(source.stem),
-                      "source": str(source.resolve()), "source_size": list(shapes[index]),
-                      "individual_image": str(prepared[index].resolve()), "row": row, "column": column})
     overview = directory / f"{prefix}_timeline.jpg"
     timeline.save(overview, "JPEG", quality=90, optimize=True)
-    (directory / f"{prefix}_layout.json").write_text(json.dumps({
-        "mode": "group_comparison", "orientation": "portrait" if portrait else "landscape",
-        "rows": rows, "columns": columns, "scene_cell_size": [width, height], "scene_long_side": cell_long_side,
-        "header_height": header, "font_size": font.size, "image_size": list(timeline.size),
-        "blank_cells": rows * columns - len(images), "spatial_crops": False, "cells": cells,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return [overview, *prepared]
 
 
@@ -439,7 +396,7 @@ def _prepare_compiler_images(groups, directory):
         width, height = height, width
     font = ImageFont.truetype("DejaVuSans.ttf", cell_width // 20)
     lookup = {frame["frame"]: frame for frame in plan["all_frames"]}
-    prepared, pages = [], []
+    prepared = []
     layout = [
         "Each image is a 3x3 timeline; read left to right, then top to bottom. "
         "G# identifies a group, img_N a moment, and * repeated context. "
@@ -448,9 +405,8 @@ def _prepare_compiler_images(groups, directory):
     for page in plan["pages"]:
         canvas = Image.new("RGB", (3 * width, 3 * (height + header)), (24, 24, 24))
         draw = ImageDraw.Draw(canvas)
-        cells, descriptions = [], []
+        descriptions = []
         for row, entry in enumerate(page["rows"]):
-            is_bridge = len(plan["groups"][entry["group"]]["original_frames"]) == 5 and entry["part"] == 2
             for column, frame_id in enumerate(entry["frames"]):
                 frame = lookup[frame_id]
                 group_label = f"G{entry['group']}" + ("*" if entry["context"] else "")
@@ -463,27 +419,14 @@ def _prepare_compiler_images(groups, directory):
                     image.thumbnail((width, height), Image.Resampling.LANCZOS)
                     canvas.paste(image, (x + (width - image.width) // 2,
                                          y + header + (height - image.height) // 2))
-                cells.append({**frame, "group": entry["group"], "part": entry["part"],
-                              "context": entry["context"], "bridge_repeat": is_bridge and column == 0,
-                              "row": row, "column": column, "label": label})
             descriptions.append(f"row {row + 1} {group_label} "
                                 + "[" + ",".join(f"img_{n}" for n in entry["frames"]) + "]")
         target = directory / f"grouped_{page['page']:02d}.jpg"
         canvas.save(target, "JPEG", quality=90, optimize=True)
         prepared.append(target)
-        pages.append({**page, "cells": cells})
         layout.append(f"Image {page['page']}: " + "; ".join(descriptions) + ".")
     layout.append(f"Episode final frame: img_{plan['all_frames'][-1]['frame']}.")
-    provenance = {"mode": "grouped_3x3", "scene_cell_size": [width, height],
-                  "orientation": orientation, "source_orientation_counts": orientation_counts,
-                  "header_height": header, "image_size": [3 * width, 3 * (height + header)],
-                  "label_style": "row_group_frame", "frame_label_prefix": "img_", "label_scale": 2, "font_size": font.size,
-                  "grid_only": True, "spatial_crops": False, "frames": plan["frames"],
-                  "all_frames": plan["all_frames"], "groups": plan["groups"], "pages": pages,
-                  "group_frames": [[str(p.resolve()) for p in group] for group in groups]}
-    (directory / "source_mapping.json").write_text(
-        json.dumps(provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return [Path(frame["source"]) for frame in plan["frames"]], prepared, "\n".join(layout)
+    return prepared, "\n".join(layout)
 
 
 def extract_keyframe_actions(
@@ -491,7 +434,6 @@ def extract_keyframe_actions(
     keyframe_dir: Path,
     instruction: str,
     save_dir: Path,
-    trace_dir: Path | None = None,
 ) -> tuple[Path, list[str]]:
     groups = [sorted(segment.glob("*.png"), key=lambda p: int(p.stem))
               for segment in sorted(keyframe_dir.glob("seg_*"))]
@@ -501,29 +443,58 @@ def extract_keyframe_actions(
     if any(len(images) not in {3, 4, 5, 6} for images in groups):
         raise ValueError("Action extraction needs 3..6 chronological keyframes per group")
     save_dir.mkdir(parents=True, exist_ok=True)
-    trace_dir = trace_dir if trace_dir is not None else save_dir / "action_traces"
-    trace_dir.mkdir(parents=True, exist_ok=True)
+    log_path = save_dir / "pair_debug.log"
     actions_path = save_dir / "kf_actions.txt"
     actions_path.unlink(missing_ok=True)
     prompt_dir = Path(__file__).parents[1] / "prompt_templates"
     common = (prompt_dir / "kf_actions_common.txt").read_text(encoding="utf-8").strip()
     generator = (prompt_dir / "kf_actions_generator.txt").read_text(encoding="utf-8")
     compiler = (prompt_dir / "kf_actions_compiler.txt").read_text(encoding="utf-8")
+    checkpoint_path = save_dir / "actions_checkpoint.json"
+    checkpoint_tmp = checkpoint_path.with_suffix(".tmp")
+    inputs = {"model": model_name, "instruction": instruction, "prompt": common + "\n" + generator,
+              "frames": [[[str(image.resolve()), image.stat().st_mtime_ns] for image in images]
+                         for images in groups]}
+    completed = []
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint["inputs"] == inputs and len(checkpoint["groups"]) <= len(groups):
+            completed = [normalize_group_result(result, len(groups[index]))
+                         for index, result in enumerate(checkpoint["groups"])]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if not completed:
+        log_path.write_text("", encoding="utf-8")
+        checkpoint_path.unlink(missing_ok=True)
+    else:
+        print(f"Resuming action extraction: {len(completed)}/{len(groups)} groups complete.", flush=True)
     previous, ledger, drafts = [], [], []
     for group, images in enumerate(groups):
-        with _IMAGE_LOCK:
-            attachments = _prepare_generator_images(images, save_dir / "generator_images", f"group{group}")
         frame_ids = [_frame_id(path) for path in images]
         frame_order = (
             "The first image compares this group; following images show the same frames individually. "
             "Read increasing K labels. Repeated views are the same moments. "
             + ", ".join(f"K{i}={frame}" for i, frame in enumerate(frame_ids)) + "."
         )
-        result = _call_json(model_name, generator.format(
-            shared_rules=common, instruction=instruction, group=group, last_group=len(groups)-1,
-            frame_order=frame_order, previous_actions="\n".join(previous) or "(none)"),
-            attachments, lambda value, count=len(images): normalize_group_result(value, count),
-            trace_path=trace_dir / f"generator_g{group:02d}_retry00.json", trace_images=images)
+        if group < len(completed):
+            result = completed[group]
+        else:
+            with TemporaryDirectory() as directory:
+                with _IMAGE_LOCK:
+                    attachments = _prepare_generator_images(images, Path(directory), f"group{group}")
+                result = _call_json(model_name, generator.format(
+                    shared_rules=common, instruction=instruction, group=group, last_group=len(groups)-1,
+                    frame_order=frame_order, previous_actions="\n".join(previous) or "(none)"),
+                    attachments, lambda value, count=len(images): normalize_group_result(value, count),
+                    log_path=log_path, draft_start=len(drafts),
+                    label=(f"[G{group}]: {images[0].name}->{images[-1].name}\n[frames] "
+                           + ", ".join(f"K{i}={image.name}" for i, image in enumerate(images))))
+            completed.append(result)
+            checkpoint_tmp.write_text(
+                json.dumps({"inputs": inputs, "groups": completed}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            checkpoint_tmp.replace(checkpoint_path)
         ledger.extend((f"[G{group}]", "Observations:"))
         ledger.extend(f"- G{group} {_frame_span(item['pair'], frame_ids)}: {item['change']}"
                       for item in result["changes"])
@@ -533,20 +504,21 @@ def extract_keyframe_actions(
         for item in result["actions"]:
             previous.append(f"[G{group}] {item['action']}")
             evidence = [f"G{group} {_frame_span(pair, frame_ids)}" for pair in item["evidence"]]
-            drafts.append(dict(id=len(drafts)+1, group=group,
-                               **{k: item[k] for k in ("action", "before", "after")}))
-            ledger.append(f"- D{len(drafts)} | {', '.join(evidence)}: {format_step(item)}")
+            drafts.append(dict(id=len(drafts)+1, group=group, action=item["action"]))
+            ledger.append(f"- D{len(drafts)} | {', '.join(evidence)}: {item['action']}")
         ledger.append("")
-        (trace_dir / "evidence_ledger.txt").write_text("\n".join(ledger).rstrip()+"\n", encoding="utf-8")
-    with _IMAGE_LOCK:
-        originals, attachments, frame_order = _prepare_compiler_images(groups, save_dir / "compiler_images")
-    (save_dir / "compiler_images/layout.txt").write_text(frame_order+"\n", encoding="utf-8")
-    compiled = _call_json(model_name, compiler.format(
-        shared_rules=common, instruction=instruction, evidence_ledger="\n".join(ledger).rstrip(),
-        example_span=f"G0 {_frame_id(groups[0][0])}->{_frame_id(groups[0][-1])}", frame_order=frame_order),
-        attachments, lambda value: normalize_compiler_result(value, drafts, groups),
-        trace_path=trace_dir / "compiler.json", trace_images=originals)
-    _write_trace(trace_dir / "compiled.json", compiled)
-    steps = [format_step(item) for item in compiled["actions"]]
-    actions_path.write_text("".join(f"[G{a['group']}] {step}\n" for a, step in zip(compiled["actions"], steps)), encoding="utf-8")
+    with TemporaryDirectory() as directory:
+        with _IMAGE_LOCK:
+            attachments, frame_order = _prepare_compiler_images(groups, Path(directory))
+        compiled = _call_json(model_name, compiler.format(
+            shared_rules=common, instruction=instruction, evidence_ledger="\n".join(ledger).rstrip(),
+            example_span=f"G0 {_frame_id(groups[0][0])}->{_frame_id(groups[0][-1])}", frame_order=frame_order),
+            attachments, lambda value: normalize_compiler_result(value, drafts, groups),
+            log_path=log_path, label="[COMPILER]")
+    steps = [item["action"] for item in compiled["actions"]]
+    actions_tmp = actions_path.with_suffix(".tmp")
+    actions_tmp.write_text("".join(f"[G{a['group']}] {step}\n" for a, step in zip(compiled["actions"], steps)), encoding="utf-8")
+    actions_tmp.replace(actions_path)
+    checkpoint_path.unlink(missing_ok=True)
+    checkpoint_tmp.unlink(missing_ok=True)
     return groups[0][0], steps

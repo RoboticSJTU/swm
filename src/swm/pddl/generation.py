@@ -6,7 +6,7 @@ from pathlib import Path
 from swm.llm import call_gpt_json
 from swm.pddl.generation_contract import validate_generated_pddl, validate_generated_plan
 from swm.pddl.planner import solve_pddl, summarize_solver_error
-from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
+from swm.pddl.strips import format_pddl, validate_untyped_pddl
 from swm.prompts import construct_prompt_with_feedback
 
 
@@ -50,7 +50,8 @@ def generate_pddl(
     save_dir: Path,
     attempt: int,
     retry_state: RetryState,
-    robot_configuration: str = "dual-arm",
+    robot_configuration: str = "dual_arm",
+    action_template: str = "",
 ):
     round_dir = save_dir / f"round{attempt}"
     round_dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,7 @@ def generate_pddl(
         failed_domain=retry_state.prev_domain,
         failed_problem=retry_state.prev_problem,
         failed_plan=retry_state.prev_plan,
+        action_template=action_template,
         robot_configuration=robot_configuration,
     )
 
@@ -96,7 +98,8 @@ def generate_pddl(
             raise ValueError("expected non-empty string field(s): " + ", ".join(invalid))
         validate_untyped_pddl(domain_str)
         validate_untyped_pddl(problem_str)
-        domain_str = format_action_conditions(domain_str)
+        domain_str = format_pddl(domain_str)
+        problem_str = format_pddl(problem_str)
         domain_path.write_text(domain_str, encoding="utf-8")
         problem_path.write_text(problem_str, encoding="utf-8")
         schemas, problem = validate_generated_pddl(domain_path, problem_path)

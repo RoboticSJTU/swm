@@ -1,98 +1,100 @@
-Use only needed entries with these meanings and argument roles; this is a vocabulary, not a domain to copy. Other object categories use static unary predicates. Extensions must express a necessary distinction rather than rename an existing one. Argument variable names denote roles, not entity categories.
+Use only needed entries with these meanings and argument roles; this is a vocabulary, not a domain to copy. Other object categories use static unary predicates named by functional category, omitting color and other attributes irrelevant to operation logic (e.g., (cup ?c), not (white_cup ?cup)). Extensions must express a necessary distinction rather than rename an existing one. Prefer initials for parameter names, e.g., (cup ?c), (grip_free ?gf); add suffixes as needed to keep names unique in each operator's parameter list.
 
 (:predicates
   ; Static: categories and fixed structural/supply/control relations never change.
-  (hand ?hand)
+  (hand ?h)
   ; part_of and controls are optional; include only when required for correct participant bindings or necessary causal dependencies.
   ; A separately relevant component is the direct on/in participant; part_of binds that component to its functional whole.
-  (part_of ?part ?whole)
+  (part_of ?p ?w)
   ; Supply capability; a discrete portion's source availability is separate.
-  (dispenses ?source ?material)
-  (controls ?control ?device)
+  (dispenses ?s ?m)
+  (controls ?c ?d)
 
   ; Hand resource: acquisition consumes hand_free; release restores it.
-  (hand_free ?hand)
-  (holding ?hand ?object)
+  (hand_free ?hf)
+  (holding ?h ?o)
   ; Sustained button control occupies the hand until release, when needed.
-  (pressing ?hand ?button)
+  (pressing ?h ?b)
   ; Optional one-payload grip whose load requires active control.
   ; Acquiring a payload replaces grip_free with gripping; release reverses it.
   ; The hand keeps holding the tool; put it down only with a free grip.
-  (grip_free ?tool)
-  (gripping ?tool ?object)
+  (grip_free ?gf)
+  (gripping ?t ?o)
 
   ; Direct relations: on = direct external support; in = direct containment, including actual nesting.
   ; Support, containment and closure are distinct.
   ; Remove superseded relations when transferring or detaching their subject.
-  (on ?object ?support)
-  (in ?content ?container)
-  (inserted ?object ?socket)
-  (at ?object ?region) ; Only for a relevant region, not instead of on/in.
-  (under ?object ?reference)
-  ; Keep execution-relevant alignment and instruction-required fine layout.
+  (on ?o ?s)
+  (in ?c1 ?c2)
+  (inserted ?o ?s)
+  (at ?o ?r) ; Only for a relevant region, not instead of on/in.
+  (under ?o ?r)
+  ; Keep task-required or execution-relevant alignment and relative positions.
   ; These supplement direct on/in relations.
   ; Invalidate them when movement makes them false; preserve unchanged internal relations of an intact assembly.
-  (aligned ?object ?reference)
-  (beside ?object ?reference)
-  (centered ?object ?reference)
+  (aligned ?o ?r)
+  (beside ?o ?r)
+  (left_of ?o ?r)
+  (right_of ?o ?r)
+  (centered ?o ?r)
 
   ; Dynamic state pairs: require and delete the old state when changing it.
-  (open ?unit)
-  (closed ?unit)
-  (is_on ?device)
-  (is_off ?device)
-  (locked ?unit)
-  (unlocked ?unit)
-  (pressed ?control)
-  (unpressed ?control)
-  (folded ?object)
-  (unfolded ?object)
+  (open ?o)
+  (closed ?c)
+  (is_on ?io)
+  (is_off ?io)
+  (locked ?l)
+  (unlocked ?u)
+  (pressed ?p)
+  (unpressed ?u)
+  (folded ?f)
+  (unfolded ?u)
 
-  ; No modeled object is directly on this object, and no hand is holding it.
-  ; Adding a direct on-load or acquiring the object invalidates clear.
-  ; Restore clear only when no direct load remains and no hand still holds the object.
-  ; Handoffs and releasing loaded objects do not restore clear.
-  ; Changes to in alone do not change clear.
-  ; False clear does not by itself imply a direct load.
-  (clear ?object)
+  ; Use clear only for objects whose task-defined stack manipulation requires removing all direct upper loads before taking the object alone or stacking directly onto it.
+  ; clear(x) means x has no direct upper load and is not directly held by any hand. Upper loads include actual nested stack members represented by in; ordinary container contents do not count as upper loads.
+  ; Require clear(x) for strict single-item pickup of x or stacking onto x. Operations that permit retained loads use their own preconditions.
+  ; Once clear is tracked for an object, maintain it across all relevant actions: delete it on pickup or addition of an upper load; restore it after release or removal of the last upper load only when the object is unheld and has no remaining upper load. Keep it false through handoffs.
+  ; Releasing a tracked object onto an ordinary support maintains the object's own clear; the support needs clear only if its own manipulation has the stack constraint above.
+  (clear ?c)
   ; No object occludes the container opening.
   ; Use only for necessary aperture obstruction beyond open/closed; ordinary contents need not cover the opening.
+  ; Keep uncovered separately only when opening access is needed independently of stack access; a held container can have an accessible opening while clear is false.
   ; Restore only after the last actual covering object has been removed.
-  (uncovered ?container)
+  (uncovered ?u)
   ; empty = no direct in contents of any modeled kind.
   ; Adding any content invalidates empty; restore it only after the last leaves.
   ; filled = required fill level reached, not merely nonempty.
-  (empty ?container)
-  (filled ?container)
+  (empty ?e)
+  (filled ?f)
   ; Directional motion-path clearance, distinct from empty and clear.
   ; Establish the affected direction only after all its blockers are removed; invalidate it if blocking is restored.
   ; Neither direction implies the other.
-  (opening_clear ?unit)
-  (closing_clear ?unit)
-  (blocks_opening ?blocker ?unit)
-  (blocks_closing ?blocker ?unit)
+  (opening_clear ?oc)
+  (closing_clear ?cc)
+  (blocks_opening ?b ?u)
+  (blocks_closing ?b ?u)
 
   ; Optional physical pose: upright/upside_down and flat/vertical are pairs within their respective dimensions.
-  ; Keep only poses that causally constrain task execution or a required result, and include them in action names at the corresponding object's role.
-  (upright ?object)
-  (upside_down ?object)
-  (flat ?object)
-  (vertical ?object)
+  ; Keep a pose only when a task-required operator needs it as a precondition; otherwise omit it from the domain, init, effects, goals, and action names.
+  (upright ?u)
+  (upside_down ?ud)
+  (flat ?f)
+  (vertical ?v)
 
   ; Optional results: establish on actual completion; invalidate if undone.
   ; Heating differs from boiling; rinsing, wiping, and cleanliness differ.
   ; A completed manipulation or waiting event establishes its supported result; no separate waiting or done predicate.
-  (heated ?object)
+  (heated ?h)
   ; Boiling result of this discrete material portion, preserved by transfer.
   ; Fresh portions have separate identities and do not inherit this result.
-  (boiled ?material)
-  (rinsed ?object)
-  (wiped ?surface)
-  (clean ?object)
-  (wet ?object)
-  (stirred ?material)
+  (boiled ?b)
+  (rinsed ?r)
+  (wiped ?w)
+  (clean ?c)
+  (wet ?w)
+  (stirred ?s)
   ; Temperature of contained water, distinct from the container's temperature and from filled's level threshold.
   ; Mixing to warm replaces the hot result.
-  (contains_hot_water ?container)
-  (contains_warm_water ?container)
+  (contains_hot_water ?chw)
+  (contains_warm_water ?cww)
 )

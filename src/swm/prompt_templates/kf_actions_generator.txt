@@ -9,7 +9,7 @@ Prior event proposals (names only, fallible context):
 
 Use the comparison grid to compare relations and the individual images to resolve identity and detail. K labels, not the number of image attachments, define the moments. Return one change for EVERY adjacent K0->K1, K1->K2, etc., exactly once in order. Describe the observed start -> end relations before naming an action, including distinct effects within the same pair; use unchanged neighbors to separate object motion from occlusion or camera motion. Do not import an expected starting state from earlier action names. Put unfinished progress in changes and supported completed results in actions, ordered by their first cited pair. Use actions: [] when no result completes. Cite actual adjacent pairs in each action's non-empty evidence list.
 
-Return ONE complete JSON object, no Markdown or extra text. Use exactly the illustrated keys; replace example facts with observed names/events. Action/state strings contain no frame references or |.
+Return ONE complete JSON object, no Markdown or extra text. Use exactly the illustrated keys; replace example facts with observed names/events. Action strings contain no frame references or |.
 {{
   "changes": [
     {{
@@ -20,8 +20,6 @@ Return ONE complete JSON object, no Markdown or extra text. Use exactly the illu
   "actions": [
     {{
       "action": "Pick up the object.",
-      "before": "The object rests on its support.",
-      "after": "The hand holds the object clear of its support.",
       "evidence": [
         "K0->K1"
       ]

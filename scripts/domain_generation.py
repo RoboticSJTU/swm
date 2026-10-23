@@ -12,25 +12,25 @@ from swm.pddl.validate import (
     save_validation,
     validate_plan_feasibility,
     validate_plan_soundness,
-    validation_inputs,
     format_kf_actions,
 )
 from swm.pddl.reorder import ReorderModel
-from swm.pddl.strips import (
-    format_action_conditions,
-    validate_untyped_pddl,
-)
+from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 from swm.prompts import construct_instruction_with_steps
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-STEP_SOURCE = "video"  # "video" or "steps_json"
-TASK_DOMAIN = "droid"
+STEP_SOURCE = "steps_json"  # "video" or "steps_json"
+TASK_DOMAIN = "human_aug"
 
-PDDL_MODEL = "gpt-5.6-sol"
-ACTION_EXTRACTION_MODEL = "Qwen3.8-27B"
-JUDGE_MODEL = "gemini-3.8-flash"
+# 写死了save_dir = "gpt-5.6-sol"
+PDDL_MODEL = "deepseek/deepseek-flash"
+ACTION_EXTRACTION_MODEL = PDDL_MODEL
+JUDGE_MODEL = PDDL_MODEL
 
 ROBOT_CONFIGURATION = "single_arm"  # "single_arm" or "dual_arm"
+ACTION_TEMPLATE_MODE = "retrieved"  # None: 不传；"fixed": 固定模板；"retrieved": 参考 domain 的 action 片段
+ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
+ACTION_TEMPLATE_DOMAIN = "human"
 
 
 MAX_PLAN_ATTEMPTS = 3
@@ -74,7 +74,7 @@ def load_tasks() -> list[dict]:
                 "task_id": task_id,
                 "episode_id": episode_id,
                 "instruction": str(instruction).strip(),
-                "save_dir": ROOT_DIR / "eval_results" / PDDL_MODEL / TASK_DOMAIN / task_id / episode_id,
+                "save_dir": ROOT_DIR / "eval_results" / "gpt-5.6-sol" / TASK_DOMAIN / task_id / episode_id,
             }
 
             if STEP_SOURCE == "video":
@@ -171,38 +171,11 @@ def prepare_temporal_gradient_keyframes(task: dict) -> dict:
 
 def _round_has_verified_plan(round_dir: Path) -> bool:
     judge_path = round_dir / "judge.json"
-    domain_path = round_dir / "domain.pddl"
-    problem_path = round_dir / "problem.pddl"
-    plan_path = round_dir / "plan.txt"
-    if not all(path.is_file() for path in (judge_path, domain_path, problem_path, plan_path)):
-        return False
-
     try:
         judge = json.loads(judge_path.read_text(encoding="utf-8"))
-        if not isinstance(judge, dict):
-            return False
-        psv = judge.get('psv')
-        if (judge.get('pass') is not True or not psv or psv['status'] != 'passed'
-                or not psv['search_complete'] or psv['unresolved_representatives'] != 0
-                or judge['pfv']['pass'] is not True
-                or len(psv['reviews']) + 1 != psv['classes']):
-            return False
-        domain_text = domain_path.read_text(encoding="utf-8")
-        validate_untyped_pddl(domain_text)
-        validate_untyped_pddl(problem_path.read_text(encoding="utf-8"))
-        if format_action_conditions(domain_text) != domain_text:
-            return False
-        inputs = judge['inputs']
-        if inputs != validation_inputs(round_dir, JUDGE_MODEL, [Path(row[0]) for row in inputs['images']],
-                                       inputs['instruction'], inputs['kf_actions']):
-            return False
-        if not all(_validate_verdict({k: row[k] for k in ('pass', 'reasoning', 'feedback')})['pass']
-                   for row in psv['reviews']):
-            return False
-        ReorderModel(domain_path, problem_path, plan_path)
-    except (OSError, ValueError, KeyError, TypeError, NotImplementedError):
+        return judge['pfv']['pass'] is True and judge['psv']['pass'] is True
+    except (OSError, ValueError, KeyError, TypeError):
         return False
-    return True
 
 
 def _latest_verified_round(task: dict) -> Path | None:
@@ -210,19 +183,82 @@ def _latest_verified_round(task: dict) -> Path | None:
     for round_dir in task['save_dir'].glob("round*"):
         suffix = round_dir.name.removeprefix("round")
         if suffix.isdigit() and _round_has_verified_plan(round_dir):
-            inputs = json.loads((round_dir / 'judge.json').read_text())['inputs']
-            if inputs['instruction'] != task['instruction']:
-                continue
-            if STEP_SOURCE == 'steps_json' and inputs['kf_actions'] != format_kf_actions('\n'.join(task['steps'])):
-                continue
             rounds.append((int(suffix), round_dir))
     return max(rounds, default=(0, None), key=lambda item: item[0])[1]
 
 
-def run_task(task: dict) -> tuple[bool, bool]:
+def _extract_action_template(domain_path: Path) -> str:
+    domain_text = domain_path.read_text(encoding="utf-8")
+    validate_untyped_pddl(domain_text)
+    lines = format_action_conditions(domain_text).splitlines()
+    blocks = []
+    for start, line in enumerate(lines):
+        if "(:action" not in line:
+            continue
+        depth = 0
+        for end in range(start, len(lines)):
+            depth += lines[end].count("(") - lines[end].count(")")
+            if depth == 0:
+                blocks.append("\n".join(lines[start : end + 1]).strip())
+                break
+    return "\n\n".join(block for block in blocks if block)
+
+
+def find_task_action_template(task_id: str) -> str:
+    task_dir = ROOT_DIR / "eval_results" / ACTION_TEMPLATE_MODEL / ACTION_TEMPLATE_DOMAIN / task_id
+    episode_dirs = sorted(
+        (path for path in task_dir.glob("episode_*") if path.is_dir()),
+        key=lambda path: int(path.name.rsplit("_", 1)[1]),
+    )
+    if not episode_dirs:
+        return ""
+
+    passed_rounds = []
+    for round_dir in episode_dirs[0].glob("round*"):
+        suffix = round_dir.name.removeprefix("round")
+        domain_path = round_dir / "domain.pddl"
+        judge_path = round_dir / "judge.json"
+        if not suffix.isdigit() or not domain_path.is_file() or not judge_path.is_file():
+            continue
+        try:
+            judge = json.loads(judge_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        pfv = judge.get("pfv")
+        psv = judge.get("psv")
+        passed = judge.get("pass") is True or (
+            isinstance(pfv, dict)
+            and isinstance(psv, dict)
+            and pfv.get("pass") is True
+            and psv.get("pass") is True
+        )
+        if passed:
+            passed_rounds.append((int(suffix), domain_path))
+
+    if not passed_rounds:
+        return ""
+    return _extract_action_template(max(passed_rounds, key=lambda item: item[0])[1])
+
+
+def _action_template_for_task(task: dict) -> str:
+    if ACTION_TEMPLATE_MODE is None:
+        return ""
+    if ACTION_TEMPLATE_MODE == "fixed":
+        path = ROOT_DIR / "src" / "swm" / "prompt_templates" / "ACTION_TEMPLATE.txt"
+        return path.read_text(encoding="utf-8")
+    if ACTION_TEMPLATE_MODE == "retrieved":
+        return find_task_action_template(task["task_id"])
+    raise ValueError(
+        'ACTION_TEMPLATE_MODE must be None, "fixed", or "retrieved"'
+    )
+
+
+def run_task(task: dict, action_template: str | None = None) -> tuple[bool, bool]:
     save_dir = task["save_dir"]
     save_dir.mkdir(parents=True, exist_ok=True)
     kf_actions_path = save_dir / "kf_actions.txt"
+    if action_template is None:
+        action_template = _action_template_for_task(task)
 
     if STEP_SOURCE == "video":
         cached_actions = (
@@ -277,7 +313,7 @@ def run_task(task: dict) -> tuple[bool, bool]:
             except (ValueError, NotImplementedError):
                 continue
         else:
-            round_result = generate_pddl(
+            generate_kwargs = dict(
                 generate_pddl_model_name=PDDL_MODEL,
                 task_img=task_img,
                 instruction_with_steps=instruction_with_steps,
@@ -286,6 +322,9 @@ def run_task(task: dict) -> tuple[bool, bool]:
                 retry_state=retry_state,
                 robot_configuration=ROBOT_CONFIGURATION,
             )
+            if action_template:
+                generate_kwargs["action_template"] = action_template
+            round_result = generate_pddl(**generate_kwargs)
             attempts += 1
             next_round += 1
 
@@ -301,7 +340,6 @@ def run_task(task: dict) -> tuple[bool, bool]:
         planning_success = True
         retry_state.solver_feedback = ""
         directory = round_result['round_dir']
-        inputs = validation_inputs(directory, JUDGE_MODEL, task_img, task['instruction'], numbered_steps)
         saved = {}
         if (directory / 'judge.json').is_file():
             try:
@@ -310,17 +348,15 @@ def run_task(task: dict) -> tuple[bool, bool]:
                     saved = {}
             except json.JSONDecodeError:
                 pass
-        pfv, previous_psv = None, None
-        if saved and ('inputs' not in saved or saved['inputs'] == inputs):
+        pfv = None
+        if saved:
             try:
-                pfv = _validate_verdict(saved['pfv'] if 'pfv' in saved else
-                                        {k: saved[k] for k in ('pass', 'reasoning', 'feedback')})
-                previous_psv = saved.get('psv')
+                pfv = _validate_verdict(saved['pfv'])
             except (ValueError, KeyError):
                 pass
         try:
             if pfv is None:
-                save_validation(directory, None, None, inputs)
+                save_validation(directory, None, None)
                 pfv = validate_plan_feasibility(
                     model=JUDGE_MODEL,
                     first_img=task_img,
@@ -338,15 +374,15 @@ def run_task(task: dict) -> tuple[bool, bool]:
             (round_result["round_dir"] / "error.log").write_text(str(error), encoding="utf-8")
             continue
         except (RuntimeError, ValueError) as error:
-            save_validation(directory, None, None, inputs)
+            save_validation(directory, None, None)
             (directory / 'error.log').write_text(str(error), encoding='utf-8')
             return planning_success, False
 
-        result = save_validation(directory, pfv, previous_psv, inputs)
+        result = save_validation(directory, pfv, None)
         psv = None
         if pfv['pass']:
             psv = validate_plan_soundness(JUDGE_MODEL, task_img, task['instruction'], numbered_steps, directory)
-            result = save_validation(directory, pfv, psv, inputs)
+            result = save_validation(directory, pfv, psv)
 
         if result['pass'] is True:
             return True, True
@@ -371,6 +407,25 @@ def main() -> None:
     ]
     tasks = [task for task, round_dir in verified if round_dir is None]
     already_passed = total_loaded - len(tasks)
+
+    if ACTION_TEMPLATE_MODE is None:
+        action_templates = {}
+    elif ACTION_TEMPLATE_MODE == "fixed":
+        fixed_path = ROOT_DIR / "src" / "swm" / "prompt_templates" / "ACTION_TEMPLATE.txt"
+        fixed_template = fixed_path.read_text(encoding="utf-8")
+        action_templates = {task["task_id"]: fixed_template for task in tasks}
+    elif ACTION_TEMPLATE_MODE == "retrieved":
+        action_templates = {
+            task["task_id"]: find_task_action_template(task["task_id"])
+            for task in tasks
+        }
+        missing = sorted(task_id for task_id, template in action_templates.items() if not template)
+        if missing:
+            raise RuntimeError(f"Missing retrieved action templates: {', '.join(missing)}")
+    else:
+        raise ValueError(
+            'ACTION_TEMPLATE_MODE must be None, "fixed", or "retrieved"'
+        )
 
     if STEP_SOURCE == "video":
         ready_tasks = []
@@ -397,10 +452,13 @@ def main() -> None:
     passed = 0
     planning_succeeded = 0
     with ThreadPoolExecutor(max_workers=TASK_WORKERS) as executor:
-        futures = {
-            executor.submit(run_task, task): task
-            for task in tasks
-        }
+        if ACTION_TEMPLATE_MODE is None:
+            futures = {executor.submit(run_task, task): task for task in tasks}
+        else:
+            futures = {
+                executor.submit(run_task, task, action_templates[task["task_id"]]): task
+                for task in tasks
+            }
         for index, future in enumerate(as_completed(futures), 1):
             task = futures[future]
             tag = f"{TASK_DOMAIN}/{task['task_id']}/{task['episode_id']}"

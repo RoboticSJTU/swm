@@ -411,7 +411,7 @@ def prepare_round(item):
         if source_domain != domain_raw:
             atomic_write(source_paths[0], source_domain)
 
-        if ROBOT_CONFIGURATION == "single-arm" and len(hand_states) > 1:
+        if ROBOT_CONFIGURATION == "single_arm" and len(hand_states) > 1:
             message = (
                 f"{source_paths[1].relative_to(ROOT_DIR)}: "
                 + " | ".join(hand_states)

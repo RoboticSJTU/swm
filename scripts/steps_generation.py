@@ -62,7 +62,7 @@ Previous output had formatting problems:
 Please regenerate the full plan from scratch and return clean JSON.
 """
 
-    return f"""You are an expert single-arm robot task decomposer.
+    return f"""You are an expert single_arm robot task decomposer.
 
 Robot identity and capability constraints:
 1. The robot has only one arm and one gripper.

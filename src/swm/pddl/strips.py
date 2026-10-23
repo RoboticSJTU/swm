@@ -56,8 +56,10 @@ def parse_sexpr_file(path: Path):
     return parse_sexpr(path.read_text(encoding="utf-8"), str(path))
 
 
-def parse_sexpr(text: str, context: str = "PDDL"):
-    text = re.sub(r";[^\n]*", "", text).lower()
+def parse_sexpr(text: str, context: str = "PDDL", *, lowercase: bool = True):
+    text = re.sub(r";[^\n]*", "", text)
+    if lowercase:
+        text = text.lower()
     tokens = text.replace("(", " ( ").replace(")", " ) ").split()
     index = 0
 
@@ -122,8 +124,44 @@ def validate_untyped_pddl(text: str) -> None:
     visit(root)
 
 
+def format_pddl(text: str) -> str:
+    """Rebuild PDDL blocks with inline literals, preserving symbols and order."""
+    def inline(node):
+        if isinstance(node, list):
+            return "(" + " ".join(inline(item) for item in node) + ")"
+        return node
+
+    def block(node, indent=""):
+        if not isinstance(node, list) or not node:
+            return indent + inline(node)
+        head = node[0].lower()
+        if head == "define" or any(
+            isinstance(item, list) and item and isinstance(item[0], str)
+            and item[0].startswith(":")
+            for item in node[2:]
+        ):
+            title = " ".join(inline(item) for item in node[:2])
+            body = [block(item, indent + "  ") for item in node[2:]]
+        elif head == ":action":
+            if len(node) < 2 or (len(node) - 2) % 2:
+                raise ValueError("Action fields must be keyword/value pairs")
+            title = " ".join(inline(item) for item in node[:2])
+            body = [
+                f"{indent}  {inline(node[index])} {inline(node[index + 1])}"
+                for index in range(2, len(node), 2)
+            ]
+        elif head in {":predicates", ":init", ":goal", "and", "or"}:
+            title = node[0]
+            body = [block(item, indent + "  ") for item in node[1:]]
+        else:
+            return indent + inline(node)
+        return "\n".join([indent + "(" + title, *body, indent + ")"])
+
+    return block(parse_sexpr(text, lowercase=False)) + "\n"
+
+
 def format_action_conditions(text: str) -> str:
-    """Put each precondition/effect on one line without changing literal order."""
+    """Keep the legacy condition-only formatter for existing generated artifacts."""
     tokens = list(re.finditer(r";[^\n]*|[()]|[^()\s;]+", text))
     edits = []
     for index, token in enumerate(tokens):

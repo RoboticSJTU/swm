@@ -79,8 +79,10 @@ def extract_temporal_gradient_keyframes(
     keyframe_dir.mkdir(parents=True, exist_ok=True)
     energy_path = frames_dir.parent / "energies" / f"{frames_dir.name}_energies.npy"
     energy_path.parent.mkdir(parents=True, exist_ok=True)
-    save_temporal_gradient_energy(frames_dir, energy_path)
-    energy = np.load(energy_path)
+    energy = np.load(energy_path) if energy_path.is_file() else None
+    if energy is None or energy.shape != (len(images),):
+        save_temporal_gradient_energy(frames_dir, energy_path)
+        energy = np.load(energy_path)
     smooth_k = smooth_k | 1
     pad = smooth_k // 2
     energy = np.convolve(

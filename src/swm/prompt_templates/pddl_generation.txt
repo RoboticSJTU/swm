@@ -14,6 +14,10 @@ Generate a task-correct PDDL domain and problem grounded in the initial image, i
 
 {predicates}
 
+# OPTIONAL OPERATOR REFERENCES
+
+{action_template}
+
 # REASONING PROCESS
 
 Ground object identities/counts, direct relations, and initial resource/device states in the evidence. Choose functional units and necessary predicates, then construct transitions and names. Goals express required final results, not temporary staging; conjunct order does not impose action order.

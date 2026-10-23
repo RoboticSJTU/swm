@@ -76,7 +76,7 @@ TASK_DOMAIN = "droid"
 PDDL_MODEL = "gpt-5.6-sol"
 ACTION_EXTRACTION_MODEL = "gemini-3.8-flash"
 JUDGE_MODEL = "gemini-3.8-flash"
-ROBOT_CONFIGURATION = "single-arm"
+ROBOT_CONFIGURATION = "single_arm"
 ```
 
 运行：
@@ -89,10 +89,13 @@ python scripts/domain_generation.py
 - `steps_json`：直接读取 `tasks/steps` 和场景图像，跳过视频处理。
 
 视频动作提取使用逐组 Generator 和一个全段 Compiler：G320 对照图加单帧用于观察，
-C320 横/竖屏固定 3×3 拼图用于全段整理。结果每行包含动作及 Before/After，默认保存
-`action_traces/` 和实际附图。调用沿用非流式 `call_gpt`，使用 medium、temperature=0；
-传输、JSON 或引用契约失败按同一完整范围重试。PDDL 生成接收完整动作和状态；
-PFV、PSV 的参考输入则去掉 `[G#]`、Before/After，仅保留从 1 开始编号的动作。
+C320 横/竖屏固定 3×3 拼图用于全段整理。结果每行只包含 `[G#]` 和动作；
+`pair_debug.log` 以可读文本保留逐帧观察、候选动作及证据、Compiler 复核与删除理由。
+每完成一组就更新 `actions_checkpoint.json`，中断后重跑会跳过已完成组并追加日志；
+若中断在 Compiler，则只重跑 Compiler。检查点在动作文件写入后删除，输入变化时重新提取。
+拼图使用临时文件并在调用后清理。调用沿用非流式 `call_gpt`，使用 medium、temperature=0；
+传输、JSON 或引用契约失败按同一完整范围重试。PDDL 生成接收动作序列；
+PFV、PSV 的参考输入则去掉 `[G#]`，统一为从 1 开始编号的动作。
 
 结果保存在：
 

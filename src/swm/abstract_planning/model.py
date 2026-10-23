@@ -196,6 +196,15 @@ def replay(domain_text, problem_text, plan):
 
 def native_plan(scenario, plan):
     """Undo release action names and explicit singleton parameters for native rules."""
+    interfaces = scenario.get('rules_migration', {}).get('action_mapping', {})
+    if interfaces:
+        by_name = {info['name']: (name, info) for name, info in interfaces.items()}
+        restored = []
+        for action in plan:
+            name, info = by_name[action[0]]
+            binding = dict(zip(info['parameters'], action[1:]))
+            restored.append((name, *(binding[p] for p in info['old_parameters'])))
+        plan = restored
     renames = scenario.get('operator_cleanup', {}).get('action_renames', {})
     inverse = {new: old for old, new in renames.items()}
     result = [(inverse.get(a[0], a[0]), *a[1:]) for a in plan]
@@ -449,6 +458,11 @@ def instruction(domain_text, problem_text, vocabulary, notes, game):
     }
     if game not in rules:
         raise ValueError("Not a visual game: " + game)
+    if game == 'floortile':
+        operations = {a[1] for a in domain if isinstance(a, list) and a[0] == ':action'}
+        directions = [direction for name, direction in [('paint_up', 'above'), ('paint_down', 'below')]
+                      if name in operations]
+        rules[game] = rules[game].replace('above or below', ' or '.join(directions))
     rules["miconic"] = rules["miconic"].replace("Boarding consumes", "For a finite-capacity lift, boarding consumes")
     goal_node = section(problem, ":goal")[1]
     goal = "Achieve this final state: " + phrase(goal_node, vocabulary)
