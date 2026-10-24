@@ -1,4 +1,4 @@
-"""Export approved PDDL rounds and normalize/prune their source PDDL."""
+"""Export readable PDDL rounds; log review and processing errors as warnings."""
 
 import json
 import os
@@ -22,6 +22,12 @@ from swm.pddl.strips import parse_plan
 MODEL_NAME = "gpt-5.6-sol"
 ROBOT_CONFIGURATION = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
+
+# ROBOT_CONFIGURATION = "dual_arm"
+# TASK_DOMAINS = ["agibot", "agibot_aug", "droid", "bridgedata_v2", "gelaxea", "gelaxea_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
+
+ROBOT_CONFIGURATION = "dual_arm"
+TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
 
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
@@ -331,7 +337,7 @@ def find_image(task_domain, task_id, episode_id):
 
 
 def find_task_rounds(item):
-    """扫描一个 task，只检查指令中包含的 episode 的最大 round。"""
+    """扫描指令中包含的 episode 的最大 round，仅要求源 PDDL 存在。"""
     task_dir, allowed_episodes = item
     task_id = Path(task_dir).name
     with os.scandir(task_dir) as entries:
@@ -344,7 +350,7 @@ def find_task_rounds(item):
         )
 
     valid_rounds = []
-    rejected_rounds = []
+    judge_warnings = []
     for episode_id, episode_dir in episodes:
         with os.scandir(episode_dir) as entries:
             rounds = [
@@ -357,26 +363,37 @@ def find_task_rounds(item):
             continue
         if not all(
             (round_dir / name).is_file()
-            for name in ("domain.pddl", "problem.pddl", "judge.json")
+            for name in ("domain.pddl", "problem.pddl")
         ):
             continue
         try:
             judge = json.loads((round_dir / "judge.json").read_text(encoding="utf-8"))
-            if judge.get("pass") is not True:
-                reason = judge.get("feedback") or judge.get("reasoning") or "judge.pass is not True"
-                rejected_rounds.append((
+            verdicts = [(name, judge.get(name) or {}) for name in ("pfv", "psv")]
+            failures = [
+                f"{name}: " + (verdict.get("feedback") or verdict.get("reasoning") or "pass is not True")
+                for name, verdict in verdicts
+                if verdict.get("pass") is not True
+            ]
+            if failures:
+                reason = " | ".join(failures)
+                judge_warnings.append((
                     (task_id, episode_id),
-                    f"[JUDGE REJECTED] {round_dir.relative_to(ROOT_DIR)}: {reason}",
+                    f"[JUDGE WARNING] {round_dir.relative_to(ROOT_DIR)}: {reason}",
                 ))
-                continue
-        except json.JSONDecodeError:
-            continue
+        except Exception as error:  # noqa: BLE001 - 评审异常仅告警，不过滤样本
+            judge_warnings.append((
+                (task_id, episode_id),
+                f"[JUDGE WARNING] {round_dir.relative_to(ROOT_DIR)}: {error}",
+            ))
         valid_rounds.append(((task_id, episode_id), round_dir))
-    return valid_rounds, rejected_rounds
+    return valid_rounds, judge_warnings
 
 
 def prepare_round(item):
     key, round_dir = item
+    prepared = None
+    review = None
+    init_review = None
     try:
         source_paths = [
             round_dir / name
@@ -385,6 +402,8 @@ def prepare_round(item):
         domain_raw, problem_raw = (
             path.read_text(encoding="utf-8") for path in source_paths[:2]
         )
+        # 先保留源文本，解析、计划或格式化失败时仍可导出。
+        prepared = (domain_raw, problem_raw)
 
         domain = parse_pddl(domain_raw)
         problem = parse_pddl(problem_raw)
@@ -394,8 +413,6 @@ def prepare_round(item):
         # 依赖已有评审和计划，只裁剪定义、调整排版，不重新求解或回放。
         action_names = list(dict.fromkeys(name for name, _arguments in raw_plan))
         conflicts, hand_states = inspect_init(problem)
-        review = None
-        init_review = None
         if conflicts:
             problem_path = source_paths[1].relative_to(ROOT_DIR)
             message = f"{problem_path}: " + " | ".join(conflicts)
@@ -420,9 +437,11 @@ def prepare_round(item):
             review = f"{review}\n{hand_review}" if review else hand_review
 
         return key, prepared, review, init_review, None
-    except Exception as error:  # noqa: BLE001 - 单个 episode 失败不应中断批量导出
+    except Exception as error:  # noqa: BLE001 - 处理异常仅告警，保留已读取的 PDDL
         message = f"{round_dir.relative_to(ROOT_DIR)}: {error}"
-        return key, None, "[PDDL SKIP] " + message, None, message
+        warning = "[PDDL WARNING] " + message
+        review = f"{review}\n{warning}" if review else warning
+        return key, prepared, review, init_review, message
 
 
 def prepare_episode(item):
@@ -460,21 +479,21 @@ def process_domain(task_domain, prompt_template, only_problem_template):
         task_dirs = []
 
     valid_rounds = {}
-    rejected_rounds = {}
+    judge_warnings = {}
     if task_dirs:
         # 与 merge.py 一样，重叠共享文件系统的元数据等待，保留排序。
         with ProcessPoolExecutor(
             max_workers=min(32, MAX_WORKERS, len(task_dirs))
         ) as executor:
-            for rounds, rejected in executor.map(find_task_rounds, task_dirs):
+            for rounds, warnings in executor.map(find_task_rounds, task_dirs):
                 valid_rounds.update(rounds)
-                rejected_rounds.update(rejected)
+                judge_warnings.update(warnings)
     scan_seconds = perf_counter() - started
 
-    review_messages = list(rejected_rounds.values())
+    review_messages = list(judge_warnings.values())
     init_reviews = []
     prepared_rounds = {}
-    pddl_errors = []
+    pddl_warnings = []
 
     workers = min(MAX_WORKERS, len(valid_rounds)) if valid_rounds else 1
     print(
@@ -489,15 +508,15 @@ def process_domain(task_domain, prompt_template, only_problem_template):
                 ((task_domain, key, path) for key, path in valid_rounds.items()),
                 chunksize=max(1, min(50, len(valid_rounds) // workers)),
             )
-            for (key, prepared, review, init_review, pddl_error), image_path in results:
+            for (key, prepared, review, init_review, pddl_warning), image_path in results:
                 if prepared is not None:
                     prepared_rounds[key] = (*prepared, image_path)
                 if review is not None:
                     review_messages.append(review)
                 if init_review is not None:
                     init_reviews.append(init_review)
-                if pddl_error is not None:
-                    pddl_errors.append(pddl_error)
+                if pddl_warning is not None:
+                    pddl_warnings.append(pddl_warning)
     prepare_seconds = perf_counter() - started - scan_seconds
 
     samples = []
@@ -506,8 +525,6 @@ def process_domain(task_domain, prompt_template, only_problem_template):
     missing_image = 0
     for task_id, episode_id, instruction in records:
         key = (task_id, episode_id)
-        if key in rejected_rounds:
-            continue
         if key not in valid_rounds:
             missing_episode += 1
             continue
@@ -543,9 +560,9 @@ def process_domain(task_domain, prompt_template, only_problem_template):
     print(
         f"[{task_domain}] saved={len(samples)}/{len(records)}  "
         f"missing_episode={missing_episode}  "
-        f"judge_rejected={len(rejected_rounds)}  "
+        f"judge_warnings={len(judge_warnings)}  "
         f"missing_image={missing_image}  init_review={len(init_reviews)}  "
-        f"pddl_skip={len(pddl_errors)}  "
+        f"pddl_warnings={len(pddl_warnings)}  "
         f"time={perf_counter() - started:.1f}s "
         f"(scan={scan_seconds:.1f}s, prepare+images={prepare_seconds:.1f}s)",
         flush=True,
@@ -579,7 +596,7 @@ def main():
 
     if review_messages:
         ERROR_LOG_PATH.write_text("\n".join(review_messages) + "\n", encoding="utf-8")
-        print(f"[review] {len(review_messages)} issue(s) -> {ERROR_LOG_PATH}")
+        print(f"[review] {len(review_messages)} warning(s) -> {ERROR_LOG_PATH}")
     else:
         ERROR_LOG_PATH.unlink(missing_ok=True)
     print(f"[done] total time={perf_counter() - started:.1f}s", flush=True)

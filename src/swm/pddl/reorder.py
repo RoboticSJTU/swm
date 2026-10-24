@@ -384,7 +384,7 @@ def build_predecessors(
         provider = latest_supporter(n, lit, positive=True)
         if provider is None:
             raise ValueError(f"Original plan invalid: positive goal {lit} not achieved")
-        if provider >= 0:
+        if provider >= 0 and lit[0] not in resource_preds:
             for k, action in enumerate(plan):
                 if k < provider and lit in action.del_eff:
                     add_edge(k, provider)
@@ -395,7 +395,7 @@ def build_predecessors(
             raise ValueError(
                 f"Original plan invalid: negative goal (not {lit}) not achieved"
             )
-        if provider >= 0:
+        if provider >= 0 and lit[0] not in resource_preds:
             for k, action in enumerate(plan):
                 if k < provider and lit in action.add_eff:
                     add_edge(k, provider)
@@ -429,6 +429,55 @@ def reorder_by_search(
     for provider, consumer, lit in neg_links:
         if provider >= 0:
             links_by_consumer[consumer].append((provider, lit, False))
+
+    causal_support = Counter(
+        provider
+        for provider, _consumer, _lit in pos_links + neg_links
+        if provider >= 0
+    )
+
+    # Occupancy links guide preparation, but do not restrict legal reorderings.
+    causal_links = [(p, c, lit, True) for p, c, lit in pos_links]
+    causal_links += [(p, c, lit, False) for p, c, lit in neg_links]
+    holders = {
+        lit: -1 for lit in init_state
+        if occupancy_model is not None and occupancy_model.project(lit) is not None
+    }
+    acquisitions = []
+    for consumer, action in enumerate(plan):
+        for lit in action.pre_pos & holders.keys():
+            causal_links.append((holders[lit], consumer, lit, True))
+        for lit in action.del_eff:
+            holders.pop(lit, None)
+        acquired = set()
+        if occupancy_model is not None:
+            acquired = {
+                lit for lit in action.add_eff
+                if occupancy_model.project(lit) is not None
+            }
+            holders.update((lit, consumer) for lit in acquired)
+        acquisitions.append(bool(acquired))
+
+    ancestors = [sum(1 << p for p in preds[i]) for i in range(n)]
+    readers = defaultdict(int)
+    for provider, consumer, lit, positive in causal_links:
+        readers[provider, lit, positive] |= 1 << consumer
+        if provider >= 0:
+            ancestors[consumer] |= 1 << provider
+
+    # A consuming use ends an episode only after its other readers have finished.
+    closures = []
+    for provider, consumer, lit, positive in causal_links:
+        opposite = plan[consumer].del_eff if positive else plan[consumer].add_eff
+        others = readers[provider, lit, positive] & ~(1 << consumer)
+        if lit in opposite and not acquisitions[consumer] and (provider >= 0 or others):
+            ancestors[consumer] |= others
+            closures.append((provider, consumer, others))
+
+    for provider in range(n):
+        for consumer in range(n):
+            if ancestors[consumer] & (1 << provider):
+                ancestors[consumer] |= ancestors[provider]
 
     def current_occupancy(state: set[Literal]) -> dict[ResourceSig, ObjectSig]:
         if occupancy_model is None:
@@ -490,12 +539,46 @@ def reorder_by_search(
             new_resource_acquisitions = len(
                 set(occupancy_next.items()) - set(occupancy_now.items())
             )
-            # Close established chains before unlocking or occupying new resources.
+            new_holdings = {
+                lit for lit in plan[i].add_eff - state
+                if occupancy_model is not None and occupancy_model.project(lit) is not None
+            }
+            uses = [
+                action for j, action in enumerate(plan)
+                if not (next_mask & (1 << j)) and action.pre_pos & new_holdings
+            ]
+            preserving_uses = [
+                action for action in uses if (action.pre_pos - action.del_eff) & new_holdings
+            ]
+            support = sum(len((a.pre_pos - a.del_eff) & new_holdings) for a in preserving_uses)
+            # Prepare missing use conditions before occupying a hand; an early
+            # release does not replace the work that preserves the holding.
+            waiting = min(
+                (len(a.pre_pos - next_state) + len(a.pre_neg & next_state)
+                 for a in preserving_uses or uses),
+                default=0,
+            )
+            # Prefer the nearest completion of an established or already-used condition.
+            finish = max(
+                (
+                    n - bin(ancestors[consumer] & ~done_mask).count("1")
+                    for provider, consumer, others in closures
+                    if (done_mask & others if provider < 0 else done_mask & (1 << provider))
+                    and not (done_mask & (1 << consumer))
+                    and (i != consumer or done_mask & others == others)
+                    and (ancestors[consumer] | (1 << consumer)) & (1 << i)
+                ),
+                default=0,
+            )
             score = (
+                finish,
                 completed_links,
+                -waiting,
+                causal_support[i],
                 newly_ready,
                 resource_continuity,
                 -new_resource_acquisitions,
+                support,
                 -i,
             )
             scored.append((score, i))

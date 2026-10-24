@@ -160,7 +160,10 @@ def canonical_signature(
                     and argument.lower() not in bound
                 ):
                     variable = argument.lower()
-                    usage.setdefault(variable, []).append(f"{prefix}:{head}:{index}")
+                    # Equality has no source/target direction. Treating its
+                    # operands as distinct roles splits equivalent schemas.
+                    role_index = 0 if head == "=" else index
+                    usage.setdefault(variable, []).append(f"{prefix}:{head}:{role_index}")
 
     collect_usage(precondition, "pre")
     collect_usage(effect, "eff")
@@ -220,6 +223,8 @@ def canonical_signature(
             children.sort()
         else:
             children = [canon(child, bound, depth) for child in node[1:]]
+            if head == "=":
+                children.sort()
         return "(" + " ".join([head, *children]) + ")"
 
     signature = (

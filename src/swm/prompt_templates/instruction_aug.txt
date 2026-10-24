@@ -23,10 +23,12 @@ Requirements:
 - Cover the intended effect of every target action. An effect remains required even when its object is already held or the image is ambiguous.
 - Do not request completed actions, already achieved effects, or actions outside the derived task, even if the original task mentions them.
 - Preserve every destination, relation, quantity, device state, or return condition required by the target actions.
+- Express independent requirements as unordered goals. State an execution order or an object's state during an operation only when it is necessary for the task's causal logic; do not impose the reference trajectory's incidental order.
+- Omit posture and orientation details unless they affect causal logic, such as access, containment, support, or preventing loss of contents. Do not add upright, sideways, horizontal, or similar requirements merely to describe how an object was placed in the reference.
 - Use the original task to understand intent and object identity. Use all action lists as semantic evidence, not wording to copy.
 - Identify objects naturally with grounded, task-relevant attributes visible in the current state, such as color, material, size, location, or relation. Use attributes to disambiguate, not as decorative filler.
 - When useful, refer to an already achieved effect as current-state context, but do not request that effect again.
-- Vary the semantic framing, sentence structure, and information focus: express the target as an end state, a state transition, an ordered outcome, a destination-centered result, or an object-centered result as appropriate. Also vary how objects are identified; do not rely only on verb substitutions.
+- Vary the semantic framing, sentence structure, and information focus: express the target as an end state, a state transition, a destination-centered result, or an object-centered result as appropriate. Also vary how objects are identified; do not rely only on verb substitutions.
 - Avoid stock wording when an equally clear grounded description is available, while keeping genuinely simple goals short.
 - Do not reuse a sentence template from another sample or make a near-duplicate by changing only one verb, article, or word order.
 - Mention only grounded objects, attributes, relations, and states that help make the target goal unambiguous.
