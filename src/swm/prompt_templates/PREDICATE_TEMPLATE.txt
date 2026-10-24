@@ -4,7 +4,7 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   ; Static: categories and fixed structural/supply/control relations never change.
   (hand ?h)
   ; part_of and controls are optional; include only when required for correct participant bindings or necessary causal dependencies.
-  ; A separately relevant component is the direct on/in participant; part_of binds that component to its functional whole.
+  ; part_of binds a separately relevant component or spatial position to its functional whole.
   (part_of ?p ?w)
   ; Supply capability; a discrete portion's source availability is separate.
   (dispenses ?s ?m)
@@ -21,16 +21,16 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (grip_free ?gf)
   (gripping ?t ?o)
 
-  ; Direct relations: on = direct external support; in = direct containment, including actual nesting.
+  ; Direct relations: on = support without a modeled fine-grained position; in = containment, including actual nesting.
   ; Support, containment and closure are distinct.
   ; Remove superseded relations when transferring or detaching their subject.
   (on ?o ?s)
   (in ?c1 ?c2)
   (inserted ?o ?s)
-  (at ?o ?r) ; Only for a relevant region, not instead of on/in.
+  (at ?o ?p) ; Fine-grained position; bind it to its surface with part_of, without duplicating on.
   (under ?o ?r)
   ; Keep task-required or execution-relevant alignment and relative positions.
-  ; These supplement direct on/in relations.
+  ; These supplement the object's location relation.
   ; Invalidate them when movement makes them false; preserve unchanged internal relations of an intact assembly.
   (aligned ?o ?r)
   (beside ?o ?r)
