@@ -75,13 +75,14 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (blocks_closing ?b ?u)
 
   ; Optional physical pose: upright/upside_down and flat/vertical are pairs within their respective dimensions.
-  ; Keep a pose only when a task-required operator needs it as a precondition; otherwise omit it from the domain, init, effects, goals, and action names.
+  ; Keep poses needed for action applicability or an explicit task result, including necessary static distinctions.
   (upright ?u)
   (upside_down ?ud)
   (flat ?f)
   (vertical ?v)
 
   ; Optional results: establish on actual completion; invalidate if undone.
+  ; Add a result only if retained physical facts cannot already establish the required event or outcome.
   ; Heating differs from boiling; rinsing, wiping, and cleanliness differ.
   ; A completed manipulation or waiting event establishes its supported result; no separate waiting or done predicate.
   (heated ?h)
