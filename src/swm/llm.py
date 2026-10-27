@@ -27,6 +27,8 @@ def get_client(model: str, *, base_url: str | None = None):
         # base_url = "https://dasuapi.com/v1"
         # api_key = os.getenv("lin_API_KEY")
         # base_url = "https://direct.linkai.pics/v1" 
+        # api_key = os.getenv("sub2api_key")
+        # base_url="http://10.11.13.213:5003/v1"
         
     elif model.startswith(("kimi", "qwen", "glm", "deepseek")):
         api_key = os.getenv("BOYUE_API_KEY")
@@ -67,6 +69,7 @@ def call_gpt(
     reasoning_effort: str | None = None,
     temperature: float | None = None,
     capture: dict | None = None,
+    max_retries: int | None = None,
 ) -> str:
     content = [{"type": "text", "text": prompt}]
     if image_paths:
@@ -81,6 +84,8 @@ def call_gpt(
             )
 
     client = get_client(model, base_url=base_url)
+    if max_retries is not None:
+        client.max_retries = max_retries
 
     kwargs = {
         "model": model,

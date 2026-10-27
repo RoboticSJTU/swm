@@ -1,7 +1,28 @@
-Infer events from changes in the physical scene. Instructions and earlier proposals guide attention, not occurrence. First locate the SAME object independently at both endpoints: match its visible boundaries, shape/color and relation to surrounding objects. Keep one short stable name per instance. An overlapping hand or object does not make two objects one; identify which body moves and which stays supported. Occluded means unknown, not absent, lifted or released.
+1. Observe physical relations
+- Follow the same object using its shape, boundaries and stable surroundings; keep one name per instance at the supported detail level.
+- Compare control, support/containment, orientation, contents and device state relative to hands and fixed surfaces; distinguish object motion from hand/camera motion.
+- Establish facts from images; use the instruction and action history to guide attention.
+- Image overlap does not establish contact; contact alone does not establish control, pressing or placement.
+- Occlusion means unknown, not absent, lifted, contained or released; leave hidden intermediate events unspecified.
 
-Track control, support/containment, location, orientation, contents and device conditions, using object-to-hand/surface relations rather than image coordinates. For attached controls, compare angle/opening relative to the fixed housing: operation need not translate the object. A hand coupled to a control can reveal its turn/press even when the contact obscures it; the internal mechanism need not be visible. Unrelated hand/camera motion or contact alone is not an effect. Include supported preparation and ending operations even for objects absent from the instruction.
+2. Identify independent events
+- Preserve distinct supported acquisition, use, handoff and placement results, including relevant operations on objects outside the instruction.
+- Pick establishes control and lifts clear of support; Grasp establishes control, possibly while supported; Place transfers support to the destination as hand control ends.
+- An acquisition needs its own visible control/support transition. Initial holding or later Pour/Place alone does not establish an earlier Pick.
+- Merge grasp/release phases into the corresponding pickup, removal, handoff or placement; retain standalone Grasp when establishing control is itself an independent event.
+- Choose the specificity supported by the evidence. Clear observed endpoints can establish an action; actual relocation can be described as Move when finer phases remain uncertain.
 
-An event is a supported manipulation result or use. Pick means taking hold and lifting the object clear of its support; Grasp means establishing control while the object stays supported or in place, without a lift; Place ends control on a support. For a single arm, merge contact phases into the substantive action: Grasp+Pick/Remove becomes Pick/Remove, and Release merges into the preceding Place or other action that ends control; do not emit standalone Grasp or Release for these phases. Move expresses observed relocation when finer phases or the destination are unclear. Preserve distinct acquisition, use, handoff and placement effects. Group boundaries do not create events: merge progress of one continuous operation. A release/reacquisition or reversal requires evidence for BOTH transitions, not two differently worded proposals. Omit reaching, static holding and incidental trajectory subdivisions.
+3. Interpret use and controls
+- Judge attached controls by angle/opening relative to the housing or coupled hand-control motion, including partially occluded operation. Name the function supported by visible control evidence or device response.
+- Follow contents with their carrier. For Pour/Unload, use visible flow or established contents/loading followed by opening-down tipping of an open carrier over a receiving target. Subsequent carrier motion or return can help confirm transfer through occlusion.
 
-Follow contents with their carrier. Loading followed by opening-down tipping over a compatible target and subsequent return supports unloading even when small contents are occluded. Inspect the ending object-to-support and hand relations: a final grasp, lift or relocation can be an event without a later release. Do not assume that continued holding means no change.
+4. Follow continuous trajectories
+- Recognize an occurrence once, when its defining evidence first becomes sufficient. Ongoing use can be recognized as soon as it is clearly visible.
+- Record preparation and continuation as observations across groups. Distinguish occurrences by physical transitions rather than repeated names or group boundaries.
+- Give each repeat or reversal independent evidence: repeated acquisition requires ended and renewed control; a reversal requires both opposing state transitions.
+- Include supported terminal acquisitions, lifts or relocations, even when a later release lies outside the video.
+
+Boundary examples
+- Overlap: A hand passes above a block, but the block stays on its support and no coupled control is visible. Record the observation without Grasp or Pick.
+- Already held: A group starts with a bottle already held and then shows liquid pouring into a cup. Recognize Pour, but infer no Pick from this group alone; the Compiler may recover an acquisition only from earlier image evidence.
+- Ending lift: A tray changes from table-supported to held clear of the table at the video end. Recognize the pickup/lift even without a later release; do not label it Place.

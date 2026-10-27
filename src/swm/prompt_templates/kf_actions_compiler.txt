@@ -1,39 +1,43 @@
-Return the COMPLETE episode's event sequence in ONE response.
+Task
+Reconstruct the episode's physical events from the images and reconcile the Generator actions with them. Return the result by group in one response.
 Instruction: {instruction}
 
 {shared_rules}
 
-Reconstruct one physical sequence from the images, then reconcile the ledger with it. Observations and Drafts are fallible: repeating a claim in both does not confirm it. For each event, write reason FIRST: cite a real span and describe the SAME operated object's relation to its hand, support or housing at BOTH endpoints. Infer the action from that change, then match Draft IDs. A quoted proposal or an occluded object is not endpoint evidence. Correct the moving object's identity when other objects remain visibly in place. Include supported effects even with no Draft. Use neighboring groups to resolve a partial event and the final frames to resolve ending control/support.
-
-A support, containment or opening relation persisting through hand/camera motion is one continuing state; remove unsupported cycle Drafts. Distinguish operating an attached control from merely grasping or later removing it. At the ending, distinguish moving with the hand from settling onto a support; if release/destination is unproven, describe Move.
-
-Visual timeline:
+Inputs
+- Visual timeline:
 {frame_order}
+- Generator proposals (summary and details share one source):
+{generator_output}
 
-Only the attached grouped grids are image evidence. Context/bridge cells repeat existing moments; use their frame IDs to follow one chronology. The complete ledger also retains observations for original frames omitted from a four-frame group's grid.
+Method
+1. Follow each object's control, support and use through the full timeline.
+2. Visit every group, including empty action groups. Check the Generator observations and actions against visible events and their physical order.
+3. Retain correct actions verbatim. Correct mistaken actions, remove unsupported ones, and restore omitted independent events using image evidence.
+4. Merge phases of the same occurrence across groups. Assign each event once to the group where its defining evidence first becomes sufficient; explain resulting changes in the affected groups.
 
-Generator ledger:
-{evidence_ledger}
+Output
+- Return JSON only, with exactly these outer keys in this order: {group_keys}.
+- Each group contains review followed by actions. Each action has frames followed by action.
+- Set review to null exactly when the group's action count, text, order and frame references remain unchanged; copy that list exactly.
+- Otherwise, review is a non-empty list of frames/reason items. Each reason connects visible facts to a specific edit, including evidence-reference corrections.
+- For actions and reviews, cite at least two distinct chronological img_N labels from the attached images. Evidence may span groups.
+- Use actions: [] for groups with no new independent event. An unchanged empty list has review: null; deleting actions requires review.
+- Keep image references in frames. Action text is a plain single-line sentence and excludes |.
 
-Keep chronological order and nondecreasing completion group. Represent EVERY original Draft ID in actions.drafts or explicitly in removed, never both. Merges list all contributing IDs, splits reuse IDs, additions use drafts: []. Merge only the same event, preserving distinct results.
-Emit actions in the illustrated field order; list removed last.
-
-Every final action/removal needs a brief reason: copy a complete real G# img_N->img_M span literally from the ledger and state the observed change. Keep each span within its stated group. Each removal has exactly draft (one integer ID) and reason; each action has exactly group, action, reason, drafts (integer IDs). Return ONE complete JSON object, no Markdown. Action strings contain no references or |. The example illustrates format, not episode facts; use removed: [] when none.
+Example
+This excerpt shows an object-identity correction, an unchanged group and an empty group. Apply the format to the actual objects and every required group.
 {{
-  "actions": [
-    {{
-      "reason": "{example_span} shows the object on its support, then clear of it in the hand.",
-      "group": 0,
-      "action": "Pick up the object.",
-      "drafts": [
-        1
-      ]
-    }}
-  ],
-  "removed": [
-    {{
-      "draft": 2,
-      "reason": "{example_span} repeats the event represented by draft 1."
-    }}
-  ]
+  "G2": {{
+    "review": [{{"frames": ["img_136", "img_159", "img_186"], "reason": "The hand controls and lifts the cloth clear of the seated lid. Replace the proposed lid removal with cloth removal."}}],
+    "actions": [{{"frames": ["img_159", "img_186"], "action": "Remove the cloth from the lid."}}]
+  }},
+  "G3": {{
+    "review": null,
+    "actions": [{{"frames": ["img_186", "img_205"], "action": "Place the cloth on the table."}}]
+  }},
+  "G4": {{
+    "review": null,
+    "actions": []
+  }}
 }}

@@ -1,28 +1,45 @@
-Extract event proposals for group G{group} of G{last_group}.
+Task
+Extract the independent events supported by group G{group} of G{last_group}.
 Instruction: {instruction}
 
 {shared_rules}
 
-Visual input: {frame_order}
-Prior event proposals (names only, fallible context):
+Inputs
+- Images: {frame_order}
+- Earlier action names for continuity context:
 {previous_actions}
 
-Use the comparison grid to compare relations and the individual images to resolve identity and detail. K labels, not the number of image attachments, define the moments. Return one change for EVERY adjacent K0->K1, K1->K2, etc., exactly once in order. Describe the observed start -> end relations before naming an action, including distinct effects within the same pair; use unchanged neighbors to separate object motion from occlusion or camera motion. Do not import an expected starting state from earlier action names. Put unfinished progress in changes and supported completed results in actions, ordered by their first cited pair. Use actions: [] when no result completes. Cite actual adjacent pairs in each action's non-empty evidence list.
+Method
+1. Inspect the whole group. Use the grid to compare relations and the individual images to resolve detail.
+2. Describe each adjacent pair once in changes, in order: K0/K1, K1/K2, and so on. State the relevant visible start/end relations and uncertainty.
+3. Assemble actions from the whole group's evidence, in physical order. An action may span several frames; distinct actions may share supporting frames.
+4. Keep preparation and continuation in changes. Use actions: [] when the group establishes no new independent event.
 
-Return ONE complete JSON object, no Markdown or extra text. Use exactly the illustrated keys; replace example facts with observed names/events. Action strings contain no frame references or |.
+Output
+- Return JSON only, with exactly changes and actions.
+- Each change has frames followed by change; frames contains its two adjacent K labels.
+- Each action has frames followed by action (e.g., pick, open, turn_on, insert, turn, screw, push, press, pour, fold etc.). frames contains its three adjacent K labels.; cite at least two distinct supporting K labels in chronological order.
+
+
+- Use a plain single-line action sentence, naming the object, source/target and hand as supported. Keep image references in frames; action text excludes |.
+
+Example
+Three frames jointly establish a pickup. Apply the same structure to the actual objects and all adjacent pairs in your group.
 {{
   "changes": [
     {{
-      "pair": "K0->K1",
-      "change": "The object leaves its support and moves with the hand."
+      "frames": ["K0", "K1"],
+      "change": "The right hand closes around the pill bottle while it remains supported on the cabinet top."
+    }},
+    {{
+      "frames": ["K1", "K2"],
+      "change": "The bottle is now clear of the cabinet top, held by the right hand above the open drawer."
     }}
   ],
   "actions": [
     {{
-      "action": "Pick up the object.",
-      "evidence": [
-        "K0->K1"
-      ]
+      "frames": ["K0", "K1", "K2"],
+      "action": "Pick up the pill bottle from the cabinet top with the right hand."
     }}
   ]
 }}

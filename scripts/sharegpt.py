@@ -20,14 +20,13 @@ if str(SRC_DIR) not in sys.path:
 from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
+EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
+
 ROBOT_CONFIGURATION = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
 
 # ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibot", "agibot_aug", "droid", "bridgedata_v2", "gelaxea", "gelaxea_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
-
-ROBOT_CONFIGURATION = "dual_arm"
-TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
+# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
 
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
@@ -40,6 +39,9 @@ TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld
 
 # ROBOT_CONFIGURATION = "dual_arm"
 # TASK_DOMAINS = ["gelaxea", "gelaxea_aug"]
+
+# ROBOT_CONFIGURATION = "dual_arm"
+# TASK_DOMAINS = ["agibot", "agibot_aug", "droid", "bridgedata_v2", "gelaxea", "gelaxea_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
@@ -451,7 +453,7 @@ def prepare_episode(item):
     return result, image_path
 
 
-def process_domain(task_domain, prompt_template, only_problem_template):
+def process_domain(task_domain, prompt_template, only_problem_template=None):
     started = perf_counter()
     eval_root = ROOT_DIR / f"eval_results/{MODEL_NAME}/{task_domain}"
     instruction_path = ROOT_DIR / f"tasks/instructions/instructions_{task_domain}.json"
@@ -538,10 +540,12 @@ def process_domain(task_domain, prompt_template, only_problem_template):
 
         problem_output = f"<problem>\n{problem_text}\n</problem>"
         domain_output = f"<domain>\n{domain_text}\n</domain>"
-        for dataset, template, answer in (
+        datasets = [
             (samples, prompt_template, domain_output + "\n" + problem_output),
-            (only_problem_samples, only_problem_template, problem_output),
-        ):
+        ]
+        if only_problem_template is not None:
+            datasets.append((only_problem_samples, only_problem_template, problem_output))
+        for dataset, template, answer in datasets:
             dataset.append({
                 "messages": [
                     {
@@ -574,7 +578,11 @@ def process_domain(task_domain, prompt_template, only_problem_template):
 def main():
     started = perf_counter()
     prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
-    only_problem_template = ONLY_PROBLEM_PROMPT_PATH.read_text(encoding="utf-8")
+    only_problem_template = (
+        ONLY_PROBLEM_PROMPT_PATH.read_text(encoding="utf-8")
+        if EXPORT_ONLY_PROBLEM
+        else None
+    )
     samples = []
     only_problem_samples = []
     review_messages = []
@@ -586,10 +594,10 @@ def main():
         only_problem_samples.extend(domain_only_problem_samples)
         review_messages.extend(domain_reviews)
 
-    for path, dataset in (
-        (OUT_JSON_PATH, samples),
-        (ONLY_PROBLEM_OUT_JSON_PATH, only_problem_samples),
-    ):
+    output_files = [(OUT_JSON_PATH, samples)]
+    if EXPORT_ONLY_PROBLEM:
+        output_files.append((ONLY_PROBLEM_OUT_JSON_PATH, only_problem_samples))
+    for path, dataset in output_files:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[done] samples={len(dataset)} -> {path}")

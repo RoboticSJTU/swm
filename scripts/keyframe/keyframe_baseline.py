@@ -1,4 +1,8 @@
+import json
+import math
 import shutil
+import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -268,18 +272,39 @@ def extract_keyframes_embedding(
 def extract_keyframes_uniform_sampling(
     src_root,
     dst_root,
-    fps=1,
+    fps=None,
     group_size=3,
+    *,
+    source_fps=None,
+    video_root=None,
 ):
+    """Sample complete FFmpeg PNG sequences at a rate measured in frames/second.
+
+    AgiBot defaults to one frame every four seconds; other datasets use one
+    frame per second. Pass ``source_fps`` for a known PNG sequence rate, or
+    ``video_root`` to probe each original video (including nested task folders).
+    """
     src_root = Path(src_root)
     dst_root = Path(dst_root)
+    fps = (0.25 if src_root.name.lower() == "agibot" else 1.0) if fps is None else float(fps)
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("fps must be a positive finite sampling rate")
+    if not isinstance(group_size, int) or group_size < 2:
+        raise ValueError("group_size must be an integer >= 2")
+    if source_fps is not None:
+        source_fps = float(source_fps)
+        if not math.isfinite(source_fps) or source_fps <= 0:
+            raise ValueError("source_fps must be a positive finite PNG sequence rate")
+    if dst_root.exists() and any(dst_root.iterdir()):
+        raise FileExistsError(f"Output directory is not empty: {dst_root}")
 
-    assert fps > 0 and (30 / fps).is_integer()
-    assert group_size >= 2
+    videos = {}
+    if source_fps is None:
+        video_root = Path(video_root) if video_root is not None else ROOT_DIR / "dataset" / "videos" / src_root.name
+        for video in video_root.rglob("*.mp4"):
+            videos.setdefault(video.stem, []).append(video)
 
-    if dst_root.exists():
-        shutil.rmtree(dst_root)
-    dst_root.mkdir(parents=True)
+    dst_root.mkdir(parents=True, exist_ok=True)
 
     task_dirs = sorted(
         [
@@ -291,8 +316,41 @@ def extract_keyframes_uniform_sampling(
 
     for task_dir in task_dirs:
         frames = sorted(task_dir.glob("*.png"), key=lambda p: int(p.stem))
-        sampled = frames[::int(30 / fps)]
-        if frames and sampled[-1] != frames[-1]:
+        if not frames:
+            continue
+        frame_rate = source_fps
+        if frame_rate is None:
+            matches = videos.get(task_dir.name, [])
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Expected one source video for {task_dir.name} under {video_root}; "
+                    "pass video_root or the actual source_fps explicitly"
+                )
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=r_frame_rate,avg_frame_rate", "-of", "json", str(matches[0])],
+                check=True, capture_output=True, text=True,
+            )
+            stream = json.loads(probe.stdout)["streams"][0]
+            # The original FFmpeg PNG extraction uses this nominal output rate,
+            # including duplicated frames in variable-frame-rate source videos.
+            for field in ("r_frame_rate", "avg_frame_rate"):
+                try:
+                    frame_rate = float(Fraction(stream.get(field, "0/1")))
+                except (ValueError, ZeroDivisionError):
+                    continue
+                if math.isfinite(frame_rate) and frame_rate > 0:
+                    break
+            else:
+                raise ValueError(f"No valid frame rate found for {matches[0]}")
+
+        if fps >= frame_rate:
+            sampled = list(frames)
+        else:
+            count = math.floor((len(frames) - 1) * fps / frame_rate + 1e-9) + 1
+            sampled = [frames[min(len(frames) - 1, math.floor(i * frame_rate / fps + 0.5))]
+                       for i in range(count)]
+        if sampled[-1] != frames[-1]:
             sampled.append(frames[-1])   # 强行补最后一帧
 
         task_out = dst_root / task_dir.name
@@ -317,10 +375,11 @@ def extract_keyframes_uniform_sampling(
 
 if __name__ == "__main__":
     # # uniform
-    # fps = 0.25
+    # dataset = "human"  # "agibot": every 4 seconds; other datasets: every second
+    # fps = 0.25 if dataset == "agibot" else 1.0
     # group_size = 3
-    # src_root = ROOT_DIR / "dataset" / "frames" / "human"
-    # dst_root = ROOT_DIR / "dataset" / "keyframes" / f"human_uniform_sampling_fps_{fps}_group_{group_size}"
+    # src_root = ROOT_DIR / "dataset" / "frames" / dataset
+    # dst_root = ROOT_DIR / "dataset" / "keyframes" / f"{dataset}_uniform_sampling_fps_{fps}_group_{group_size}"
     # extract_keyframes_uniform_sampling(src_root, dst_root, fps, group_size)
     
     # embedding
