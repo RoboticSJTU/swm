@@ -15,9 +15,12 @@ from ..llm import call_gpt
 _IMAGE_LOCK = Lock()
 MAX_JSON_ATTEMPTS = 3
 REQUEST_SETTINGS = {"reasoning_effort": "medium", "temperature": 0, "max_retries": 0}
-FORMAT_VERSION = 2
+DEFAULT_COMPILER_FRAME_SIZE = (640, 360)
+FORMAT_VERSION = 3
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.IGNORECASE | re.DOTALL)
 LOCAL_FRAME_RE = re.compile(r"\bK\d+\b")
+FRAME_LABEL = r"\b(?:K\d+|img_\d+)\b"
+FRAME_LIST = FRAME_LABEL + r"(?:\s*(?:,|/|->|→|and|to|through|-)\s*" + FRAME_LABEL + r")*"
 
 
 class OutputContractError(ValueError):
@@ -27,13 +30,18 @@ class OutputContractError(ValueError):
 def _normalize_action_text(value):
     if not isinstance(value, str) or not value.strip() or any(c in value for c in "\n\r|"):
         raise OutputContractError("action must be one non-empty line")
-    if LOCAL_FRAME_RE.search(value):
-        raise OutputContractError("put image references only in frames, not action text")
+    # Frame citations are display metadata. Keep the physical claim and the
+    # separately validated evidence, without spending a model retry on wording.
+    value = re.sub(r"[\[(]\s*" + FRAME_LIST + r"\s*[\])]", "", value)
+    value = re.sub(r"\b(?:at|in|from|between|during|through|see)\s+(?:frames?\s+)?" + FRAME_LIST, "", value, flags=re.IGNORECASE)
+    value = re.sub(FRAME_LABEL, "", value)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", " ".join(value.split()))
+    value = re.sub(r"[\[(]\s*[\])]", "", value).strip(" ,;:")
     action = re.sub(r"^\s*[-*•]\s+", "", value.strip())
     action = re.sub(r"^\s*\(?\d+\)?[.)]\s+", "", action).strip()
     action = re.sub(r"\\([.,;:!?])", r"\1", action)
     key = action.lower().strip(". ")
-    if (not action or key in {"none", "null", "continue", "continuation", "no action", "no actions"}
+    if (not key or key in {"none", "null", "continue", "continuation", "no action", "no actions"}
             or key.startswith("continuation of ")):
         raise OutputContractError("use actions: [] when no independent action completes")
     return action if action.endswith(".") else action + "."
@@ -63,8 +71,6 @@ def normalize_group_result(data, frame_count):
         frames = _normalize_frames(item["frames"], allowed)
         if not isinstance(item["change"], str) or not item["change"].strip():
             raise OutputContractError("change must contain non-empty observation text")
-        if LOCAL_FRAME_RE.search(item["change"]):
-            raise OutputContractError("put image references only in frames, not change text")
         changes.append({"frames": frames, "change": item["change"].strip()})
     expected = [[f"K{i}", f"K{i+1}"] for i in range(frame_count - 1)]
     if [item["frames"] for item in changes] != expected:
@@ -84,9 +90,9 @@ def _frame_id(path):
     return f"img_{int(path.stem)}"
 
 
-def _global_actions(result, images):
-    return [{"frames": [_frame_id(images[int(frame[1:])]) for frame in item["frames"]],
-             "action": item["action"]} for item in result["actions"]]
+def _global_text(text, images):
+    mapping = {f"K{i}": _frame_id(path) for i, path in enumerate(images)}
+    return LOCAL_FRAME_RE.sub(lambda match: mapping.get(match[0], match[0]), text)
 
 
 def normalize_compiler_result(data, generator_results, segment_images):
@@ -95,9 +101,10 @@ def normalize_compiler_result(data, generator_results, segment_images):
         raise OutputContractError("compiler must return every group exactly once in order: " + ", ".join(keys))
     if len(generator_results) != len(segment_images):
         raise OutputContractError("generator results do not cover every group")
-    allowed = {_frame_id(path): int(path.stem) for images in segment_images for path in images}
+    allowed = {f"img_{frame['frame']}": frame["frame"]
+               for frame in _plan_compiler_images(segment_images)["frames"]}
     result = {}
-    for group, key in enumerate(keys):
+    for key in keys:
         item = data[key]
         if not isinstance(item, dict) or set(item) != {"review", "actions"}:
             raise OutputContractError(f"{key} needs only review and actions")
@@ -109,26 +116,18 @@ def normalize_compiler_result(data, generator_results, segment_images):
                 raise OutputContractError(f"{key} each action needs only frames and action")
             actions.append({"frames": _normalize_frames(action["frames"], allowed),
                             "action": _normalize_action_text(action["action"])})
-        unchanged = actions == _global_actions(generator_results[group], segment_images[group])
         review = item["review"]
-        if review is None:
-            if not unchanged:
-                raise OutputContractError(f"{key} review must explain changed actions; null requires an unchanged list")
-        else:
-            if not isinstance(review, list) or not review:
-                raise OutputContractError(f"{key} review must be null or a non-empty list")
-            if unchanged:
-                raise OutputContractError(f"{key} unchanged actions require review: null")
-            normalized = []
-            for note in review:
-                if not isinstance(note, dict) or set(note) != {"frames", "reason"}:
-                    raise OutputContractError(f"{key} each review needs only frames and reason")
-                if not isinstance(note["reason"], str) or not note["reason"].strip():
-                    raise OutputContractError(f"{key} review reason must explain the actual edit")
-                normalized.append({"frames": _normalize_frames(note["frames"], allowed),
-                                   "reason": " ".join(note["reason"].split())})
-            review = normalized
-        result[key] = {"review": review, "actions": actions}
+        if not isinstance(review, list) or not review:
+            raise OutputContractError(f"{key} review must be a non-empty evidence list")
+        normalized = []
+        for note in review:
+            if not isinstance(note, dict) or set(note) != {"frames", "reason"}:
+                raise OutputContractError(f"{key} each review needs only frames and reason")
+            if not isinstance(note["reason"], str) or not note["reason"].strip():
+                raise OutputContractError(f"{key} review reason must state visible evidence for the decision")
+            normalized.append({"frames": _normalize_frames(note["frames"], allowed),
+                               "reason": " ".join(note["reason"].split())})
+        result[key] = {"review": normalized, "actions": actions}
     return result
 
 
@@ -143,7 +142,8 @@ def _format_generator_output(results, groups=None):
                 frames = [_frame_id(groups[group][int(frame[1:])]) for frame in frames]
             return "[" + ", ".join(frames) + "]"
         lines.extend(("", f"[G{group}]", "changes:"))
-        lines.extend(f"- {refs(item)} {item['change']}" for item in result["changes"])
+        lines.extend(f"- {refs(item)} " + (_global_text(item["change"], groups[group])
+                     if groups is not None else item["change"]) for item in result["changes"])
         lines.append("Actions:" if result["actions"] else "Actions: []")
         lines.extend(f"- {refs(item)} {item['action']}" for item in result["actions"])
     return "\n".join(lines) + "\n"
@@ -154,8 +154,8 @@ def _format_compiler_output(result):
     for key, item in result.items():
         if lines:
             lines.append("")
-        lines.extend((f"[{key}]", "review: null" if item["review"] is None else "review:"))
-        for note in item["review"] or []:
+        lines.extend((f"[{key}]", "review:"))
+        for note in item["review"]:
             lines.append(f"- [{', '.join(note['frames'])}] {note['reason']}")
     return "\n".join(lines) + "\n"
 
@@ -325,16 +325,20 @@ def _plan_compiler_images(groups):
         ids = [int(path.stem) for path in paths]
         if len(ids) not in {3, 4, 5, 6} or ids != sorted(set(ids)):
             raise ValueError("grouped_3x3 needs groups of 3..6 distinct chronological frames")
+        selected = ids[:1] + ids[2:] if len(ids) == 4 else ids
         for frame, path in zip(ids, paths):
+            if frame not in selected:
+                continue
             entry = frames.setdefault(frame, {"frame": frame, "source": str(path.resolve()), "groups": []})
             entry["groups"].append(group)
         start = len(rows)
-        chunks = [ids[i:i+3] for i in range(0, len(ids), 3)]
+        chunks = [selected[i:i+3] for i in range(0, len(selected), 3)]
         for part, chunk in enumerate(chunks, 1):
             rows.append({"row_index": len(rows), "group": group, "part": part,
                          "parts": len(chunks), "frames": chunk})
-        group_plan.append({"group": group, "original_frames": ids, "selected_frames": ids,
-                           "omitted_frames": [], "row_start": start, "row_end": len(rows)})
+        group_plan.append({"group": group, "original_frames": ids, "selected_frames": selected,
+                           "omitted_frames": ids[1:2] if len(ids) == 4 else [],
+                           "row_start": start, "row_end": len(rows)})
     if not rows:
         raise ValueError("No groups to display")
     ordered = [{"time_index": index, **frames[frame]} for index, frame in enumerate(sorted(frames))]
@@ -355,7 +359,15 @@ def _plan_compiler_images(groups):
     return {"all_frames": ordered, "frames": ordered, "groups": group_plan, "rows": rows, "pages": pages}
 
 
-def _prepare_compiler_images(groups, directory):
+def _compiler_frame_size(value):
+    if (not isinstance(value, (tuple, list)) or len(value) != 2
+            or any(type(n) is not int or n <= 0 for n in value) or value[0] < value[1]):
+        raise ValueError("compiler_frame_size must be positive integer (landscape width, height), width >= height")
+    return tuple(value)
+
+
+def _prepare_compiler_images(groups, directory, *, frame_size=DEFAULT_COMPILER_FRAME_SIZE):
+    landscape_width, landscape_height = _compiler_frame_size(frame_size)
     plan = _plan_compiler_images(groups)
     directory.mkdir(parents=True, exist_ok=True)
     portrait_count = 0
@@ -363,9 +375,10 @@ def _prepare_compiler_images(groups, directory):
         with Image.open(frame["source"]) as image:
             portrait_count += image.height > image.width
     portrait = portrait_count > len(plan["all_frames"])/2
-    width, height = (180, 320) if portrait else (320, 180)
-    header = 24
-    font = ImageFont.truetype("DejaVuSans.ttf", 16)
+    width, height = ((landscape_height, landscape_width) if portrait
+                     else (landscape_width, landscape_height))
+    header = max(1, round(24 * landscape_height / 180))
+    font = ImageFont.truetype("DejaVuSans.ttf", max(1, round(16 * landscape_height / 180)))
     lookup = {frame["frame"]: frame for frame in plan["all_frames"]}
     prepared = []
     layout = ["Each image is a 3x3 timeline; read left to right, then top to bottom. "
@@ -392,7 +405,8 @@ def _prepare_compiler_images(groups, directory):
         prepared.append(target)
         layout.append(f"Image {page['page']}: " + "; ".join(descriptions) + ".")
     layout.append(f"Episode final frame: img_{plan['all_frames'][-1]['frame']}.")
-    _write_json(directory / "source_mapping.json", {"cell_long_side": 320,
+    _write_json(directory / "source_mapping.json", {"cell_long_side": max(width, height),
+                "cell_size": [width, height], "landscape_cell_size": [landscape_width, landscape_height],
                 "orientation": "portrait" if portrait else "landscape", "plan": plan,
                 "attachments": [str(path.resolve()) for path in prepared]})
     return prepared, "\n".join(layout)
@@ -403,7 +417,10 @@ def extract_keyframe_actions(
     keyframe_dir: Path,
     instruction: str,
     save_dir: Path,
+    *,
+    compiler_frame_size: tuple[int, int] = DEFAULT_COMPILER_FRAME_SIZE,
 ) -> tuple[Path, list[str]]:
+    compiler_frame_size = _compiler_frame_size(compiler_frame_size)
     keyframe_dir, save_dir = Path(keyframe_dir), Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     actions_path = save_dir / "kf_actions.txt"
@@ -429,8 +446,9 @@ def extract_keyframe_actions(
                                    ("kf_actions_common.txt", "kf_actions_generator.txt", "kf_actions_compiler.txt")]
     inputs = {"format_version": FORMAT_VERSION, "model": model_name, "instruction": instruction,
               "settings": dict(REQUEST_SETTINGS), "prompts": [common, generator, compiler],
-              "image_settings": {"cell_long_side": 320, "single_long_side": 1280, "jpeg_quality": 90,
-                                 "compiler_all_frames": True},
+              "image_settings": {"generator_cell_long_side": 320, "single_long_side": 1280,
+                                 "compiler_frame_size": list(compiler_frame_size), "jpeg_quality": 90,
+                                 "compiler_drop_second_of_four": True},
               "frames": [[[str(image.resolve()), image.stat().st_mtime_ns, image.stat().st_size]
                           for image in images] for images in groups]}
     if last_run is not None and last_run["inputs"] != inputs:
@@ -498,7 +516,8 @@ def extract_keyframe_actions(
             _write_text(save_dir / "generator_output.txt", _format_generator_output(completed))
         stage = "compiler"
         with _IMAGE_LOCK:
-            attachments, frame_order = _prepare_compiler_images(groups, save_dir / "compiler_images")
+            attachments, frame_order = _prepare_compiler_images(
+                groups, save_dir / "compiler_images", frame_size=compiler_frame_size)
         if "compiled" in checkpoint:
             compiled = normalize_compiler_result(checkpoint["compiled"], completed, groups)
         else:

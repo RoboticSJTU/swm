@@ -21,6 +21,7 @@ from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
 EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
+NORMALIZE_PDDL_NAMES = True  # 仅在导出的 JSON 中将 domain/problem 名称统一为 ROBOT_CONFIGURATION
 
 ROBOT_CONFIGURATION = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
@@ -537,6 +538,17 @@ def process_domain(task_domain, prompt_template, only_problem_template=None):
         if image_path is None:
             missing_image += 1
             continue
+
+        if NORMALIZE_PDDL_NAMES:
+            domain_text, problem_text = (
+                re.sub(
+                    r"(?i)(\(\s*define\s*\(\s*(?:domain|problem)\s+"
+                    r"|\(\s*:domain\s+)[^\s();]+",
+                    rf"\g<1>{ROBOT_CONFIGURATION}",
+                    text,
+                )
+                for text in (domain_text, problem_text)
+            )
 
         problem_output = f"<problem>\n{problem_text}\n</problem>"
         domain_output = f"<domain>\n{domain_text}\n</domain>"

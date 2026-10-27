@@ -11,33 +11,32 @@ Inputs
 {generator_output}
 
 Method
-1. Follow each object's control, support and use through the full timeline.
-2. Visit every group, including empty action groups. Check the Generator observations and actions against visible events and their physical order.
-3. Retain correct actions verbatim. Correct mistaken actions, remove unsupported ones, and restore omitted independent events using image evidence.
-4. Merge phases of the same occurrence across groups. Assign each event once to the group where its defining evidence first becomes sufficient; explain resulting changes in the affected groups.
+1. Reconstruct control, support and device-state transitions from visually established states across the full timeline, including the first and last transitions; a complete gesture need not appear within one group.
+2. Visit every group, including empty action groups. Verify the actual instance or part, source/destination and physical order against the images rather than repeating the Generator description.
+3. Retain correct actions, restore evidenced omissions and correct mistaken proposals, including earlier groups when later images contradict them. Follow each object through its release or handoff; do not invent a take/put cycle to preserve an earlier claim or filter observed events by relevance to the instruction.
+4. Merge only phases of the same instance and occurrence across groups. Assign each event once where its defining evidence first becomes sufficient; explain retention or edits with visible facts in every group.
 
 Output
 - Return JSON only, with exactly these outer keys in this order: {group_keys}.
 - Each group contains review followed by actions. Each action has frames followed by action.
-- Set review to null exactly when the group's action count, text, order and frame references remain unchanged; copy that list exactly.
-- Otherwise, review is a non-empty list of frames/reason items. Each reason connects visible facts to a specific edit, including evidence-reference corrections.
+- Every group has a non-empty review list of frames/reason items, including retained and empty action groups. State the relevant observed relation before and after, then the retention or edit it supports. For correction/removal, identify the contradictory relation or missing transition evidence; occlusion alone does not show that an object stayed at its old source.
 - For actions and reviews, cite at least two distinct chronological img_N labels from the attached images. Evidence may span groups.
-- Use actions: [] for groups with no new independent event. An unchanged empty list has review: null; deleting actions requires review.
-- Keep image references in frames. Action text is a plain single-line sentence and excludes |.
+- Use actions: [] when no new independent event is established, and explain the visible continuation or lack of a new transition in review.
+- Action text is a plain single-line sentence and excludes |.
 
 Example
-This excerpt shows an object-identity correction, an unchanged group and an empty group. Apply the format to the actual objects and every required group.
+This excerpt shows evidence for a correction, a retained action and an empty group. Apply the format to the actual objects and every required group.
 {{
   "G2": {{
-    "review": [{{"frames": ["img_136", "img_159", "img_186"], "reason": "The hand controls and lifts the cloth clear of the seated lid. Replace the proposed lid removal with cloth removal."}}],
+    "review": [{{"frames": ["img_136", "img_159", "img_186"], "reason": "The cloth changes from lid-supported to held clear by the hand, while the lid remains seated. Replace the proposed lid removal with cloth removal."}}],
     "actions": [{{"frames": ["img_159", "img_186"], "action": "Remove the cloth from the lid."}}]
   }},
   "G3": {{
-    "review": null,
+    "review": [{{"frames": ["img_186", "img_205"], "reason": "The held cloth settles on the table as the fingers open and withdraw. Retain this placement."}}],
     "actions": [{{"frames": ["img_186", "img_205"], "action": "Place the cloth on the table."}}]
   }},
   "G4": {{
-    "review": null,
+    "review": [{{"frames": ["img_205", "img_239"], "reason": "The cloth remains on the table while the empty hand retracts. No new independent event occurs."}}],
     "actions": []
   }}
 }}

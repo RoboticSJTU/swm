@@ -6,22 +6,21 @@ Instruction: {instruction}
 
 Inputs
 - Images: {frame_order}
-- Earlier action names for continuity context:
+- Earlier action proposals for continuity context:
 {previous_actions}
 
 Method
 1. Inspect the whole group. Use the grid to compare relations and the individual images to resolve detail.
-2. Describe each adjacent pair once in changes, in order: K0/K1, K1/K2, and so on. State the relevant visible start/end relations and uncertainty.
+2. Describe each adjacent pair once in changes, in order: K0/K1, K1/K2, and so on. State relevant visible before/after relations for the actual object or part: hand control and contact, support relative to fixed surfaces, and device state. Continuing hand contact does not by itself establish unchanged support.
 3. Assemble actions from the whole group's evidence, in physical order. An action may span several frames; distinct actions may share supporting frames.
-4. Keep preparation and continuation in changes. Use actions: [] when the group establishes no new independent event.
+4. Account for each evidenced control, support or device-state transition in actions, including first/last pairs and episode boundaries. Keep preparation and continuation in changes; use actions: [] when no new independent event is established.
 
 Output
 - Return JSON only, with exactly changes and actions.
 - Each change has frames followed by change; frames contains its two adjacent K labels.
-- Each action has frames followed by action (e.g., pick, open, turn_on, insert, turn, screw, push, press, pour, fold etc.). frames contains its three adjacent K labels.; cite at least two distinct supporting K labels in chronological order.
+- Each action has frames followed by action (e.g., pick, open, turn_on, insert, turn, screw, push, press, pour, fold etc.). Cite at least two distinct supporting K labels in chronological order.
 
-
-- Use a plain single-line action sentence, naming the object, source/target and hand as supported. Keep image references in frames; action text excludes |.
+- Use a plain single-line action sentence, naming the object, source/target and hand as supported; action text excludes |.
 
 Example
 Three frames jointly establish a pickup. Apply the same structure to the actual objects and all adjacent pairs in your group.

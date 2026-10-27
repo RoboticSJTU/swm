@@ -38,6 +38,7 @@ TASK_WORKERS = 100  # 主线程并发数
 PREPROCESS_WORKERS = TASK_WORKERS  # 关键帧提取并发
 
 FIXED_TEMPORAL_GRADIENT_RADIUS = {
+    "Galaxea": 21,
     "bridgedata_v2": 4,
     "human": 21,
     "agibot": 78,
