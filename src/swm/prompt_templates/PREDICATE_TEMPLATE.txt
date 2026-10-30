@@ -1,44 +1,36 @@
-Use only needed entries with these meanings and argument roles; this is a vocabulary, not a domain to copy. Other object categories use static unary predicates named by functional category, omitting color and other attributes irrelevant to operation logic (e.g., (cup ?c), not (white_cup ?cup)). Extensions must express a necessary distinction rather than rename an existing one. Prefer initials for parameter names, e.g., (cup ?c), (grip_free ?gf); add suffixes as needed to keep names unique in each operator's parameter list.
+Vocabulary and predicate-specific constraints; select needed entries under RULES, not a complete domain to copy.
 
 (:predicates
-  ; Static: categories and fixed structural/supply/control relations never change.
+  ; Static categories and structural/supply/control relations
   (hand ?h)
-  ; part_of and controls are optional; include only when required for correct participant bindings or necessary causal dependencies.
-  ; part_of binds a separately relevant component or spatial position to its functional whole.
-  (part_of ?p ?w)
-  ; Supply capability; a discrete portion's source availability is separate.
-  (dispenses ?s ?m)
-  (controls ?c ?d)
+  (part_of ?p ?w) ; Component or spatial position p belongs to whole w.
+  (dispenses ?s ?m) ; Supply capability, not availability of a discrete portion.
+  (controls ?c ?d) ; Control c operates device d.
 
-  ; Hand resource: acquisition consumes hand_free; release restores it.
-  (hand_free ?hf)
+  ; Hand resources
+  (hand_free ?hf) ; Neither holding an object nor sustaining button control.
   (holding ?h ?o)
-  ; Sustained button control occupies the hand until release, when needed.
-  (pressing ?h ?b)
-  ; Optional one-payload grip whose load requires active control.
-  ; Acquiring a payload replaces grip_free with gripping; release reverses it.
-  ; The hand keeps holding the tool; put it down only with a free grip.
-  (grip_free ?gf)
-  (gripping ?t ?o)
+  (pressing ?h ?b) ; Sustained button control occupies hand h until release.
 
-  ; Direct relations: on = support without a modeled fine-grained position; in = containment, including actual nesting.
-  ; Support, containment and closure are distinct.
-  ; Remove superseded relations when transferring or detaching their subject.
-  (on ?o ?s)
-  (in ?c1 ?c2)
-  (inserted ?o ?s)
-  (at ?o ?p) ; Fine-grained position; bind it to its surface with part_of, without duplicating on.
+  ; Tool grip
+  (grip_free ?gf) ; Active one-payload tool grip is free; required to put the tool down.
+  (gripping ?t ?o) ; Acquiring a payload replaces grip_free with gripping; release reverses it. The hand still holds the tool.
+
+  ; Location and insertion
+  (on ?o ?s) ; Direct support without a modeled fine-grained position.
+  (in ?c1 ?c2) ; c1 is directly contained in c2, including actual nesting; containment does not imply closure.
+  (inserted ?o ?s) ; Insertion is distinct from support and containment.
+  (at ?o ?p) ; Fine-grained surface position: declare (position ?p) and static (part_of ?p ?s). at replaces on for that placement rather than duplicating it.
+
+  ; Location supplements: alignment and relative position
   (under ?o ?r)
-  ; Keep task-required or execution-relevant alignment and relative positions.
-  ; These supplement the object's location relation.
-  ; Invalidate them when movement makes them false; preserve unchanged internal relations of an intact assembly.
   (aligned ?o ?r)
   (beside ?o ?r)
   (left_of ?o ?r)
   (right_of ?o ?r)
   (centered ?o ?r)
 
-  ; Dynamic state pairs: require and delete the old state when changing it.
+  ; Mutually exclusive state pairs
   (open ?o)
   (closed ?c)
   (is_on ?io)
@@ -50,52 +42,38 @@ Use only needed entries with these meanings and argument roles; this is a vocabu
   (folded ?f)
   (unfolded ?u)
 
-  ; Use clear only for objects whose task-defined stack manipulation requires removing all direct upper loads before taking the object alone or stacking directly onto it.
-  ; clear(x) means x has no direct upper load and is not directly held by any hand. Upper loads include actual nested stack members represented by in; ordinary container contents do not count as upper loads.
-  ; Require clear(x) for strict single-item pickup of x or stacking onto x. Operations that permit retained loads use their own preconditions.
-  ; Once clear is tracked for an object, maintain it across all relevant actions: delete it on pickup or addition of an upper load; restore it after release or removal of the last upper load only when the object is unheld and has no remaining upper load. Keep it false through handoffs.
-  ; Releasing a tracked object onto an ordinary support maintains the object's own clear; the support needs clear only if its own manipulation has the stack constraint above.
-  (clear ?c)
-  ; No object occludes the container opening.
-  ; Use only for necessary aperture obstruction beyond open/closed; ordinary contents need not cover the opening.
-  ; Keep uncovered separately only when opening access is needed independently of stack access; a held container can have an accessible opening while clear is false.
-  ; Restore only after the last actual covering object has been removed.
-  (uncovered ?u)
-  ; empty = no direct in contents of any modeled kind.
-  ; Adding any content invalidates empty; restore it only after the last leaves.
-  ; filled = required fill level reached, not merely nonempty.
-  (empty ?e)
-  (filled ?f)
-  ; Directional motion-path clearance, distinct from empty and clear.
-  ; Establish the affected direction only after all its blockers are removed; invalidate it if blocking is restored.
-  ; Neither direction implies the other.
-  (opening_clear ?oc)
-  (closing_clear ?cc)
-  (blocks_opening ?b ?u)
-  (blocks_closing ?b ?u)
+  ; Stack and opening access
+  (clear ?c) ; No direct upper load and no hand directly holding the object. Actual nested stack members count as loads; ordinary contents do not. Use only for necessary stack constraints: strict single-item pickup or stacking directly onto an object, not ordinary multi-object surface placement. Load-preserving operations use their own guards; not clear does not prove a load.
+  (uncovered ?u) ; No object occludes the opening; ordinary contents need not obstruct it. Use only for opening access beyond open/closed and independently of stack access: a held container can be uncovered while clear is false.
 
-  ; Optional physical pose: upright/upside_down and flat/vertical are pairs within their respective dimensions.
-  ; Keep poses needed for action applicability or an explicit task result, including necessary static distinctions.
+  ; Contents and fill level
+  (empty ?e) ; No direct in contents of any modeled kind.
+  (filled ?f) ; Required fill level reached, not merely nonempty.
+
+  ; Directional motion-path clearance
+  (opening_clear ?oc) ; Opening path has no blockers; distinct from empty, clear, and uncovered. Does not imply closing_clear.
+  (closing_clear ?cc) ; Closing path has no blockers; distinct from empty, clear, and uncovered. Does not imply opening_clear.
+  (blocks_opening ?b ?u) ; b obstructs opening unit u.
+  (blocks_closing ?b ?u) ; b obstructs closing unit u.
+
+  ; Pose pairs by dimension
   (upright ?u)
   (upside_down ?ud)
   (flat ?f)
   (vertical ?v)
 
-  ; Optional results: establish on actual completion; invalidate if undone.
-  ; Add a result only if retained physical facts cannot already establish the required event or outcome.
-  ; Heating differs from boiling; rinsing, wiping, and cleanliness differ.
-  ; A completed manipulation or waiting event establishes its supported result; no separate waiting or done predicate.
-  (heated ?h)
-  ; Boiling result of this discrete material portion, preserved by transfer.
-  ; Fresh portions have separate identities and do not inherit this result.
-  (boiled ?b)
-  (rinsed ?r)
+  ; Process results
+  (heated ?h) ; Heating differs from boiling.
+  (boiled ?b) ; Completed boiling of this discrete material portion.
+  (rinsed ?r) ; Rinsing, wiping, and cleanliness are distinct.
   (wiped ?w)
   (clean ?c)
   (wet ?w)
   (stirred ?s)
-  ; Temperature of contained water, distinct from the container's temperature and from filled's level threshold.
-  ; Mixing to warm replaces the hot result.
-  (contains_hot_water ?chw)
-  (contains_warm_water ?cww)
+
+  ; Material state and composition
+  (hot ?m) ; Currently hot; distinct from having been heated.
+  (cold ?m) ; Currently cold.
+  (warm ?m) ; Task-required warm temperature; not implied by mixing.
+  (mixed ?m) ; Task-required mixture; does not imply temperature or fill level.
 )
