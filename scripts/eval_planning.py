@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import sys
 import traceback
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from multiprocessing import Manager
 from pathlib import Path
+from queue import Empty
+from tempfile import TemporaryDirectory
 
-root_dir = Path("/home/xyx/下载/swm")
+root_dir = Path("/inspire/hdd/global_user/xiaoyunxiao-240108120113/swm")
 sys.path.insert(0, str(root_dir / "src"))
 
 from swm.llm import call_gpt
 from swm.pddl.attribution import attribute_failure
+from swm.pddl.eval_progress import ProgressDisplay, print_results
 from swm.pddl.eval_report import render_markdown_report
 from swm.pddl.generation import parse_pddl_output, strip_code_block
 from swm.pddl.planner import solve_pddl
@@ -22,14 +27,18 @@ from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
 from swm.pddl.validate import validate_plan_feasibility
 
 # 基本配置
-eval_models = ["9B_full_1019", "9B_full_1019_nopro"]  # 按顺序对应本地端口 8001、8002、8003……
+eval_models = ["9B_1031"]  # 按顺序对应本地端口 8001、8002、8003……
 judge_model = "Qwen3.8-27B"
-attribution_model = "Qwen3.8-27B"
-ROBOT_CONFIGURATION = "single_arm"
-datasets = ["swm", "swm_v2", "unidomain"]
+# ROBOT_CONFIGURATION = "single_arm"
+# datasets = ["swm", "swm_v2", "unidomain"]
+ROBOT_CONFIGURATION = "dual_arm"
+datasets = ["swm_dual"]
 generation_max_workers = 200
+attribution_model = judge_model
 judge_max_workers = generation_max_workers
-prompt_files = ["training_input.txt", "training_input_only_problem.txt"]
+attribution_max_workers = generation_max_workers
+logger = logging.getLogger("swm.eval_planning")
+prompt_files = ["training_input.txt"]
 
 
 def configure_eval(model: str, prompt_file: str, port: int = 8001):
@@ -43,7 +52,7 @@ def configure_eval(model: str, prompt_file: str, port: int = 8001):
     elif prompt_path.name == "vlm_cot.txt":
         eval_mode = "nl"
     else:
-        raise ValueError(f"未知 prompt 文件名，无法判断评测模式: {prompt_path.name}")
+        raise ValueError(f"Unknown prompt template: {prompt_path.name}")
     eval_root = root_dir / "eval_results" / eval_model
     if problem_only:
         eval_root /= "only_problem"
@@ -55,6 +64,10 @@ configure_eval(eval_models[0], prompt_files[0])
 def number(name: str) -> int:
     match = re.search(r"(\d+)$", name)
     return int(match[1]) if match else 0
+
+
+def task_identifier(task: dict) -> str:
+    return str(number(task["episode"])) if task["flat"] else f"{task['task']}/{task['episode']}"
 
 
 def generation_complete(task: dict) -> bool:
@@ -222,8 +235,19 @@ def judge_one(task: dict):
             return task, False, False, "missing_plan"
 
         if eval_mode == "pddl":
-            # PFV 前统一按人类偏好重排一次，覆盖新求解和缓存的 plan。
-            plan_reorder(save_dir / "domain.pddl", save_dir / "problem.pddl", plan_file, plan_file)
+            # 新求解和缓存的 plan 均先重排，失败时回退后继续验证。
+            original_plan = plan_file.read_text(encoding="utf-8")
+            try:
+                plan_reorder(
+                    save_dir / "domain.pddl",
+                    save_dir / "problem.pddl",
+                    plan_file,
+                    plan_file,
+                    allow_effect_overlap=True,
+                )
+            except Exception as e:
+                plan_file.write_text(original_plan, encoding="utf-8")
+                logger.warning("Plan reordering failed; using original plan %s: %s", plan_file, e)
 
         candidate_plan = plan_file.read_text(encoding="utf-8").strip()
         if not candidate_plan:
@@ -240,9 +264,12 @@ def judge_one(task: dict):
         )
 
         judge_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        (save_dir / "judge_error.log").unlink(missing_ok=True)
         return task, True, result["pass"] is True, "done"
 
     except Exception as e:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / "judge_error.log").write_text(traceback.format_exc(), encoding="utf-8")
         return task, False, False, str(e)
 
 
@@ -251,20 +278,10 @@ def write_summary(all_tasks: list[dict]) -> Path:
     records = {dataset: [] for dataset in datasets}
     for task in all_tasks:
         save_dir = task["save_dir"]
-        attribution_path = save_dir / "attribution.json"
-        result = None
-        if eval_mode == "pddl" and attribution_path.is_file():
-            try:
-                result = json.loads(attribution_path.read_text(encoding="utf-8"))
-                if not isinstance(result, dict):
-                    result = None
-            except (OSError, ValueError):
-                pass
-        identifier = str(number(task["episode"])) if task["flat"] else f"{task['task']}/{task['episode']}"
         records[task["dataset"]].append({
-            "id": identifier, "directory": save_dir,
+            "id": task_identifier(task), "directory": save_dir,
             "solved": generation_complete(task), "passed": load_cached_status(task)[1],
-            "attribution": result,
+            "attribution": task.get("attribution") if eval_mode == "pddl" else None,
         })
     eval_root.mkdir(parents=True, exist_ok=True)
     dataset_tag = "_".join(datasets)
@@ -273,12 +290,11 @@ def write_summary(all_tasks: list[dict]) -> Path:
     report_path.write_text(report_text, encoding="utf-8")
     legacy_path = report_path.with_suffix(".log")
     if legacy_path.is_file():
-        legacy_path.write_text(f"报告已改为 Markdown：{report_path.name}\n", encoding="utf-8")
+        legacy_path.write_text(f"Report moved to Markdown: {report_path.name}\n", encoding="utf-8")
     if eval_mode == "pddl":
         (eval_root / f"attribution_summary_{dataset_tag}.json").write_text(
             json.dumps(attribution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
         )
-    print(f"报告已保存到: {report_path}")
     return report_path
 
 
@@ -306,87 +322,210 @@ def repair_saved_task(task: dict):
     return True
 
 
-def main():
-    all_tasks = load_tasks()
-    prefix = f"[{eval_model}/{prompt_path.stem}]"
-    print(f"{prefix} 开始：{len(all_tasks)} 个任务", flush=True)
+def prepare_task(task):
+    """Repair and inspect a cache before deciding whether generation is needed."""
     if eval_mode == "pddl":
-        with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
-            list(executor.map(repair_saved_task, all_tasks))
+        repair_saved_task(task)
+    status, _ = load_cached_status(task)
+    failed_candidate = status == "error" and (
+        all((task["save_dir"] / name).is_file() for name in ("domain.pddl", "problem.pddl"))
+        if eval_mode == "pddl" else generation_complete(task)
+    )
+    if status == "judge" or failed_candidate or generation_complete(task):
+        return task, True, "cached"
+    return generate_one(task)
 
-    generation_tasks = []
-    judge_tasks = []
-    for task in all_tasks:
-        cached_status, _ = load_cached_status(task)
-        failed_candidate = cached_status == "error" and (
-            all((task["save_dir"] / name).is_file() for name in ("domain.pddl", "problem.pddl"))
-            if eval_mode == "pddl" else generation_complete(task)
-        )
-        if cached_status == "judge" or failed_candidate:
-            continue
-        if generation_complete(task):
-            judge_tasks.append(task)
-        else:
-            generation_tasks.append(task)
 
-    skipped = len(all_tasks) - len(generation_tasks) - len(judge_tasks)
-    print(f"{prefix} 缓存 {skipped}，待生成 {len(generation_tasks)}，待判定 {len(judge_tasks)}", flush=True)
+def generate_tasks(tasks, progress):
+    stats = {"solved": 0, "failed": 0, "cached": 0}
+    progress("generation", 0, len(tasks), **stats)
     with ThreadPoolExecutor(max_workers=generation_max_workers) as executor:
-        futures = [executor.submit(generate_one, task) for task in generation_tasks]
-        for future in as_completed(futures):
-            task, ok, _ = future.result()
-            if ok:
-                judge_tasks.append(task)
-
-    print(f"{prefix} 判定 {len(judge_tasks)} 个任务", flush=True)
-    # 先验证 Judge 可用，再并发判定其余任务。
-    if judge_tasks:
-        _, ok, _, info = judge_one(judge_tasks[0])
-        if not ok:
-            raise SystemExit(
-                f"❌ Judge 生成失败: {info}\n"
-                "PDDL 结果已保留；请在可访问 Judge API 的环境中重新运行本脚本。"
-            )
-
-    with ThreadPoolExecutor(max_workers=judge_max_workers) as executor:
-        futures = [executor.submit(judge_one, task) for task in judge_tasks[1:]]
-
-        for future in as_completed(futures):
-            task, ok, _, info = future.result()
+        futures = [executor.submit(prepare_task, task) for task in tasks]
+        for completed, future in enumerate(as_completed(futures), 1):
+            task, ok, info = future.result()
+            solved = generation_complete(task)
+            stats["solved"] += solved
+            stats["failed"] += not solved
+            stats["cached"] += info == "cached"
             if not ok:
-                raise SystemExit(
-                    f"❌ Judge 生成失败: "
-                    f"{task['dataset']}/{task['task']}/{task['episode']}: {info}\n"
-                    "已生成的 PDDL 和 Judge 结果均已保留，重新运行将自动续传。"
-                )
-
-    # 只给非通过的 PDDL 任务归因；不可解、无 plan/无 judge 同样进入。
-    if eval_mode == "pddl":
-        attribution_tasks = [task for task in all_tasks if not load_cached_status(task)[1]]
-        print(f"{prefix} 归因 {len(attribution_tasks)} 个任务", flush=True)
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = [executor.submit(
-                attribute_failure, task["save_dir"], task["gt_dir"], task["instruction"], task["image"],
-                model=attribution_model, reasoning_effort="medium",
-            ) for task in attribution_tasks]
-            for future in as_completed(futures):
-                future.result()
-    write_summary(all_tasks)
+                logger.warning("Generation failed %s/%s: %s", task["dataset"], task_identifier(task), info)
+            progress("generation", completed, len(tasks), **stats)
+    progress("generation", len(tasks), len(tasks), state="done", **stats)
 
 
-def evaluate_model(model: str, port: int):
-    """Each model has its own process; run both prompts with isolated globals."""
-    for prompt_file in prompt_files:
+def attribute_one(task):
+    with TemporaryDirectory(prefix="swm_attribution_") as temporary:
+        artifact_dir = Path(temporary)
+        result = attribute_failure(
+            task["save_dir"], task["gt_dir"], task["instruction"], task["image"],
+            model=attribution_model, reasoning_effort="medium", artifact_dir=artifact_dir,
+        )
+        # Preserve parser evidence for the report after temporary files are removed.
+        solver_path = artifact_dir / "attribution_solver/result.json"
+        if result is not None and solver_path.is_file():
+            result["checks"]["fast_downward"] = json.loads(solver_path.read_text(encoding="utf-8"))
+        return result
+
+
+def judge_and_attribute(all_tasks, progress):
+    """Run independent pools; a failed verdict immediately schedules attribution."""
+    pending_judges, known_failures = [], []
+    judged = passed_count = failed_count = cached = solved = errors = 0
+    for task in all_tasks:
+        status, passed = load_cached_status(task)
+        complete = generation_complete(task)
+        if complete:
+            solved += 1
+            if status == "judge":
+                judged += 1
+                cached += 1
+                passed_count += passed
+                failed_count += not passed
+            else:
+                pending_judges.append(task)
+        if not passed and (status == "judge" or not complete):
+            known_failures.append(task)
+
+    stats = {"attributed": 0, "classified": 0, "else_count": 0}
+    attribution_total = len(known_failures) if eval_mode == "pddl" else 0
+
+    def report(*, judge=False, done=False):
+        if judge:
+            state = ("failed" if errors else "done") if done or judged == solved else "running"
+            progress("judge", judged, solved, state=state, passed=passed_count,
+                     failed=failed_count, cached=cached, errors=errors)
+        if eval_mode == "pddl":
+            progress("attribution", stats["attributed"], attribution_total, state="done" if done else "running",
+                     classified=stats["classified"], else_count=stats["else_count"],
+                     **{"unjudged" if errors and done else "waiting": solved - judged})
+
+    report(judge=True)
+    first_error = None
+    with ThreadPoolExecutor(max_workers=judge_max_workers) as judges, \
+         ThreadPoolExecutor(max_workers=attribution_max_workers) as attributions:
+        futures = {attributions.submit(attribute_one, task): ("attribution", task)
+                   for task in known_failures} if eval_mode == "pddl" else {}
+        # Probe the service once before sending a large batch. Attribution of
+        # already-known failures continues while this first request is slow.
+        probe = judges.submit(judge_one, pending_judges[0]) if pending_judges else None
+        if probe is not None:
+            futures[probe] = ("judge", pending_judges[0])
+        while futures:
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in completed:
+                stage, task = futures.pop(future)
+                if stage == "attribution":
+                    result = future.result()
+                    task["attribution"] = result
+                    stats["attributed"] += 1
+                    if result is not None:
+                        stats["else_count" if result["label"] == "else" else "classified"] += 1
+                else:
+                    _, ok, passed, info = future.result()
+                    judged += 1
+                    if not ok:
+                        errors += 1
+                        message = f"{task['dataset']}/{task_identifier(task)}: {info}"
+                        first_error = first_error or message
+                        logger.error("Judge request failed %s", message)
+                    else:
+                        passed_count += passed
+                        failed_count += not passed
+                        if not passed and eval_mode == "pddl":
+                            futures[attributions.submit(attribute_one, task)] = ("attribution", task)
+                            attribution_total += 1
+                        if future is probe:
+                            for remaining in pending_judges[1:]:
+                                futures[judges.submit(judge_one, remaining)] = ("judge", remaining)
+                report(judge=stage == "judge")
+    report(judge=True, done=True)
+    if errors:
+        raise RuntimeError(f"Judge errors={errors}; first error: {first_error}. Rerun to resume.")
+    return stats
+
+
+def evaluate_model(model: str, port: int, *, model_index, events):
+    """Workers only publish progress; the parent owns all terminal output."""
+    results = []
+    for prompt_index, prompt_file in enumerate(prompt_files):
         configure_eval(model, prompt_file, port)
-        print(f"\n模型: {eval_model} | 服务: {eval_base_url} | 模板: {prompt_file}", flush=True)
-        main()
+        eval_root.mkdir(parents=True, exist_ok=True)
+        log_path = eval_root / "evaluation.log"
+        logging.basicConfig(filename=log_path, level=logging.WARNING, force=True,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s", encoding="utf-8")
+        logger.setLevel(logging.INFO)
+        label = model if len(prompt_files) == 1 else f"{model}/{prompt_path.stem}"
+        result = {"run": f"{model_index}:{prompt_index}", "label": label, "log": str(log_path)}
+
+        def progress(stage, completed, total, *, state="running", **stats):
+            events.put({"run": result["run"], "stage": stage, "completed": completed,
+                        "total": total, "state": state, "stats": stats})
+
+        try:
+            logger.info("Evaluation started model=%s prompt=%s", model, prompt_file)
+            tasks = load_tasks()
+            generate_tasks(tasks, progress)
+            stats = judge_and_attribute(tasks, progress)
+            report = write_summary(tasks)
+            statuses = [load_cached_status(task) for task in tasks]
+            result.update(total=len(tasks), solved=sum(generation_complete(task) for task in tasks),
+                          judged=sum(status == "judge" for status, _ in statuses),
+                          passed=sum(passed for _, passed in statuses), **stats, report=str(report), status="done")
+            logger.info("Evaluation done %s", result)
+        except Exception as error:
+            logger.exception("Evaluation failed")
+            result.update(status="failed", error=f"{type(error).__name__}: {error}")
+        results.append(result)
+    return results
+
+
+def run_evaluations():
+    if not eval_models or len(set(eval_models)) != len(eval_models):
+        raise ValueError("At least one model is required; model names must be unique")
+    runs = []
+    for model_index, model in enumerate(eval_models):
+        for prompt_index, prompt_file in enumerate(prompt_files):
+            stages = ("generation", "judge") if prompt_file == "vlm_cot.txt" else ("generation", "judge", "attribution")
+            runs.append({"id": f"{model_index}:{prompt_index}",
+                         "label": model if len(prompt_files) == 1 else f"{model}/{Path(prompt_file).stem}", "stages": stages})
+    print(f"full evaluation | models={len(eval_models)} | pddl_workers={generation_max_workers} "
+          f"judge_workers={judge_max_workers} attribution_workers={attribution_max_workers}", flush=True)
+    print("Attribution total grows as judge failures arrive. Details are saved in reports and logs.", flush=True)
+    results = []
+    with Manager() as manager, ProcessPoolExecutor(max_workers=len(eval_models)) as executor:
+        events = manager.Queue()
+        # Start workers before tqdm creates its terminal monitor thread.
+        pending = {executor.submit(evaluate_model, model, 8001 + index,
+                   model_index=index, events=events): index
+                   for index, model in enumerate(eval_models)}
+        display = ProgressDisplay(runs)
+        try:
+            while pending:
+                try:
+                    display.update(events.get(timeout=0.2))
+                except Empty:
+                    pass
+                for future in list(pending):
+                    if future.done():
+                        index = pending.pop(future)
+                        try:
+                            results.extend(future.result())
+                        except Exception as error:
+                            results.append({"run": f"{index}:0", "label": eval_models[index], "status": "failed",
+                                            "error": str(error), "log": str(root_dir / "eval_results" / eval_models[index] / "evaluation.log")})
+                display.heartbeat()
+            while True:
+                try:
+                    display.update(events.get_nowait())
+                except Empty:
+                    break
+        finally:
+            display.close()
+    results.sort(key=lambda item: tuple(map(int, item["run"].split(":"))))
+    print_results(results)
+    return results
 
 
 if __name__ == "__main__":
-    if len(set(eval_models)) != len(eval_models):
-        raise ValueError("模型名不能重复，否则评测结果目录会冲突")
-    with ProcessPoolExecutor(max_workers=len(eval_models)) as executor:
-        futures = [executor.submit(evaluate_model, model, 8001 + i)
-                   for i, model in enumerate(eval_models)]
-        for future in as_completed(futures):
-            future.result()
+    results = run_evaluations()
+    raise SystemExit(int(any(result["status"] != "done" for result in results)))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -28,21 +29,23 @@ def get_client(model: str, *, base_url: str | None = None):
         # api_key = os.getenv("lin_API_KEY")
         # base_url = "https://direct.linkai.pics/v1" 
         # api_key = os.getenv("sub2api_key")
-        # base_url="http://10.11.13.213:5003/v1"
+        # base_url="http://127.0.0.1:5003/v1"
         
     elif model.startswith(("kimi", "qwen", "glm", "deepseek")):
         api_key = os.getenv("BOYUE_API_KEY")
         base_url = "https://apicz.boyuerichdata.com/v1"
-
     elif model.startswith("Qwen3.8-27B"):
         # api_key = os.getenv("SII_API_KEY_1")
         # base_url = "https://cqhbod8bjjjbcoakk8pmeebgkaq9akcq.openapi-sj.sii.edu.cn/v1"
         # 公共
-        api_key = os.getenv("SII_API_KEY_2")
-        base_url = "https://x.openapi-qb-ai.sii.edu.cn/v1" 
+        # api_key = os.getenv("SII_API_KEY_2")
+        # base_url = "https://x.openapi-qb-ai.sii.edu.cn/v1" 
         # # 决策
         # api_key = os.getenv("SII_API_KEY_2")
         # base_url = "https://xy.openapi-qb-ai.sii.edu.cn/v1"   
+        ## 本地
+        api_key = "0"
+        base_url = "http://127.0.0.1:8000/v1"   
 
     # elif model.startswith("qwen3.8-flash"):
     #     api_key = os.getenv("Ali_API_KEY")
@@ -71,7 +74,7 @@ def call_gpt(
     capture: dict | None = None,
     max_retries: int | None = None,
 ) -> str:
-    content = [{"type": "text", "text": prompt}]
+    content = []
     if image_paths:
         if not isinstance(image_paths, (list, tuple)):
             image_paths = [image_paths]
@@ -82,6 +85,8 @@ def call_gpt(
                     "image_url": {"url": image_to_data_url(path)},
                 }
             )
+
+    content.append({"type": "text", "text": prompt})
 
     client = get_client(model, base_url=base_url)
     if max_retries is not None:
@@ -216,9 +221,11 @@ def call_gpt_json(
                         "error": str(error),
                     }
                 )
-            print(f"call gpt error: {error}")
-            if raw_output is not None:
-                print(raw_output[:2000])
+            logging.getLogger(__name__).warning(
+                "JSON 调用失败: model=%s attempt=%s/%s images=%s: %s",
+                model, attempt + 1, attempts, image_paths, error,
+            )
+            logging.getLogger(__name__).debug("JSON 调用失败的原始响应:\n%s", raw_output, exc_info=True)
             if attempt + 1 < attempts:
                 time.sleep(2**attempt)
 

@@ -10,6 +10,7 @@ from PIL import Image
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 def extract_frames(video_path: Path, frames_dir: Path) -> None:
@@ -37,6 +38,7 @@ def save_unidomain_energy(frames_dir, save_path) -> None:
 
 
 def save_temporal_gradient_energy(frames_dir, save_path) -> None:
+    """Cache centered-difference energy with repeated boundary images."""
     frame_paths = sorted(
         Path(frames_dir).glob("*.png"), key=lambda path: int(path.stem)
     )
@@ -66,8 +68,8 @@ def extract_temporal_gradient_keyframes(
     keyframe_dir: Path,
     radius: int,
     smooth_k: int = 5,
-    merge_pct: float = 0.5,
     plot_energy: bool = True,
+    global_merge_percent: int = 5,
 ) -> None:
     if any(keyframe_dir.glob("seg_*/*.png")):
         return
@@ -83,6 +85,11 @@ def extract_temporal_gradient_keyframes(
     if energy is None or energy.shape != (len(images),):
         save_temporal_gradient_energy(frames_dir, energy_path)
         energy = np.load(energy_path)
+    # Cached boundary differences span one interval, so undo their /2 before
+    # squaring: one-sided endpoint energy is four times the cached value.
+    energy = energy.copy()
+    if len(energy) > 1:
+        energy[[0, -1]] *= 4
     smooth_k = smooth_k | 1
     pad = smooth_k // 2
     energy = np.convolve(
@@ -102,14 +109,15 @@ def extract_temporal_gradient_keyframes(
             extrema.append(center)
 
     median = float(np.median(energy))
+    global_merge_threshold = float(energy.max()) * global_merge_percent / 100
     merged = []
     for current in extrema:
         if merged:
             previous = merged[-1]
             current_energy = float(energy[current])
             previous_energy = float(energy[previous])
-            scale = max(abs(current_energy), abs(previous_energy), 1e-9)
-            if abs(current_energy - previous_energy) / scale <= merge_pct:
+            difference = abs(current_energy - previous_energy)
+            if difference <= global_merge_threshold:
                 if abs(current_energy - median) > abs(previous_energy - median):
                     merged[-1] = current
                 continue
@@ -139,24 +147,27 @@ def extract_temporal_gradient_keyframes(
             start = end
             seen_valley = False
 
-    if segments and first_peak_index:
-        segments[0] = sorted(set(extrema[:first_peak_index] + segments[0]))
     if not segments:
         segments = [list(extrema)]
 
-    if len(extrema) >= 5:
-        first_extrema, last_extrema = extrema[0], extrema[-1]
-        extrema = extrema[1:-1]
-        segments[0] = [frame for frame in segments[0] if frame != first_extrema]
-        segments[-1] = [frame for frame in segments[-1] if frame != last_extrema]
-
-    segments[0] = sorted({0, *segments[0]})
-    segments[-1] = sorted({*segments[-1], frame_count - 1})
+    # Replace boundary representatives instead of adding and trimming frames.
+    if len(segments) == 1 and len(segments[0]) == 1:
+        segments[0] = sorted({0, frame_count - 1})
+    else:
+        segments[0][0] = 0
+        segments[-1][-1] = frame_count - 1
 
     if plot_energy:
         figure, axis = plt.subplots(figsize=(10, 3))
-        axis.plot(energy, linewidth=1)
-        axis.scatter(extrema, energy[extrema], color="red", s=25, zorder=3)
+        axis.plot(energy, linewidth=1, label="Smoothed temporal-gradient energy")
+        plot_indices = sorted({frame for segment in segments for frame in segment})
+        axis.scatter(plot_indices, energy[plot_indices], color="red", s=25,
+                     zorder=3, label="Selected keyframes")
+        axis.set_xlabel("Source frame index (0-based)")
+        axis.set_ylabel("Energy")
+        axis.set_xlim(0, max(frame_count - 1, 1))
+        axis.xaxis.set_major_locator(MaxNLocator(integer=True))
+        axis.legend(frameon=False, fontsize=8)
         axis.spines[["top", "right"]].set_visible(False)
         axis.spines[["left", "bottom"]].set_linewidth(1.0)
         axis.tick_params(

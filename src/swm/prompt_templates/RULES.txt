@@ -19,7 +19,7 @@
 - Keep each tracked predicate consistent with its definition in init and every relevant action for all affected objects, including acquisition, release, handoff, and load changes. Establish an absence predicate only when no relevant instance remains; removing or excluding one instance is insufficient unless a reachable invariant proves it was the last.
 - Pick acquires holding and immediately removes the source location; place releases holding and establishes the target location. Each hand has unit capacity: account for acquisition, release, and sustained control without unsupported hand preferences. Require distinct simultaneous hands and use (not (= ?x ?y)) only for roles that must differ.
 - Require accessible targets and acyclic support/containment, including when placing a carried object relative to its descendants.
-- Represent modeled material with containment relations and its own states, without duplicate container-state predicates. Separate portions only when locations, composition, or processing results require independent tracking. Transfers replace location; unlimited supplies use dispenses without recreating delivered portions or giving fresh portions their results.
+- Represent modeled material with containment relations and its own states, without duplicate container-state predicates. Separate portions only when locations, composition, or processing results require independent tracking. Finite-container transfers replace the source location. Unlimited supplies use static dispenses without in(material, source) or artificial available flags; check flow separately, prevent duplicate delivery of a portion, and never copy prior results to fresh portions.
 
 ## Task semantics
 

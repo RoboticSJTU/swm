@@ -271,8 +271,8 @@ def _call_json(model, prompt, images, normalize, *, records_path, label, run_id=
 
 
 def _prepare_generator_images(images, directory, prefix):
-    if len(images) not in {3, 4, 5, 6}:
-        raise ValueError("Generator comparison needs 3..6 chronological keyframes")
+    if len(images) not in {2, 3, 4, 5, 6}:
+        raise ValueError("Generator comparison needs 2..6 chronological keyframes")
     directory.mkdir(parents=True, exist_ok=True)
     with Image.open(images[0]) as image:
         shapes = [image.size]
@@ -282,8 +282,8 @@ def _prepare_generator_images(images, directory, prefix):
     portrait = sum(height > width for width, height in shapes) > len(shapes) / 2
     width, height = (180, 320) if portrait else (320, 180)
     header = 24
-    if len(images) == 3:
-        rows, columns = 1, 3
+    if len(images) <= 3:
+        rows, columns = 1, len(images)
     elif len(images) == 4:
         rows, columns = 2, 2
     else:
@@ -323,8 +323,8 @@ def _plan_compiler_images(groups):
     frames, group_plan, rows = {}, [], []
     for group, paths in enumerate(groups):
         ids = [int(path.stem) for path in paths]
-        if len(ids) not in {3, 4, 5, 6} or ids != sorted(set(ids)):
-            raise ValueError("grouped_3x3 needs groups of 3..6 distinct chronological frames")
+        if len(ids) not in {2, 3, 4, 5, 6} or ids != sorted(set(ids)):
+            raise ValueError("grouped_3x3 needs groups of 2..6 distinct chronological frames")
         selected = ids[:1] + ids[2:] if len(ids) == 4 else ids
         for frame, path in zip(ids, paths):
             if frame not in selected:
@@ -366,7 +366,7 @@ def _compiler_frame_size(value):
     return tuple(value)
 
 
-def _prepare_compiler_images(groups, directory, *, frame_size=DEFAULT_COMPILER_FRAME_SIZE):
+def _prepare_compiler_images(groups, directory, *, frame_size=DEFAULT_COMPILER_FRAME_SIZE, auto_orient=True):
     landscape_width, landscape_height = _compiler_frame_size(frame_size)
     plan = _plan_compiler_images(groups)
     directory.mkdir(parents=True, exist_ok=True)
@@ -374,7 +374,7 @@ def _prepare_compiler_images(groups, directory, *, frame_size=DEFAULT_COMPILER_F
     for frame in plan["all_frames"]:
         with Image.open(frame["source"]) as image:
             portrait_count += image.height > image.width
-    portrait = portrait_count > len(plan["all_frames"])/2
+    portrait = auto_orient and portrait_count > len(plan["all_frames"])/2
     width, height = ((landscape_height, landscape_width) if portrait
                      else (landscape_width, landscape_height))
     header = max(1, round(24 * landscape_height / 180))
@@ -407,7 +407,7 @@ def _prepare_compiler_images(groups, directory, *, frame_size=DEFAULT_COMPILER_F
     layout.append(f"Episode final frame: img_{plan['all_frames'][-1]['frame']}.")
     _write_json(directory / "source_mapping.json", {"cell_long_side": max(width, height),
                 "cell_size": [width, height], "landscape_cell_size": [landscape_width, landscape_height],
-                "orientation": "portrait" if portrait else "landscape", "plan": plan,
+                "auto_orient": auto_orient, "orientation": "portrait" if portrait else "landscape", "plan": plan,
                 "attachments": [str(path.resolve()) for path in prepared]})
     return prepared, "\n".join(layout)
 
@@ -419,6 +419,7 @@ def extract_keyframe_actions(
     save_dir: Path,
     *,
     compiler_frame_size: tuple[int, int] = DEFAULT_COMPILER_FRAME_SIZE,
+    compiler_auto_orient: bool = True,
 ) -> tuple[Path, list[str]]:
     compiler_frame_size = _compiler_frame_size(compiler_frame_size)
     keyframe_dir, save_dir = Path(keyframe_dir), Path(save_dir)
@@ -434,8 +435,8 @@ def extract_keyframe_actions(
     groups = [images for images in groups if images]
     if not groups:
         raise ValueError(f"No keyframes found in {keyframe_dir}")
-    if any(len(images) not in {3, 4, 5, 6} for images in groups):
-        raise ValueError("Action extraction needs 3..6 chronological keyframes per group")
+    if any(len(images) not in {2, 3, 4, 5, 6} for images in groups):
+        raise ValueError("Action extraction needs 2..6 chronological keyframes per group")
     for images in groups:
         ids = [int(path.stem) for path in images]
         if ids != sorted(set(ids)):
@@ -447,7 +448,8 @@ def extract_keyframe_actions(
     inputs = {"format_version": FORMAT_VERSION, "model": model_name, "instruction": instruction,
               "settings": dict(REQUEST_SETTINGS), "prompts": [common, generator, compiler],
               "image_settings": {"generator_cell_long_side": 320, "single_long_side": 1280,
-                                 "compiler_frame_size": list(compiler_frame_size), "jpeg_quality": 90,
+                                 "compiler_frame_size": list(compiler_frame_size),
+                                 "compiler_auto_orient": compiler_auto_orient, "jpeg_quality": 90,
                                  "compiler_drop_second_of_four": True},
               "frames": [[[str(image.resolve()), image.stat().st_mtime_ns, image.stat().st_size]
                           for image in images] for images in groups]}
@@ -517,7 +519,8 @@ def extract_keyframe_actions(
         stage = "compiler"
         with _IMAGE_LOCK:
             attachments, frame_order = _prepare_compiler_images(
-                groups, save_dir / "compiler_images", frame_size=compiler_frame_size)
+                groups, save_dir / "compiler_images", frame_size=compiler_frame_size,
+                auto_orient=compiler_auto_orient)
         if "compiled" in checkpoint:
             compiled = normalize_compiler_result(checkpoint["compiled"], completed, groups)
         else:

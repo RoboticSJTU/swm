@@ -114,6 +114,44 @@ def infer_occupancy_model(
         for lit in action.del_eff:
             del_count[lit[0]] += 1
 
+    def score_model(model: OccupancyModel) -> tuple | None:
+        # A resource must be either free or occupied by exactly one object in
+        # every observed state. Names and approximate correlations are not proof.
+        previous_free = None
+        acquire = release = state_matches = 0
+        free_init_count = occ_init_count = 0
+        for state in states:
+            free_now = {tuple(lit[1:]) for lit in state if lit[0] == model.free_pred}
+            occupied = set()
+            for lit in state:
+                if lit[0] != model.occ_pred:
+                    continue
+                projected = model.project(lit)
+                if projected is None or projected[0] in occupied:
+                    return None
+                occupied.add(projected[0])
+            if free_now & occupied or free_now | occupied != model.resources:
+                return None
+            if previous_free is not None:
+                acquire += len(previous_free - free_now)
+                release += len(free_now - previous_free)
+            else:
+                free_init_count, occ_init_count = len(free_now), len(occupied)
+            previous_free = free_now
+            state_matches += len(occupied)
+
+        if not state_matches or not (acquire + release):
+            return None
+        return (
+            acquire + release,
+            bool(model.resource_positions),
+            -pred_arity[model.free_pred],
+            min(acquire, release),
+            free_init_count,
+            -occ_init_count,
+            state_matches,
+        )
+
     if (
         "hand_free" in pred_arity
         and "holding" in pred_arity
@@ -121,7 +159,7 @@ def infer_occupancy_model(
         and pred_arity["holding"] == 2
         and (hands := {tuple(lit[1:]) for lit in pred_literals["hand_free"]})
     ):
-        return OccupancyModel(
+        model = OccupancyModel(
             free_pred="hand_free",
             occ_pred="holding",
             occ_arity=2,
@@ -129,12 +167,13 @@ def infer_occupancy_model(
             object_positions=(1,),
             resources=hands,
         )
+        if score_model(model) is not None:
+            return model
 
-    dynamic_preds = [
-        pred for pred in pred_arity if add_count[pred] > 0 and del_count[pred] > 0
-    ]
-    if not dynamic_preds:
-        return None
+    # A valid episode may consist only of an acquisition or only of a release.
+    dynamic_preds = sorted(
+        pred for pred in pred_arity if add_count[pred] or del_count[pred]
+    )
 
     candidates: list[tuple[tuple, OccupancyModel]] = []
 
@@ -173,108 +212,9 @@ def infer_occupancy_model(
                         implicit_resource=implicit_resource,
                     )
 
-                    free_init_count = sum(1 for lit in states[0] if lit[0] == free_pred)
-                    occ_init_count = sum(1 for lit in states[0] if lit[0] == occ_pred)
-                    state_matches = 0
-                    free_overlap = 0
-                    mutex_conflicts = 0
-                    object_conflicts = 0
-                    outside_resource = 0
-                    occ_seen = 0
-
-                    for state in states:
-                        free_now = {
-                            tuple(lit[1:])
-                            for lit in state
-                            if lit[0] == free_pred
-                            and len(lit) == pred_arity[free_pred] + 1
-                        }
-                        resource_to_objects: dict[ResourceSig, set[ObjectSig]] = (
-                            defaultdict(set)
-                        )
-                        object_to_resources: dict[ObjectSig, set[ResourceSig]] = (
-                            defaultdict(set)
-                        )
-
-                        for lit in state:
-                            if lit[0] == occ_pred and len(lit) == occ_arity + 1:
-                                occ_seen += 1
-
-                            projected = model.project(lit)
-                            if (
-                                lit[0] == occ_pred
-                                and len(lit) == occ_arity + 1
-                                and projected is None
-                            ):
-                                outside_resource += 1
-                            if projected is None:
-                                continue
-
-                            resource, obj = projected
-                            state_matches += 1
-                            if resource in free_now:
-                                free_overlap += 1
-                            resource_to_objects[resource].add(obj)
-                            object_to_resources[obj].add(resource)
-
-                        for objects in resource_to_objects.values():
-                            if len(objects) > 1:
-                                mutex_conflicts += len(objects) - 1
-                        for object_resources in object_to_resources.values():
-                            if len(object_resources) > 1:
-                                object_conflicts += len(object_resources) - 1
-
-                    if occ_seen == 0:
-                        continue
-
-                    acquire = 0
-                    release = 0
-                    for action in plan:
-                        deleted_free = {
-                            tuple(lit[1:])
-                            for lit in action.del_eff
-                            if lit[0] == free_pred
-                            and len(lit) == pred_arity[free_pred] + 1
-                        }
-                        added_free = {
-                            tuple(lit[1:])
-                            for lit in action.add_eff
-                            if lit[0] == free_pred
-                            and len(lit) == pred_arity[free_pred] + 1
-                        }
-                        added_occ_resources: set[ResourceSig] = set()
-                        deleted_occ_resources: set[ResourceSig] = set()
-
-                        for lit in action.add_eff:
-                            projected = model.project(lit)
-                            if projected is not None:
-                                added_occ_resources.add(projected[0])
-                        for lit in action.del_eff:
-                            projected = model.project(lit)
-                            if projected is not None:
-                                deleted_occ_resources.add(projected[0])
-
-                        acquire += len(deleted_free & added_occ_resources)
-                        release += len(added_free & deleted_occ_resources)
-
-                    if acquire + release == 0 and state_matches == 0:
-                        continue
-
-                    score = (
-                        1 if acquire + release > 0 else 0,
-                        acquire + release,
-                        min(acquire, release),
-                        free_init_count,
-                        -pred_arity[free_pred],
-                        -occ_init_count,
-                        state_matches,
-                        -free_overlap,
-                        -mutex_conflicts,
-                        -object_conflicts,
-                        -outside_resource,
-                        1 if resource_positions else 0,
-                    )
-                    candidates.append((score, model))
+                    score = score_model(model)
+                    if score is not None:
+                        candidates.append((score, model))
 
     if not candidates:
         return None
@@ -299,9 +239,10 @@ def build_predecessors(
     list[tuple[int, int, Literal]],
     list[tuple[int, int, Literal]],
 ]:
+    """Preserve the reference's non-resource causal links and protect their uses."""
     n = len(plan)
     preds = {i: set() for i in range(n)}
-    resource_preds = {"hand_free", "holding"}
+    resource_preds: set[str] = set()
 
     if occupancy_model is not None:
         resource_preds.add(occupancy_model.free_pred)
@@ -362,7 +303,7 @@ def build_predecessors(
         for k, action in enumerate(plan):
             if k == consumer or lit not in action.del_eff:
                 continue
-            if provider == -1 and k < consumer:
+            if provider == -1:
                 add_edge(consumer, k)
             elif provider >= 0 and k < provider:
                 add_edge(k, provider)
@@ -373,7 +314,7 @@ def build_predecessors(
         for k, action in enumerate(plan):
             if k == consumer or lit not in action.add_eff:
                 continue
-            if provider == -1 and k < consumer:
+            if provider == -1:
                 add_edge(consumer, k)
             elif provider >= 0 and k < provider:
                 add_edge(k, provider)
@@ -417,9 +358,20 @@ def reorder_by_search(
     pos_links: list[tuple[int, int, Literal]],
     neg_links: list[tuple[int, int, Literal]],
     occupancy_model: OccupancyModel | None,
+    *,
+    max_states: int = 50000,
+    timeout: float = 2.0,
 ) -> list[GroundAction]:
+    """Keep active causal tasks together, retaining the reference on budget exhaustion."""
+    if max_states < 1 or not timeout > 0:
+        raise ValueError("Invalid reordering search budget")
+    deadline = time.perf_counter() + timeout
     n = len(plan)
+    if not n:
+        return plan
     done_all = (1 << n) - 1
+    # The agenda only ranks legal successors. A fully exhausted state/mask is
+    # infeasible regardless of the agenda used to reach it.
     failed: set[tuple[int, frozenset[Literal]]] = set()
 
     links_by_consumer: dict[int, list[tuple[int, Literal, bool]]] = defaultdict(list)
@@ -443,41 +395,178 @@ def reorder_by_search(
         lit: -1 for lit in init_state
         if occupancy_model is not None and occupancy_model.project(lit) is not None
     }
+    holding_roots = dict.fromkeys(holders, 0)
+    episode_ends = defaultdict(int)
     acquisitions = []
     for consumer, action in enumerate(plan):
         for lit in action.pre_pos & holders.keys():
             causal_links.append((holders[lit], consumer, lit, True))
+        released = action.del_eff & holders.keys()
+        origins = 0
+        for lit in released:
+            origins |= holding_roots[lit]
         for lit in action.del_eff:
             holders.pop(lit, None)
+            holding_roots.pop(lit, None)
         acquired = set()
         if occupancy_model is not None:
             acquired = {
                 lit for lit in action.add_eff
                 if occupancy_model.project(lit) is not None
+                and lit not in holders
             }
             holders.update((lit, consumer) for lit in acquired)
+            holding_roots.update((lit, origins if released else 1 << consumer) for lit in acquired)
+        if not acquired:
+            for root in bit_indices(origins):
+                episode_ends[root] |= 1 << consumer
         acquisitions.append(bool(acquired))
 
-    ancestors = [sum(1 << p for p in preds[i]) for i in range(n)]
+    def ancestor_masks(predecessors):
+        result = list(predecessors)
+        for provider in range(n):
+            for consumer in range(n):
+                if result[consumer] & (1 << provider):
+                    result[consumer] |= result[provider]
+        return result
+
+    support_preds = [0] * n
     readers = defaultdict(int)
     for provider, consumer, lit, positive in causal_links:
         readers[provider, lit, positive] |= 1 << consumer
         if provider >= 0:
-            ancestors[consumer] |= 1 << provider
+            support_preds[consumer] |= 1 << provider
+    support_ancestors = ancestor_masks(support_preds)
+    work_preds = list(support_preds)
+    ancestors = [sum(1 << p for p in preds[i]) | support_preds[i] for i in range(n)]
 
     # A consuming use ends an episode only after its other readers have finished.
     closures = []
     for provider, consumer, lit, positive in causal_links:
         opposite = plan[consumer].del_eff if positive else plan[consumer].add_eff
         others = readers[provider, lit, positive] & ~(1 << consumer)
-        if lit in opposite and not acquisitions[consumer] and (provider >= 0 or others):
+        # A handoff closes the old holding even though it acquires a new one.
+        holding = occupancy_model is not None and occupancy_model.project(lit) is not None
+        # Initial holdings are already open episodes. Other initial conditions
+        # become commitments only once at least one of their readers has run.
+        activation = (1 << provider) if provider >= 0 else (0 if holding else others)
+        if (lit in opposite and (not acquisitions[consumer] or holding)
+                and (activation or holding)):
             ancestors[consumer] |= others
-            closures.append((provider, consumer, others))
+            work_preds[consumer] |= others
+            closures.append((activation, consumer, others, lit, positive, holding))
 
-    for provider in range(n):
-        for consumer in range(n):
-            if ancestors[consumer] & (1 << provider):
-                ancestors[consumer] |= ancestors[provider]
+    ancestors = ancestor_masks(ancestors)
+    work_ancestors = ancestor_masks(work_preds)
+
+    # Finish a terminal causal chain or one input branch of a join. Threat
+    # ordering is needed for legality, but does not identify a coherent task.
+    providers = 0
+    for mask in support_preds:
+        providers |= mask
+    task_ends = set(bit_indices(done_all & ~providers))
+    for mask in support_preds:
+        inputs = [p for p in bit_indices(mask)
+                  if not any(support_ancestors[q] & (1 << p) for q in bit_indices(mask))]
+        if len(inputs) > 1:
+            task_ends.update(p for p in inputs if not acquisitions[p])
+
+    # Include cleanup only when all its causal work belongs to this task.
+    # Cleanup shared by independent tasks remains outside their contexts.
+    cleanup = []
+    for _activation, end, _others, _lit, _positive, _holding in closures:
+        cleanup.append((end, work_ancestors[end]))
+    context_ends = set(task_ends)
+    for end, work in cleanup:
+        if end not in context_ends:
+            continue
+        other_work = 0
+        for other in task_ends:
+            if other != end and not support_ancestors[other] & (1 << end):
+                other_work |= support_ancestors[other] | (1 << other)
+        if work and not work & ~other_work:
+            # Closing shared setup is coordination of the tasks that use it,
+            # rather than a reason to batch their prefixes ahead of their ends.
+            context_ends.remove(end)
+    bundles = {}
+    for end in sorted(context_ends):
+        core = work_ancestors[end] | (1 << end)
+        members = ancestors[end] | (1 << end)
+        owned_cleanup = 0
+        for close, work in cleanup:
+            if work and not work & ~core:
+                members |= ancestors[close] | (1 << close)
+                owned_cleanup |= 1 << close
+        core |= owned_cleanup
+        bundles[members] = bundles.get(members, 0) | core
+
+    # Prepare the complete holding episode, including later grips, rather than
+    # counting just the cheapest immediate use. Work that needs this pick cannot
+    # be moved before it and is therefore excluded.
+    preparations = defaultdict(int)
+    for root, endings in episode_ends.items():
+        for end in bit_indices(endings):
+            for i in bit_indices(ancestors[end]):
+                if i != root and not ancestors[i] & (1 << root):
+                    preparations[root] |= 1 << i
+
+    def active_closures(state, done_mask):
+        return [(ancestors[end] | (1 << end), holding)
+                for activation, end, _others, lit, positive, holding in closures
+                if (not activation or done_mask & activation)
+                and ((lit in state) == positive) and not done_mask & (1 << end)]
+
+    def advance_agenda(state, done_mask, agenda, last=None):
+        """Retain unfinished contexts and enter a branch when work on it starts."""
+        agenda = list(agenda)
+        while agenda and not agenda[-1] & ~done_mask:
+            agenda.pop()
+        active = [(mask & ~done_mask, holding) for mask, holding in active_closures(state, done_mask)]
+
+        def choose(parent=None):
+            candidates = {}
+            parent_remaining = parent & ~done_mask if parent is not None else None
+            excluded = {mask & ~done_mask for mask in agenda}
+            for members, core in bundles.items():
+                remaining = members & ~done_mask
+                if not remaining or remaining in excluded:
+                    continue
+                if parent_remaining is not None and (remaining == parent_remaining or remaining & ~parent_remaining):
+                    continue
+                if last is not None and not core & (1 << last):
+                    continue
+                holds = any(holding and not mask & ~remaining for mask, holding in active)
+                closes = holds or any(not mask & ~remaining for mask, _ in active)
+                if closes or core & done_mask:
+                    candidates.setdefault(remaining, (members, holds, closes))
+            if any(row[1] for row in candidates.values()):
+                candidates = {mask: row for mask, row in candidates.items() if row[1]}
+            elif any(row[2] for row in candidates.values()):
+                candidates = {mask: row for mask, row in candidates.items() if row[2]}
+            maximal = [mask for mask in candidates
+                       if not any(mask != other and not mask & ~other for other in candidates)]
+            if len(maximal) == 1:
+                return candidates[maximal[0]][0]
+            if maximal and any(candidates[mask][1] for mask in maximal):
+                return candidates[min(maximal, key=lambda mask: (mask.bit_count(), mask))][0]
+            # Shared preparation alone does not commit to either independent
+            # branch. Bind the context when work on one branch actually starts.
+            return None
+
+        if agenda and last is not None and not agenda[-1] & (1 << last):
+            bridge = choose()
+            if bridge is not None:
+                agenda.append(bridge)
+        if not agenda:
+            root = choose()
+            if root is not None:
+                agenda.append(root)
+        while agenda:
+            child = choose(agenda[-1])
+            if child is None:
+                break
+            agenda.append(child)
+        return tuple(agenda)
 
     def current_occupancy(state: set[Literal]) -> dict[ResourceSig, ObjectSig]:
         if occupancy_model is None:
@@ -509,7 +598,7 @@ def reorder_by_search(
             if all(done_mask & (1 << pred) for pred in preds[index])
         ]
 
-    def rank_ready_actions(state: set[Literal], done_mask: int) -> list[int]:
+    def rank_ready_actions(state: set[Literal], done_mask: int, agenda=()) -> list[int]:
         ready = ready_actions(state, done_mask)
         if not ready:
             return []
@@ -519,6 +608,8 @@ def reorder_by_search(
         scored: list[tuple[tuple, int]] = []
 
         for i in ready:
+            if time.perf_counter() >= deadline:
+                return []
             next_state = apply_action(state, plan[i])
             next_mask = done_mask | (1 << i)
             newly_ready = len(set(ready_actions(next_state, next_mask)) - ready_now)
@@ -558,12 +649,15 @@ def reorder_by_search(
                  for a in preserving_uses or uses),
                 default=0,
             )
+            if i in episode_ends:
+                waiting = (preparations[i] & ~done_mask).bit_count()
             # Prefer the nearest completion of an established or already-used condition.
             finish = max(
                 (
                     n - bin(ancestors[consumer] & ~done_mask).count("1")
-                    for provider, consumer, others in closures
-                    if (done_mask & others if provider < 0 else done_mask & (1 << provider))
+                    for activation, consumer, others, lit, positive, _holding in closures
+                    if (not activation or done_mask & activation)
+                    and ((lit in state) == positive)
                     and not (done_mask & (1 << consumer))
                     and (i != consumer or done_mask & others == others)
                     and (ancestors[consumer] | (1 << consumer)) & (1 << i)
@@ -571,9 +665,10 @@ def reorder_by_search(
                 default=0,
             )
             score = (
+                bool(agenda and agenda[-1] & (1 << i)),
                 finish,
-                completed_links,
                 -waiting,
+                completed_links,
                 causal_support[i],
                 newly_ready,
                 resource_continuity,
@@ -586,28 +681,42 @@ def reorder_by_search(
         scored.sort(key=lambda item: item[0], reverse=True)
         return [i for _, i in scored]
 
-    def dfs(done_mask: int, frozen_state: frozenset[Literal]) -> list[int] | None:
-        if done_mask == done_all:
-            return (
-                [] if goals_satisfied(set(frozen_state), goal_pos, goal_neg) else None
-            )
+    # Explicit DFS frames avoid tying valid plan length to Python's call stack.
+    path: list[int] = []
+    agenda = advance_agenda(init_state, 0, ())
+    stack = [(0, frozenset(init_state), agenda, iter(rank_ready_actions(init_state, 0, agenda)))]
+    expanded = 1
+    while stack:
+        if time.perf_counter() >= deadline:
+            return plan
+        done_mask, frozen_state, agenda, choices = stack[-1]
+        i = next(choices, None)
+        if i is None:
+            failed.add((done_mask, frozen_state))
+            stack.pop()
+            if path:
+                path.pop()
+            continue
 
-        key = (done_mask, frozen_state)
+        next_mask = done_mask | (1 << i)
+        next_state = apply_action(set(frozen_state), plan[i])
+        key = (next_mask, frozenset(next_state))
         if key in failed:
-            return None
+            continue
+        if next_mask == done_all:
+            if goals_satisfied(next_state, goal_pos, goal_neg):
+                return [plan[index] for index in [*path, i]]
+            failed.add(key)
+            continue
+        if expanded >= max_states:
+            return plan
+        expanded += 1
+        next_agenda = advance_agenda(next_state, next_mask, agenda, i)
+        stack.append((next_mask, key[1], next_agenda,
+                      iter(rank_ready_actions(next_state, next_mask, next_agenda))))
+        path.append(i)
 
-        state = set(frozen_state)
-        for i in rank_ready_actions(state, done_mask):
-            next_state = apply_action(state, plan[i])
-            suffix = dfs(done_mask | (1 << i), frozenset(next_state))
-            if suffix is not None:
-                return [i] + suffix
-
-        failed.add(key)
-        return None
-
-    order = dfs(0, frozenset(init_state))
-    return plan if order is None else [plan[index] for index in order]
+    return plan
 
 
 # ============================================================

@@ -144,7 +144,6 @@ def prepare_temporal_gradient_keyframes(task: dict) -> dict:
             task["keyframe_dir"],
             radius=radius,
             smooth_k=5,
-            merge_pct=0.5,
             plot_energy=True,
         )
 

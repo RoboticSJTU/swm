@@ -1,6 +1,8 @@
-These are scenario-specific examples, not a complete domain. Select and adapt them using PREDICATE_TEMPLATE and RULES; examples omit merge-generated numeric suffixes and select one causal variant per action. An object's category alone does not require clear. Once clear is tracked for an object, maintain it in every relevant pickup, release, handoff, and upper-load change, including releases onto ordinary supports. Keep it false while any hand directly holds the object.
+These are scenario-specific examples, not a complete domain. Select and adapt them using PREDICATE_TEMPLATE and RULES; examples omit merge-generated numeric suffixes and select one causal variant per action. When combining examples, maintain every tracked predicate in all relevant actions. An object's category alone does not require clear. Once clear is tracked for an object, maintain it in every relevant pickup, release, handoff, and upper-load change, including releases onto ordinary supports. Keep it false while any hand directly holds the object.
 
 The strict stack examples below assume each base has at most one direct upper load and remains unheld while loaded. Establish these invariants from the initial state and all relevant actions before using their unconditional clear-restoration effects. For multiple loads or supports, update the actual affected objects and restore clear only after the last upper load is removed and the object is unheld. Use uncovered separately when a task needs container-opening access, including access to a held container.
+
+Faucet examples that retain water assume one empty receiver and one initially undelivered portion, with no refill in that scenario. Repeated fills or multiple receivers require guards derived from the actual portion lifecycle.
 
 ## 1. Spatial Change.
 
@@ -62,7 +64,7 @@ The strict stack examples below assume each base has at most one direct upper lo
 :effect (and (not (hand_free ?h)) (holding ?h ?p) (not (on ?p ?t)))
 )
 
-; Pick up trash bin ?tb from floor ?f, removing its obstruction of drawer ?d.
+; Pick up trash bin ?tb from floor ?f, removing the sole opening blocker of drawer ?d.
 (:action pick_trash_bin_from_floor
 :parameters (?h ?tb ?f ?d)
 :precondition (and (hand ?h) (trash_bin ?tb) (floor ?f) (drawer ?d) (hand_free ?h) (blocks_opening ?tb ?d) (on ?tb ?f))
@@ -76,11 +78,11 @@ The strict stack examples below assume each base has at most one direct upper lo
 :effect (and (not (hand_free ?h)) (holding ?h ?b) (not (in ?b ?s)))
 )
 
-; Fill kettle ?k with water ?w from faucet ?f while holding it with hand ?h.
+; Fill the sole empty kettle ?k with fresh portion ?w from unlimited faucet ?f, preserving hand ?h's hold.
 (:action fill_kettle_from_faucet
-:parameters (?h ?w ?f ?k)
-:precondition (and (hand ?h) (water ?w) (faucet ?f) (kettle ?k) (holding ?h ?k) (open ?k) (is_on ?f) (dispenses ?f ?w) (in ?w ?f))
-:effect (and (not (boiled ?w)) (not (in ?w ?f)) (in ?w ?k))
+:parameters (?h ?k ?f ?w)
+:precondition (and (hand ?h) (kettle ?k) (faucet ?f) (water ?w) (holding ?h ?k) (open ?k) (empty ?k) (is_on ?f) (dispenses ?f ?w))
+:effect (and (not (empty ?k)) (in ?w ?k))
 )
 
 ; Scoop soup ?sp from pot ?p with spoon ?s held by hand ?h.
@@ -97,7 +99,7 @@ The strict stack examples below assume each base has at most one direct upper lo
 :effect (and (not (holding ?h ?k)) (hand_free ?h) (inserted ?k ?l))
 )
 
-; Remove uncovered lid ?l from pot ?p with hand ?h; clear is tracked for this lid.
+; Remove unloaded lid ?l from pot ?p with hand ?h; clear is tracked for this lid.
 (:action remove_lid_from_pot
 :parameters (?h ?l ?p)
 :precondition (and (hand ?h) (lid ?l) (pot ?p) (hand_free ?h) (clear ?l) (closed ?p) (on ?l ?p))
@@ -113,14 +115,14 @@ The strict stack examples below assume each base has at most one direct upper lo
 
 ### (2) Target only.
 
-; Strict stack: release unloaded block ?b1 onto available block ?b2.
+; Strict stack: release unloaded block ?b1 onto clear, unheld block ?b2.
 (:action place_block_on_block
 :parameters (?h ?b1 ?b2)
 :precondition (and (hand ?h) (block ?b1) (block ?b2) (holding ?h ?b1) (clear ?b2) (not (= ?b1 ?b2)))
 :effect (and (not (holding ?h ?b1)) (hand_free ?h) (on ?b1 ?b2) (not (clear ?b2)) (clear ?b1))
 )
 
-; Strict nested stack: release bowl ?b1, with no upper stack load, into available bowl ?b2.
+; Strict nested stack: release bowl ?b1, with no upper stack load, into clear, unheld bowl ?b2.
 (:action place_bowl_in_bowl
 :parameters (?h ?b1 ?b2)
 :precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (holding ?h ?b1) (clear ?b2) (not (= ?b1 ?b2)))
@@ -148,11 +150,11 @@ The strict stack examples below assume each base has at most one direct upper lo
 :effect (and (not (holding ?h ?p)) (hand_free ?h) (not (vertical ?p)) (flat ?p) (on ?p ?c))
 )
 
-; Ordinary non-stack bowl: place non-upright bowl ?b upright on table ?t; the modeled poses are upright, upside_down, or vertical.
+; Ordinary non-stack bowl: place upside-down bowl ?b upright on table ?t; preserve other pose dimensions.
 (:action place_bowl_upright_on_table
 :parameters (?h ?b ?t)
-:precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b) (not (upright ?b)))
-:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (not (vertical ?b)) (upright ?b) (on ?b ?t))
+:precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b) (upside_down ?b))
+:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (upright ?b) (on ?b ?t))
 )
 
 ; Screw cap ?cp onto bottle ?b to close the bottle with hand ?h.
@@ -232,14 +234,14 @@ The strict stack examples below assume each base has at most one direct upper lo
 ; Lock cabinet ?c with inserted key ?k and free hand ?h after its three distinct drawers are closed.
 (:action lock_cabinet_with_key
 :parameters (?h ?c ?k ?l ?d1 ?d2 ?d3)
-:precondition (and (hand ?h) (cabinet ?c) (key ?k) (lock ?l) (drawer ?d1) (drawer ?d2) (drawer ?d3) (hand_free ?h) (unlocked ?c) (inserted ?k ?l) (lock_of ?l ?c) (drawer_of ?d1 ?c) (drawer_of ?d2 ?c) (drawer_of ?d3 ?c) (closed ?d1) (closed ?d2) (closed ?d3) (not (= ?d1 ?d2)) (not (= ?d1 ?d3)) (not (= ?d2 ?d3)))
+:precondition (and (hand ?h) (cabinet ?c) (key ?k) (lock ?l) (drawer ?d1) (drawer ?d2) (drawer ?d3) (hand_free ?h) (unlocked ?c) (inserted ?k ?l) (part_of ?l ?c) (part_of ?d1 ?c) (part_of ?d2 ?c) (part_of ?d3 ?c) (closed ?d1) (closed ?d2) (closed ?d3) (not (= ?d1 ?d2)) (not (= ?d1 ?d3)) (not (= ?d2 ?d3)))
 :effect (and (not (unlocked ?c)) (locked ?c))
 )
 
 ; Turn key ?k already inserted in lock ?l to unlock cabinet ?c with free hand ?h.
 (:action unlock_cabinet_with_key
 :parameters (?h ?c ?k ?l)
-:precondition (and (hand ?h) (key ?k) (lock ?l) (cabinet ?c) (hand_free ?h) (inserted ?k ?l) (lock_of ?l ?c) (locked ?c))
+:precondition (and (hand ?h) (cabinet ?c) (key ?k) (lock ?l) (hand_free ?h) (inserted ?k ?l) (part_of ?l ?c) (locked ?c))
 :effect (and (not (locked ?c)) (unlocked ?c))
 )
 
@@ -251,9 +253,9 @@ The strict stack examples below assume each base has at most one direct upper lo
 )
 
 ; Wait for corn ?c on plate ?p inside running, closed microwave ?m to heat; no hand is occupied.
-(:action wait_until_corn_heated_in_microwave
-:parameters (?c ?m ?p)
-:precondition (and (corn ?c) (microwave ?m) (plate ?p) (closed ?m) (is_on ?m) (on ?c ?p) (in ?p ?m))
+(:action wait_until_corn_heated_on_plate_in_microwave
+:parameters (?c ?p ?m)
+:precondition (and (corn ?c) (plate ?p) (microwave ?m) (closed ?m) (is_on ?m) (on ?c ?p) (in ?p ?m))
 :effect (and (heated ?c))
 )
 
@@ -278,22 +280,22 @@ The strict stack examples below assume each base has at most one direct upper lo
 :effect (and (not (is_on ?f)) (is_off ?f))
 )
 
-; Wait for bowl ?b already under running faucet ?f in sink ?s to rinse; empty is tracked here.
-(:action wait_until_bowl_rinsed_under_faucet
+; Wait for the sole empty bowl ?b already under running faucet ?f in sink ?s to rinse and retain fresh portion ?w.
+(:action wait_until_bowl_rinsed_in_sink_under_faucet
 :parameters (?b ?f ?s ?w)
-:precondition (and (bowl ?b) (faucet ?f) (sink ?s) (water ?w) (is_on ?f) (part_of ?f ?s) (in ?b ?s) (under ?b ?f) (dispenses ?f ?w))
+:precondition (and (bowl ?b) (faucet ?f) (sink ?s) (water ?w) (empty ?b) (is_on ?f) (part_of ?f ?s) (in ?b ?s) (under ?b ?f) (dispenses ?f ?w))
 :effect (and (rinsed ?b) (not (empty ?b)) (in ?w ?b))
 )
 
-; Rinse bowl ?b while holding it under running faucet ?f; empty is not tracked in this scenario.
+; Rinse bowl ?b while holding it under running faucet ?f; this scenario tracks no retained water.
 (:action rinse_bowl_under_faucet
-:parameters (?h ?b ?f ?w)
-:precondition (and (hand ?h) (bowl ?b) (faucet ?f) (water ?w) (holding ?h ?b) (is_on ?f) (dispenses ?f ?w))
-:effect (and (rinsed ?b) (in ?w ?b))
+:parameters (?h ?b ?f)
+:precondition (and (hand ?h) (bowl ?b) (faucet ?f) (holding ?h ?b) (is_on ?f))
+:effect (and (rinsed ?b))
 )
 
 ; Soak sponge ?s under running faucet ?f while holding it with hand ?h.
-(:action soak_sponge
+(:action soak_sponge_under_faucet
 :parameters (?h ?s ?f)
 :precondition (and (hand ?h) (sponge ?s) (faucet ?f) (holding ?h ?s) (is_on ?f))
 :effect (and (wet ?s))

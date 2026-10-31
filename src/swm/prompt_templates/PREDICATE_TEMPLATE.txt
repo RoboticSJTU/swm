@@ -4,7 +4,7 @@ Vocabulary and predicate-specific constraints; select needed entries under RULES
   ; Static categories and structural/supply/control relations
   (hand ?h)
   (part_of ?p ?w) ; Component or spatial position p belongs to whole w.
-  (dispenses ?s ?m) ; Supply capability, not availability of a discrete portion.
+  (dispenses ?s ?m) ; Static capability: source s supplies material m; independent of flow, containment, or portion availability.
   (controls ?c ?d) ; Control c operates device d.
 
   ; Hand resources
