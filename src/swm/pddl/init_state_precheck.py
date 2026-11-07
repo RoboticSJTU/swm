@@ -14,7 +14,7 @@ from swm.pddl.strips import (
     parse_problem_model,
 )
 from swm.pddl.strips import parse_problem as parse_strips_problem
-from swm.pddl.strips import parse_symbols, validate_untyped_pddl
+from swm.pddl.strips import parse_symbols
 
 Literal = tuple[str, ...]
 
@@ -208,9 +208,6 @@ def parse_problem_text(text: str, domain_text: str | None = None) -> ParsedProbl
             "problem must contain one :init and at most one :objects section"
         )
 
-    validate_untyped_pddl(text)
-    if domain_text is not None:
-        validate_untyped_pddl(domain_text)
     objects = set(parse_symbols(object_sections[0][1:])) if object_sections else set()
     positive: set[Literal] = set()
     negative: set[Literal] = set()

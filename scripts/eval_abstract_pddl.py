@@ -19,7 +19,6 @@ from swm.llm import call_gpt
 from swm.pddl.generation import parse_pddl_output
 from swm.pddl.planner import _run_fast_downward, fast_downward_path as FD, _output_text
 from swm.pddl.postprocess import repair_pddl
-from swm.pddl.strips import validate_untyped_pddl
 from swm.abstract_planning.model import parse_sexpr, section, fields, condition, apply_effect
 from swm.abstract_planning import novel_games, visual_games
 from swm.abstract_planning.instructions import names_only
@@ -102,7 +101,6 @@ def validate_files(domain, problem, plan, log_path):
 
 
 def machine(domain, problem):
-    validate_untyped_pddl(domain); validate_untyped_pddl(problem)
     d, p = parse_sexpr(domain), parse_sexpr(problem)
     operators = {}
     for a in d:

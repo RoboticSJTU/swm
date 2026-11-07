@@ -89,41 +89,6 @@ def parse_sexpr(text: str, context: str = "PDDL", *, lowercase: bool = True):
     return root
 
 
-def validate_untyped_pddl(text: str) -> None:
-    """Reject typed declarations without rewriting the source model."""
-    def visit(node):
-        if not isinstance(node, list) or not node:
-            return
-        head = node[0]
-        if not isinstance(head, str):
-            raise ValueError("PDDL expression must start with a symbol")
-        if head == ":types" or (head == ":requirements" and ":typing" in node):
-            raise ValueError("Use unary category predicates instead of :types/:typing")
-        declarations = []
-        if head in {":parameters", ":objects", ":constants"}:
-            declarations = [node[1:]]
-        elif head in {"forall", "exists"}:
-            if len(node) != 3 or not isinstance(node[1], list):
-                raise ValueError("Malformed quantified expression")
-            declarations = [node[1]]
-        elif head == ":predicates":
-            declarations = [item[1:] for item in node[1:] if isinstance(item, list)]
-        elif head == ":action" and ":parameters" in node:
-            index = node.index(":parameters") + 1
-            if index >= len(node) or not isinstance(node[index], list):
-                raise ValueError("Action parameters must be a list")
-            declarations = [node[index]]
-        if any("-" in declaration for declaration in declarations):
-            raise ValueError("Typed declarations are not allowed; use unary category predicates")
-        for child in node:
-            visit(child)
-
-    root = parse_sexpr(text)
-    if not isinstance(root, list) or root[:1] != ["define"]:
-        raise ValueError("Expected a complete PDDL domain or problem")
-    visit(root)
-
-
 def format_pddl(text: str) -> str:
     """Rebuild PDDL blocks with inline literals, preserving symbols and order."""
     def inline(node):
@@ -260,7 +225,6 @@ def _validate_literals(
 
 def parse_domain(path: Path) -> DomainSchemas:
     text = path.read_text(encoding="utf-8")
-    validate_untyped_pddl(text)
     root = parse_sexpr(text, str(path))
     if not isinstance(root, list) or not root or root[0] != "define":
         raise ValueError(f"{path} is not a valid domain file")
@@ -327,7 +291,6 @@ def parse_problem_model(
     schemas: DomainSchemas | None = None,
 ) -> ProblemModel:
     text = path.read_text(encoding="utf-8")
-    validate_untyped_pddl(text)
     root = parse_sexpr(text, str(path))
     if not isinstance(root, list) or not root or root[0] != "define":
         raise ValueError(f"{path} is not a valid problem file")

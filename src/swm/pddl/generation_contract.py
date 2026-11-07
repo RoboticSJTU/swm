@@ -17,7 +17,6 @@ from swm.pddl.strips import (
     parse_plan,
     parse_problem_model,
     parse_sexpr,
-    validate_untyped_pddl,
 )
 from swm.prompts import read_prompt
 
@@ -56,7 +55,6 @@ def _walk(node):
 
 
 def _profile(text: str, kind: str) -> list:
-    validate_untyped_pddl(text)
     root = parse_sexpr(text)
     if (
         len(root) < 2 or not isinstance(root[1], list) or len(root[1]) != 2

@@ -1,7 +1,9 @@
 import json
+import math
 import re
-import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from fractions import Fraction
 from pathlib import Path
 
 from swm.keyframe.actions_extraction import extract_keyframe_actions
@@ -15,44 +17,59 @@ from swm.pddl.validate import (
     format_kf_actions,
 )
 from swm.pddl.reorder import ReorderModel
-from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
+from swm.pddl.strips import format_pddl
 from swm.prompts import construct_instruction_with_steps
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-STEP_SOURCE = "steps_json"  # "video" or "steps_json"
-TASK_DOMAIN = "human_aug"
+STEP_SOURCE = "video"  # "video" or "steps_json"
+TASK_DOMAIN = "human"
 
-# 写死了save_dir = "gpt-5.6-sol"
-PDDL_MODEL = "deepseek/deepseek-flash"
+# 注意，当前写死了save_dir = "gpt-5.6-sol"
+PDDL_MODEL = "gpt-6.1-sol"
 ACTION_EXTRACTION_MODEL = PDDL_MODEL
 JUDGE_MODEL = PDDL_MODEL
 
 ROBOT_CONFIGURATION = "single_arm"  # "single_arm" or "dual_arm"
-ACTION_TEMPLATE_MODE = "retrieved"  # None: 不传；"fixed": 固定模板；"retrieved": 参考 domain 的 action 片段
+ACTION_TEMPLATE_MODE = "fixed"  # None: 不传；"fixed": 固定模板；"retrieved": 参考 domain 的 action 片段
 ACTION_TEMPLATE_MODEL = "gpt-5.6-sol"
 ACTION_TEMPLATE_DOMAIN = "human"
 
 
 MAX_PLAN_ATTEMPTS = 3
-TASK_WORKERS = 100  # 主线程并发数
+TASK_WORKERS = 20  # 主线程并发数
 PREPROCESS_WORKERS = TASK_WORKERS  # 关键帧提取并发
 
-FIXED_TEMPORAL_GRADIENT_RADIUS = {
-    "Galaxea": 21,
-    "bridgedata_v2": 4,
-    "human": 21,
-    "agibot": 78,
-    "droid": 39,
+TEMPORAL_GRADIENT_RADIUS_SECONDS = {
+    "Galaxea": 1.4,
+    "bridgedata_v2": 0.8,
+    "human": 0.7,
+    "agibot": 2.6,
+    "droid": 0.65,
 }
 
 
-def temporal_gradient_radius(frame_count: int, dataset: str = TASK_DOMAIN) -> int:
-    if frame_count < 1:
-        raise ValueError("frame_count must be positive")
+def temporal_gradient_radius(video_path: Path, dataset: str = TASK_DOMAIN) -> int:
     try:
-        return FIXED_TEMPORAL_GRADIENT_RADIUS[dataset]
+        seconds = TEMPORAL_GRADIENT_RADIUS_SECONDS[dataset]
     except KeyError as error:
         raise ValueError(f"Unsupported fixed-radius dataset: {dataset}") from error
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=r_frame_rate,avg_frame_rate", "-of", "json", str(video_path)],
+        check=True, capture_output=True, text=True,
+    )
+    stream = json.loads(probe.stdout)["streams"][0]
+    # Match the nominal rate used by the existing FFmpeg PNG extraction.
+    for field in ("r_frame_rate", "avg_frame_rate"):
+        try:
+            fps = float(Fraction(stream.get(field, "0/1")))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if math.isfinite(fps) and fps > 0:
+            return max(1, round(seconds * fps))
+    raise ValueError(f"No valid frame rate found for {video_path}")
+
 
 def load_tasks() -> list[dict]:
     instructions_path = ROOT_DIR / "tasks" / "instructions" / f"instructions_{TASK_DOMAIN}.json"
@@ -90,83 +107,19 @@ def load_tasks() -> list[dict]:
 
     return tasks
 
-def _keyframe_segments(keyframe_dir: Path) -> list[dict]:
-    segments = []
-    for segment_dir in sorted(keyframe_dir.glob("seg_*")):
-        files = sorted(segment_dir.glob("*.png"), key=lambda path: int(path.stem))
-        if files:
-            segments.append(
-                {
-                    "segment": segment_dir.name,
-                    "keyframe_indices": [int(path.stem) - 1 for path in files],
-                    "keyframe_files": [str(path.resolve()) for path in files],
-                }
-            )
-    return segments
-
-
-def prepare_temporal_gradient_keyframes(task: dict) -> dict:
+def prepare_temporal_gradient_keyframes(task: dict) -> None:
     from swm.keyframe.kf_extraction import (
         extract_frames,
         extract_temporal_gradient_keyframes,
     )
 
-    dataset = task.get("dataset", TASK_DOMAIN)
-    metadata_path = task.get(
-        "keyframe_metadata_path", task["keyframe_dir"] / "metadata.json"
-    )
-
     extract_frames(task["video_path"], task["frames_dir"])
-
-    frame_count = len(list(task["frames_dir"].glob("*.png")))
-    radius = temporal_gradient_radius(frame_count, dataset)
-
-    cached_metadata = {}
-    if metadata_path.is_file():
-        cached_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    keyframes_exist = any(task["keyframe_dir"].glob("seg_*/*.png"))
-    cache_matches = (
-        cached_metadata.get("dataset") == dataset
-        and cached_metadata.get("frame_count") == frame_count
-        and cached_metadata.get("radius") == radius
+    radius = temporal_gradient_radius(task["video_path"], task.get("dataset", TASK_DOMAIN))
+    extract_temporal_gradient_keyframes(
+        task["frames_dir"], task["keyframe_dir"], radius=radius,
     )
-
-    if keyframes_exist and not cache_matches:
-        for segment_dir in task["keyframe_dir"].glob("seg_*"):
-            if segment_dir.is_dir():
-                shutil.rmtree(segment_dir)
-        (task["keyframe_dir"] / "energy_curve.png").unlink(missing_ok=True)
-        keyframes_exist = False
-
-    if not keyframes_exist:
-        extract_temporal_gradient_keyframes(
-            task["frames_dir"],
-            task["keyframe_dir"],
-            radius=radius,
-            smooth_k=5,
-            plot_energy=True,
-        )
-
-    segments = _keyframe_segments(task["keyframe_dir"])
-    if not segments:
+    if not any(task["keyframe_dir"].glob("seg_*/*.png")):
         raise ValueError(f"No keyframes found in {task['keyframe_dir']}")
-    metadata = {
-        "dataset": dataset,
-        "task": task["task_id"],
-        "episode": task["episode_id"],
-        "frame_count": frame_count,
-        "radius": radius,
-        "keyframe_indices": sorted(
-            {index for segment in segments for index in segment["keyframe_indices"]}
-        ),
-        "segments": segments,
-    }
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return metadata
 
 
 def _round_has_verified_plan(round_dir: Path) -> bool:
@@ -189,8 +142,7 @@ def _latest_verified_round(task: dict) -> Path | None:
 
 def _extract_action_template(domain_path: Path) -> str:
     domain_text = domain_path.read_text(encoding="utf-8")
-    validate_untyped_pddl(domain_text)
-    lines = format_action_conditions(domain_text).splitlines()
+    lines = format_pddl(domain_text).splitlines()
     blocks = []
     for start, line in enumerate(lines):
         if "(:action" not in line:
@@ -201,7 +153,7 @@ def _extract_action_template(domain_path: Path) -> str:
             if depth == 0:
                 blocks.append("\n".join(lines[start : end + 1]).strip())
                 break
-    return "\n\n".join(block for block in blocks if block)
+    return "\n\n".join(blocks)
 
 
 def find_task_action_template(task_id: str) -> str:

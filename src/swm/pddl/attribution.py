@@ -15,13 +15,9 @@ from pathlib import Path
 from swm.llm import call_gpt_json
 from swm.pddl.planner import _run_fast_downward, fast_downward_path
 from swm.pddl.strips import (
-    ground_plan, parse_domain, parse_plan, parse_problem_model,
+    DomainSchemas, Literal, ground_plan, parse_domain, parse_plan, parse_problem_model,
     parse_sexpr_file, read_literals, rollout,
 )
-from swm.simulator.alignment.objects import align_worlds
-from swm.simulator.alignment.predicates import STATE_PREDICATES, compile_world, normalized_tokens
-from swm.simulator.ir.mapping import map_schema
-from swm.simulator.predicate_aliases import canonical_literal
 
 
 LABELS = ("pddl_invalid", "init_error", "goal_error", "operator_missing", "operator_semantics", "else")
@@ -30,6 +26,34 @@ RULES_VERSION = 7
 
 # Model and plan evidence.
 
+PREDICATE_ALIASES = {
+    "in_hand": "holding", "dispenses": "in", "has_water": "contains_water",
+    "hand_empty": "hand_free", "free_hand": "hand_free", "inverted": "upside_down",
+    "chopped": "cut", "scrunch": "scrunched", "crumple": "scrunched", "crumpled": "scrunched",
+    "sidled": "slid", "dial_turned": "configured", "cycle_selected": "configured",
+    "pressed": "activated", "pushed_state": "activated", "started": "power_on",
+    "is_on": "power_on", "is_off": "power_off", "blocking": "blocks",
+    "warmed": "heated", "warm_mixture": "heated", "hot": "heated",
+    "wiped": "clean", "cleaned": "clean", "rinsed": "washed", "is_rinsed": "washed",
+    "rinsed_thoroughly": "washed", "head_clean": "clean", "head_rinsed": "clean",
+    "damp": "wet", "water_poured_out": "empty", "filled_with_hot_water": "contains_hot_water",
+    "hot_water_added": "contains_hot_water", "purified_water_added": "contains_purified_water",
+}
+PREDICATE_ARGUMENT_ORDERS = {"in_hand": (1, 0), "dispenses": (1, 0)}
+TOKEN_ALIASES = {
+    "arm": "hand", "bin": "can", "countertop": "counter", "bookstand": "rack",
+    "socket": "outlet", "dettol": "disinfectant", "washer": "washing_machine",
+    "dish": "plate", "glass": "cup", "mug": "cup", "clothes": "cloth",
+    "clothing": "cloth", "dissinfectant": "disinfectant",
+}
+STATE_PREDICATES = {
+    "hand_free", "holding", "on", "in", "inserted", "open", "closed", "power_on", "power_off",
+    "locked", "unlocked", "upright", "upside_down", "flat", "vertical", "clear", "blocks",
+    "blocks_opening", "blocks_closing", "under", "against", "away_from", "in_front_of",
+    "clean", "washed", "wet", "dry", "slid", "pushed", "activated", "configured", "enabled",
+    "disabled", "unblocked", "dirty", "cut", "uncut", "stirred", "ready", "folded", "unfolded",
+    "scrunched", "empty", "contains_water", "contains_hot_water", "contains_purified_water", "heated",
+}
 SPATIAL = {"in", "on"}
 OPPOSITES = dict(pair for a, b in (
     ("open", "closed"), ("power_on", "power_off"), ("locked", "unlocked"),
@@ -43,6 +67,178 @@ SEMANTIC_STATES = {"clean", "washed", "stirred", "cut", "folded", "scrunched", "
 STRUCTURAL = {*SPATIAL, "holding", "hand_free", "clear", "open", "closed", "power_on", "power_off",
               "locked", "unlocked", "upright", "upside_down", "flat", "vertical", "under", "inserted"}
 EVENT_PREFIXES = ("placed_", "picked_", "returned_", "removed_", "stored_")
+
+
+def canonical_literal(literal):
+    if not literal:
+        return literal
+    name, *arguments = literal
+    order = PREDICATE_ARGUMENT_ORDERS.get(name)
+    if order is not None and len(arguments) == len(order):
+        arguments = [arguments[index] for index in order]
+    return (PREDICATE_ALIASES.get(name, name), *arguments)
+
+
+def normalized_tokens(value):
+    return tuple(TOKEN_ALIASES.get(token, token) for token in re.findall(r"[a-z]+|\d+", value.lower()))
+
+
+@dataclass(frozen=True)
+class PredicateDescription:
+    raw_name: str
+    canonical_name: str
+    arity: int
+    static: bool
+    argument_order: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PredicateInterface:
+    descriptions: tuple[PredicateDescription, ...]
+
+    @classmethod
+    def from_schemas(cls, schemas):
+        changed = {f[0] for schema in schemas.values() for f in schema.add_eff | schema.del_eff}
+        descriptions = []
+        for name, arity in sorted(schemas.predicate_arities.items()):
+            canonical = PREDICATE_ALIASES.get(name, name)
+            order = PREDICATE_ARGUMENT_ORDERS.get(name, tuple(range(arity)))
+            # dispenses is a source capability, not current containment.
+            if name == "dispenses" and arity == 2:
+                canonical, order = name, tuple(range(arity))
+            descriptions.append(PredicateDescription(
+                name, canonical, arity, name not in changed and canonical not in STATE_PREDICATES, order))
+        return cls(tuple(descriptions))
+
+    def description(self, name):
+        return next((item for item in self.descriptions if item.raw_name == name), None)
+
+    def canonicalize(self, literal):
+        description = self.description(literal[0])
+        if description is None:
+            return canonical_literal(literal)
+        arguments = literal[1:]
+        ordered = tuple(arguments[index] for index in description.argument_order)
+        if description.static:
+            prefix = "kind:" if len(ordered) == 1 else "static:"
+            return (prefix + "_".join(normalized_tokens(description.raw_name)), *ordered)
+        return (description.canonical_name, *ordered)
+
+    def is_static(self, name):
+        description = self.description(name)
+        return bool(description and description.static)
+
+
+@dataclass(frozen=True)
+class ObjectDescription:
+    name: str
+    kinds: tuple[str, ...]
+    identity_kinds: tuple[str, ...]
+    state_tags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CanonicalWorld:
+    interface: PredicateInterface
+    objects: tuple[ObjectDescription, ...]
+    facts: frozenset[Literal]
+    negative_facts: frozenset[Literal]
+    goal_positive: frozenset[Literal]
+    goal_negative: frozenset[Literal]
+    schemas: DomainSchemas
+    identity_facts: frozenset[Literal]
+
+    def object(self, name):
+        return next((item for item in self.objects if item.name == name), None)
+
+
+_SEMANTIC_EFFECT_FAMILIES = (
+    ("wet", "wet"), ("washed", "wash"), ("stirred", "stir"), ("cut", "cut"),
+    ("folded", "fold"), ("scrunched", "scrunch"), ("empty", "empty"),
+    ("upright", "orient"), ("flat", "orient"), ("upside_down", "orient"),
+    ("configured", "configure"), ("activated", "activate"), ("slid", "slide"),
+    ("pushed", "push"), ("unblocked", "unblock"),
+)
+
+
+def action_family(schema, *, name_only=False):
+    """Classify a transition by its effects, then fall back to its name."""
+    pre_pos, add_eff, del_eff = (
+        {canonical_literal(f) for f in literals} if not name_only else set()
+        for literals in (schema.pre_pos, schema.add_eff, schema.del_eff))
+    added = {f[0] for f in add_eff}
+    deleted = {f[0] for f in del_eff}
+    lower = schema.name.lower()
+    held_tools = {f[2] for f in pre_pos if len(f) == 3 and f[0] == "holding"}
+    removed_contents = {f[1] for f in del_eff if len(f) == 3 and f[0] in {"in", "inserted"}}
+    added_contents = {f[1] for f in add_eff if len(f) == 3 and f[0] in {"in", "inserted"}}
+    if held_tools and removed_contents & added_contents - held_tools:
+        return "scoop"
+    # A compound action's processing effect takes priority over acquiring a tool.
+    if not added & {"on", "in", "inserted"}:
+        for predicate, family in _SEMANTIC_EFFECT_FAMILIES:
+            if predicate in added:
+                return family
+    if "holding" in added:
+        if "closed" in deleted and ("open" in added or "on" in deleted):
+            return "remove_closure"
+        if lower == "open" or lower.startswith("open_"):
+            return "open"
+        return "pick"
+    if "holding" in deleted:
+        if "closed" in added and "open" in deleted and "on" in added:
+            return "replace_closure"
+        if "inserted" in added:
+            return "insert"
+        if "in" in added:
+            return "place_in"
+        if "on" in added or lower.startswith("release_"):
+            return "place_on"
+    if "open" in added and "closed" in deleted:
+        return "open"
+    if "closed" in added and "open" in deleted:
+        return "close"
+    if added & {"power_on", "on_state", "turned_on"}:
+        return "turn_on"
+    if added & {"power_off", "off_state", "turned_off"}:
+        return "turn_off"
+    if "locked" in added and "unlocked" in deleted:
+        return "lock"
+    if "unlocked" in added and "locked" in deleted:
+        return "unlock"
+    if "inserted" in added:
+        return "insert"
+    for predicate, family in _SEMANTIC_EFFECT_FAMILIES:
+        if predicate in added:
+            return family
+    if lower.startswith("pour_"):
+        return "pour"
+    if lower.startswith("scoop_"):
+        return "scoop"
+    semantic_names = (
+        (("wipe", "clean"), "wipe"), (("stir", "mix"), "stir"),
+        (("cut", "chop", "slice"), "cut"), (("wash", "washed", "rinse", "rinsed"), "wash"),
+        (("fold",), "fold"), (("scrunch", "scrunched", "crumple", "crumpled"), "scrunch"),
+        (("fill", "filling"), "fill"), (("wet", "dampen"), "wet"), (("empty", "drain"), "empty"),
+        (("sweep",), "sweep"), (("slide",), "slide"), (("push",), "push"),
+        (("press", "activate"), "activate"), (("configure", "select"), "configure"),
+    )
+    name_tokens = set(lower.split("_"))
+    for words, family in semantic_names:
+        if name_tokens.intersection(words):
+            return family
+    prefixes = (
+        ("pick_", "pick"), ("grasp_", "pick"), ("take_", "pick"), ("lift_", "pick"),
+        ("place_", "place_on"), ("put_", "place_on"), ("drop_", "place_on"),
+        ("open_", "open"), ("close_", "close"), ("turn_on_", "turn_on"), ("turn_off_", "turn_off"),
+        ("switch_on_", "turn_on"), ("switch_off_", "turn_off"), ("remove_", "remove_closure"),
+        ("unscrew_", "remove_closure"), ("screw_", "replace_closure"), ("insert_", "insert"),
+        ("lock_", "lock"), ("unlock_", "unlock"),
+    )
+    for prefix, family in prefixes:
+        if lower == prefix[:-1] or lower.startswith(prefix):
+            return family
+    return "generic_pddl" if add_eff or del_eff or pre_pos else "unsupported"
 
 
 def contradictions(positive, negative=()):
@@ -383,14 +579,14 @@ def check_operator_coverage(candidate, gt, reference):
     except (OSError, ValueError, KeyError) as error:
         return {"matched": False, "matches": [], "unavailable": str(error)}
     families = {family for schema in candidate.schemas.values()
-                for family in (map_schema(schema)[0].value, named_family(schema))}
+                for family in (action_family(schema), named_family(schema))}
     effects = {candidate.interface.canonicalize(f)[0]
                for s in candidate.schemas.values() for f in s.add_eff}
     matches = []
     required = required_processing(gt)
     initial = {f[0] for f in candidate.facts}
     for schema in gt.schemas.values():
-        family = map_schema(schema)[0].value
+        family = action_family(schema)
         if schema.name not in used or family not in SEMANTIC_FAMILIES or family in families:
             continue
         # A macro with the same state effect can implement this capability.
@@ -408,7 +604,7 @@ def check_operator_coverage(candidate, gt, reference):
 
 
 def named_family(schema):
-    return map_schema(replace(schema, pre_pos=set(), add_eff=set(), del_eff=set()))[0].value
+    return action_family(schema, name_only=True)
 
 
 def alternate_state_effects(world, predicates, *, actions=None, objects=None):
@@ -661,13 +857,13 @@ def reference_guards(gt, family, anchors, sources, *, limit=4096, details=False)
         return fact if fact[0] == "=" else gt.interface.canonicalize(fact)
 
     for schema in gt.schemas.values():
-        if family is not None and map_schema(schema)[0] != family:
+        if family is not None and action_family(schema) != family:
             continue
         effects = {gt.interface.canonicalize(f) for f in schema.add_eff}
         preconditions = {canonical(f) for f in schema.pre_pos}
         bindings = [binding for effect in effects for anchor in anchors
                     if (binding := unify(effect, anchor)) is not None]
-        if family is not None and family.value == "pick" and sources:
+        if family == "pick" and sources:
             bindings = [{**binding, **extra} for binding in bindings for pre in preconditions for source in sources
                         if ((pre[0] in SPATIAL and source[0] in SPATIAL) or pre[0] == source[0]) and (extra := unify(
                             substitute((source[0], *pre[1:]), binding), source)) is not None]
@@ -795,12 +991,12 @@ def check_plan_semantics(candidate, gt, mapping, directory, reference, *, strict
             if new_conflicts:
                 result["matches"].append({"kind": "inconsistent_effects", "step": index,
                                           "action": action.name, "conflicts": new_conflicts})
-            family = map_schema(candidate.schemas[action.name])[0]
+            family = action_family(candidate.schemas[action.name])
             anchors = {mapped for f in added - state if f[0] in GUARDS - {"hand_free"}
                        and (mapped := project(f)) is not None}
             sources = {f for raw in deleted if raw[0] in SPATIAL | {"inserted"}
                        and (f := project(raw)) is not None}
-            unknown_source = family.value == "pick" and any(
+            unknown_source = family == "pick" and any(
                 raw[0] in SPATIAL | {"inserted"} and project(raw) is None for raw in deleted)
             mapped_state, mapped_added = project_state(state), project_state(added)
             mapped_deleted = mapped_state - project_state(next_state)
@@ -1918,11 +2114,40 @@ def taxonomy_fields(result, directory=None):
 # Object alignment, shared-state checks and attribution workflow.
 
 def load_world(directory):
-    # FD accepts overlapping effects (add wins). Keep them inspectable instead
-    # of dropping the whole task into else because the reorder parser is strict.
-    schemas = parse_domain(directory / "domain.pddl", allow_effect_overlap=True)
+    schemas = parse_domain(directory / "domain.pddl")
     problem = parse_problem_model(directory / "problem.pddl", schemas)
-    return compile_world(schemas, problem)
+    interface = PredicateInterface.from_schemas(schemas)
+
+    def canonical(literals):
+        return frozenset(interface.canonicalize(f) for f in literals)
+
+    facts = canonical(problem.init_state)
+    static_unary = {p.raw_name for p in interface.descriptions if p.static and p.arity == 1}
+    objects = []
+    for name in sorted(problem.objects):
+        kinds = {f[0].removeprefix("kind:") for f in facts
+                 if len(f) == 2 and f[0].startswith("kind:") and f[1] == name}
+        identity_kinds = {f[0] for f in problem.init_state
+                          if len(f) == 2 and f[0] in static_unary and f[1] == name}
+        state_tags = {f[0] for f in facts if len(f) == 2 and f[1] == name
+                      and not f[0].startswith(("kind:", "static:"))}
+        objects.append(ObjectDescription(name, tuple(sorted(kinds)), tuple(sorted(identity_kinds)),
+                                         tuple(sorted(state_tags))))
+    return CanonicalWorld(interface, tuple(objects), facts, canonical(problem.init_negative),
+                          canonical(problem.goal_positive), canonical(problem.goal_negative),
+                          schemas, frozenset(problem.init_state))
+
+
+def fixed_object_mapping(candidate, gt):
+    """Match shared identifiers and the sole declared hand in each scene."""
+    gt_names = {o.name for o in gt.objects}
+    exact = {o.name: o.name for o in candidate.objects if o.name in gt_names}
+    candidate_hands = [o.name for o in candidate.objects if "hand" in o.identity_kinds]
+    gt_hands = [o.name for o in gt.objects if "hand" in o.identity_kinds]
+    if (len(candidate_hands) == len(gt_hands) == 1
+            and candidate_hands[0] not in exact and gt_hands[0] not in exact):
+        exact[candidate_hands[0]] = gt_hands[0]
+    return exact
 
 
 def object_payload(world):
@@ -2186,7 +2411,7 @@ def run_solver(source, dest):
 
 
 def map_objects(candidate, gt, instruction, image_path, model, reasoning_effort, evidence):
-    fixed = align_worlds(candidate, gt).mapping()
+    fixed = fixed_object_mapping(candidate, gt)
     queries = sorted({o.name for o in candidate.objects} - fixed.keys())
     targets = sorted({o.name for o in gt.objects} - set(fixed.values()))
     evidence.update(model=model, reasoning_effort=reasoning_effort, fixed=fixed, attempts=[])
@@ -2287,7 +2512,7 @@ def attribute_failure(candidate_dir, gt_task_dir, instruction, image_path, *,
                 if offline:
                     evidence = checks["object_mapping"]
                     saved = cached.get("checks", {}).get("object_mapping", {})
-                    fixed = align_worlds(candidate, gt).mapping()
+                    fixed = fixed_object_mapping(candidate, gt)
                     names, targets = {o.name for o in candidate.objects}, {o.name for o in gt.objects}
                     same_reference = (cached.get("gt_directory") is not None
                                       and Path(cached["gt_directory"]).resolve() == reference.resolve())
@@ -2304,7 +2529,7 @@ def attribute_failure(candidate_dir, gt_task_dir, instruction, image_path, *,
             except Exception as error:
                 checks["mapping_error"] = f"{type(error).__name__}: {error}"
                 # A failed VLM request does not discard exact object identities.
-                mapping = align_worlds(candidate, gt).mapping()
+                mapping = fixed_object_mapping(candidate, gt)
                 checks["object_mapping"].update(mapping=mapping, source="exact_identity_fallback")
                 init = check_init(candidate, gt, mapping)
             if solver.get("returncode") in {10, 11, 12}:

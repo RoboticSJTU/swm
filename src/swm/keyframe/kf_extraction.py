@@ -1,5 +1,6 @@
-"""Temporal-Gradient Keyframe Extraction."""
+"""Temporal-gradient keyframes with P95 merging and rising-edge boundaries."""
 
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -63,16 +64,35 @@ def save_temporal_gradient_energy(frames_dir, save_path) -> None:
     np.save(save_path, energy)
 
 
+def _rising_boundary(energy, valley: int, peak: int, beta: float) -> int:
+    if beta == 0:
+        return peak
+    target = float(energy[peak] - beta * (energy[peak] - energy[valley]))
+    if beta == 1:
+        target = float(energy[valley])
+    # Search backwards to choose the rising crossing closest to this peak.
+    for left in range(peak - 1, valley - 1, -1):
+        low, high = energy[left], energy[left + 1]
+        if low <= target <= high and high > low:
+            position = left + (target - low) / (high - low)
+            return min(peak, max(valley + 1, math.floor(float(position) + 0.5)))
+    raise ValueError(f"No rising crossing between valley {valley} and peak {peak}")
+
+
 def extract_temporal_gradient_keyframes(
     frames_dir: Path,
     keyframe_dir: Path,
     radius: int,
-    smooth_k: int = 5,
+    smooth_k: int = 9,
     plot_energy: bool = True,
     global_merge_percent: int = 5,
+    boundary_beta: float = 0.55,
 ) -> None:
+    """Merge extrema within a percentage of smoothed P95, then advance boundaries."""
     if any(keyframe_dir.glob("seg_*/*.png")):
         return
+    if not math.isfinite(boundary_beta) or not 0 <= boundary_beta <= 1:
+        raise ValueError("boundary_beta must be finite and in [0, 1]")
 
     images = sorted(frames_dir.glob("*.png"), key=lambda path: int(path.stem))
     if not images:
@@ -109,7 +129,7 @@ def extract_temporal_gradient_keyframes(
             extrema.append(center)
 
     median = float(np.median(energy))
-    global_merge_threshold = float(energy.max()) * global_merge_percent / 100
+    global_merge_threshold = float(np.percentile(energy, 95)) * global_merge_percent / 100
     merged = []
     for current in extrema:
         if merged:
@@ -157,11 +177,19 @@ def extract_temporal_gradient_keyframes(
         segments[0][0] = 0
         segments[-1][-1] = frame_count - 1
 
+    label_by_frame = dict(zip(extrema, labels))
+    for before, after in zip(segments, segments[1:]):
+        peak = before[-1]
+        valley = next(frame for frame in reversed(before[:-1])
+                      if label_by_frame.get(frame) == "valley")
+        cut = _rising_boundary(energy, valley, peak, boundary_beta)
+        before[-1] = after[0] = cut
+
     if plot_energy:
+        selected = sorted({frame for segment in segments for frame in segment})
         figure, axis = plt.subplots(figsize=(10, 3))
         axis.plot(energy, linewidth=1, label="Smoothed temporal-gradient energy")
-        plot_indices = sorted({frame for segment in segments for frame in segment})
-        axis.scatter(plot_indices, energy[plot_indices], color="red", s=25,
+        axis.scatter(selected, energy[selected], color="red", s=25,
                      zorder=3, label="Selected keyframes")
         axis.set_xlabel("Source frame index (0-based)")
         axis.set_ylabel("Energy")

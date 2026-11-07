@@ -55,6 +55,7 @@ Thumbs.db
 /archive/eb_alfred/cache/
 /archive/eb_alfred/runs/
 /tmp/
+/temp/
 /domain/
 /test_pddl/
 /scripts/clean_operator/
@@ -103,3 +104,4 @@ Thumbs.db
 /.sii/
 /experiments/
 /paper/
+/src/swm/abstract_planning/

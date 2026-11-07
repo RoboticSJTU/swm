@@ -87,8 +87,8 @@ def describe_error(result, directory):
             return "缺少参考计划所需的操作能力：" + "; ".join(
                 f"{item['family']}（GT 动作 {item['gt_action']}，状态效果 {', '.join(item['gt_effects'])}）"
                 for item in missing) + "。"
-        candidate = parse_domain(directory / "domain.pddl", allow_effect_overlap=True)
-        gt = parse_domain(Path(result["gt_directory"]) / "domain.pddl", allow_effect_overlap=True)
+        candidate = parse_domain(directory / "domain.pddl")
+        gt = parse_domain(Path(result["gt_directory"]) / "domain.pddl")
         candidate_only = [name for name in candidate if name not in gt]
         gt_only = [name for name in gt if name not in candidate]
         return ("算子数量少于 GT；这是数量启发式，尚未确认缺少哪种必需操作能力。\n"

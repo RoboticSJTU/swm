@@ -4,6 +4,8 @@
 Every selected segment-start image receives exactly AUG_FACTOR instructions.
 Edit instruction_aug_manual.json after reviewing source actions and images; a
 changed action file requires that review before any dataset files are written.
+For explicit, metadata-free suffix imports use import_reviewed_suffixes instead
+of the legacy three-variant main entry point.
 """
 
 import json
@@ -237,6 +239,149 @@ def audit_records(source_data, records, manual_data):
                               for task_id in sorted(SKIP_TASK_IDS)},
             "source_images": sum(t["source_images"] for t in tasks.values()),
             "augmented_episodes": len(records), "tasks": tasks}
+
+
+def suffix_augmentation_factor(completed_groups, total_groups):
+    """Use ordinal KF-group progress, including sparse GIDs and grouped actions."""
+    if not 0 < completed_groups < total_groups:
+        raise ValueError("a suffix must exclude the full-task start and empty end")
+    if 2 * completed_groups < total_groups:
+        return 10
+    if 4 * completed_groups < 3 * total_groups:
+        return 5
+    return 2
+
+
+def import_reviewed_suffixes(root, reviewed_data, task_ids=range(321, 331)):
+    """Append explicitly reviewed suffixes without reading or writing metadata.
+
+    Each task supplies reviewed_actions and cuts. A cut names start_gid, an
+    existing source_image_path, and zero or more reviewed instructions. Optional
+    episode_ids reserve explicit new IDs; existing samples are never replaced.
+    The returned records and cut shortfalls are in-memory review/PDDL inputs.
+    All inputs are checked before any dataset file is changed.
+    """
+    root = Path(root).resolve()
+    source_path = root / "tasks/instructions" / f"instructions_{SOURCE_TASK_DOMAIN}.json"
+    instruction_path = root / "tasks/instructions" / f"instructions_{AUG_TASK_DOMAIN}.json"
+    steps_path = root / "tasks/steps" / f"steps_{AUG_TASK_DOMAIN}.json"
+    source_data = read_json(source_path)
+    instruction_data = read_json(instruction_path)
+    steps_data = read_json(steps_path)
+    seen = {}
+    for label, data in (("original", source_data), ("existing_aug", instruction_data)):
+        for group, episodes in data.items():
+            for episode, instruction in episodes.items():
+                seen.setdefault(normalize_instruction(instruction),
+                                f"{label}/{group}/{episode}")
+    records, cuts = [], []
+    task_ids = list(task_ids)
+    if len(set(task_ids)) != len(task_ids):
+        raise ValueError("duplicate task IDs")
+    for task_id in task_ids:
+        group = f"task_{task_id}"
+        authored = reviewed_data[group]
+        if authored.get("review_status", "reviewed") != "reviewed":
+            raise ValueError(f"{group}: source data review is incomplete")
+        source_episode = authored.get("source_episode_id", f"episode_{task_id}")
+        if source_episode not in source_data[group]:
+            raise ValueError(f"{group}: unknown source episode {source_episode}")
+        action_path = (root / "eval_results" / PLAN_MODEL_NAME / SOURCE_TASK_DOMAIN
+                       / group / source_episode / "kf_actions.txt")
+        actions = read_indexed_actions(action_path)
+        if {str(gid): values for gid, values in actions.items()} != authored["reviewed_actions"]:
+            raise ValueError(f"{group}: kf_actions changed; review local instructions first")
+        gids = list(actions)
+        old_instructions = instruction_data.get(group, {})
+        old_steps = steps_data.get(group, {})
+        if set(old_instructions) != set(old_steps):
+            raise ValueError(f"{group}: existing instruction/step episode IDs disagree")
+        image_dir = root / "tasks/images" / AUG_TASK_DOMAIN / group
+        results_dir = root / "eval_results" / PLAN_MODEL_NAME / AUG_TASK_DOMAIN / group
+        names = set(old_instructions) | set(old_steps)
+        names.update(path.stem for path in image_dir.glob("episode_*.*"))
+        names.update(path.name for path in results_dir.glob("episode_*"))
+        next_id = max((int(match[1]) for name in names
+                       if (match := re.fullmatch(r"episode_(\d+)", name))), default=0) + 1
+        source_dir = (root / "dataset/keyframes" / SOURCE_TASK_DOMAIN
+                      / group / source_episode).resolve()
+        selected_gids, selected_images = set(), set()
+        for cut in authored["cuts"]:
+            gid = int(cut["start_gid"])
+            if gid not in actions or gid in selected_gids:
+                raise ValueError(f"{group}/G{gid}: unknown or duplicate cut GID")
+            selected_gids.add(gid)
+            completed_groups = gids.index(gid)
+            target_count = suffix_augmentation_factor(completed_groups, len(gids))
+            source_image = Path(cut["source_image_path"])
+            if not source_image.is_absolute():
+                source_image = root / source_image
+            source_image = source_image.resolve(strict=True)
+            if (not source_image.is_file() or source_image.suffix.lower() not in IMAGE_EXTS
+                    or source_image.parent.parent != source_dir
+                    or not re.fullmatch(r"seg_\d+", source_image.parent.name)):
+                raise ValueError(f"{group}/G{gid}: image is not an existing source keyframe")
+            if source_image in selected_images:
+                raise ValueError(f"{group}/G{gid}: source image reused by another cut")
+            selected_images.add(source_image)
+            variants = cut["instructions"]
+            if not isinstance(variants, list) or len(variants) > target_count:
+                raise ValueError(f"{group}/G{gid}: expected at most {target_count} instructions")
+            explicit_ids = cut.get("episode_ids")
+            if explicit_ids is not None and (not isinstance(explicit_ids, list)
+                                             or len(explicit_ids) != len(variants)):
+                raise ValueError(f"{group}/G{gid}: episode_ids must match instructions")
+            target = [a for g in gids[completed_groups:] for a in actions[g]]
+            indexed = [f"[G{g}] {a}" for g in gids[completed_groups:] for a in actions[g]]
+            completed = [a for g in gids[:completed_groups] for a in actions[g]]
+            shortfall = target_count - len(variants)
+            cut_result = {"group_id": group, "source_episode_id": source_episode,
+                          "start_gid": gid, "source_image_path": str(source_image),
+                          "completed_groups": completed_groups, "total_groups": len(gids),
+                          "target_count": target_count, "actual_count": len(variants),
+                          "shortfall": shortfall, "episode_ids": []}
+            cuts.append(cut_result)
+            for slot, instruction in enumerate(variants):
+                if (not isinstance(instruction, str) or len(instruction.split()) < 3
+                        or "\n" in instruction or BANNED_CONTEXT.search(instruction)):
+                    raise ValueError(f"{group}/G{gid}/{slot + 1}: invalid instruction")
+                normalized = normalize_instruction(instruction)
+                if normalized in seen:
+                    raise ValueError(f"{group}/G{gid}/{slot + 1}: duplicate instruction with "
+                                     f"{seen[normalized]}")
+                seen[normalized] = f"new/{group}/G{gid}/{slot + 1}"
+                episode = explicit_ids[slot] if explicit_ids is not None else f"episode_{next_id}"
+                if (not isinstance(episode, str)
+                        or not re.fullmatch(r"episode_[1-9]\d*", episode)):
+                    raise ValueError(f"{group}/G{gid}: invalid episode ID {episode}")
+                if episode in names:
+                    raise FileExistsError(f"{group}/{episode}: episode ID collision")
+                names.add(episode)
+                next_id = max(next_id, int(episode.split("_")[1]) + 1)
+                image_path = image_dir / f"{episode}.png"
+                records.append({**cut_result, "episode_id": episode, "slot": slot + 1,
+                                "instruction": instruction, "steps": target,
+                                "indexed_actions": indexed, "completed_actions": completed,
+                                "image_path": str(image_path.relative_to(root))})
+                cut_result["episode_ids"].append(episode)
+        if selected_gids != set(gids[1:]):
+            raise ValueError(f"{group}: reviewed cuts must cover every noninitial KF group; "
+                             "use an empty instruction list for a rejected cut")
+    # Validation and all collision checks finish before the first write.
+    for record in records:
+        ensure_image_link(root, record)
+        group, episode = record["group_id"], record["episode_id"]
+        directory = root / "eval_results" / PLAN_MODEL_NAME / AUG_TASK_DOMAIN / group / episode
+        directory.mkdir(parents=True)
+        (directory / "kf_actions.txt").write_text(
+            "\n".join(record["indexed_actions"]) + "\n", encoding="utf-8")
+        instruction_data.setdefault(group, {})[episode] = record["instruction"]
+        steps_data.setdefault(group, {})[episode] = record["steps"]
+    write_json_atomic(instruction_path, instruction_data)
+    write_json_atomic(steps_path, steps_data)
+    return {"records": records, "cuts": cuts, "normalized_duplicate_count": 0,
+            "augmented_episodes": len(records), "source_images": len(cuts),
+            "shortfall": sum(cut["shortfall"] for cut in cuts), "external_api_calls": 0}
 
 
 def main(root=ROOT, manual_path=MANUAL_PATH):

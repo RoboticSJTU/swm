@@ -1,7 +1,6 @@
 """Replay a semantically aligned plan in the official PDDL initial state and goal."""
 from pathlib import Path
 import re
-import sys
 from threading import Lock
 from types import SimpleNamespace
 
@@ -118,9 +117,6 @@ def validate_gt_plan(candidate: Path, gt: Path, *, instruction='', images=None,
               'scope': 'Plan validity in the official symbolic initial state and goal.',
               'object_mapping': {}, 'action_mapping': {}}
     try:
-        dependencies = str(Path(__file__).resolve().parents[3] / 'additional_experiments/tools/python')
-        if dependencies not in sys.path:
-            sys.path.append(dependencies)
         from unified_planning.io import PDDLReader
         from unified_planning.shortcuts import SequentialSimulator
         from unified_planning.environment import get_environment

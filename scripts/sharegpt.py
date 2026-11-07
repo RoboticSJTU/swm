@@ -1,4 +1,4 @@
-"""Export readable PDDL rounds; log review and processing errors as warnings."""
+"""Export locally replayed PDDL rounds without modifying their source models."""
 
 import json
 import os
@@ -17,32 +17,28 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from swm.pddl.strips import parse_plan
+from swm.pddl.strips import (
+    assert_goals,
+    ground_plan,
+    parse_domain,
+    parse_plan,
+    parse_problem_model,
+    rollout,
+)
 
 MODEL_NAME = "gpt-5.6-sol"
 EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
 NORMALIZE_PDDL_NAMES = True  # 仅在导出的 JSON 中将 domain/problem 名称统一为 ROBOT_CONFIGURATION
 
-ROBOT_CONFIGURATION = "single_arm"
-TASK_DOMAINS = ["human", "human_aug"]
-
-# ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
-
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
 # ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibot", "agibot_aug"]
+# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
 
-# ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
+ROBOT_CONFIGURATION = "single_arm"
+TASK_DOMAINS = ["human", "human_aug"]
 
-# ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["gelaxea", "gelaxea_aug"]
-
-# ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibot", "agibot_aug", "droid", "bridgedata_v2", "gelaxea", "gelaxea_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug"]
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
 IMAGES_ROOT = ROOT_DIR / "tasks/images"
@@ -99,8 +95,8 @@ def predicate_name(expression):
     return expression_head(expression)
 
 
-def format_domain(domain, problem, action_names):
-    """裁剪动作和谓词，保留原有 domain 名称。"""
+def format_domain(domain, problem=None, action_names=None):
+    """格式化完整 domain；显式传入 action_names 时才裁剪导出副本。"""
     action_heads = {":action", ":durative-action"}
     declarations = [
         predicate
@@ -109,6 +105,15 @@ def format_domain(domain, problem, action_names):
         for predicate in section[1:]
     ]
     declared = {predicate_name(predicate) for predicate in declarations}
+    if action_names is None:
+        action_names = [
+            section[1].lower()
+            for section in domain[2:]
+            if expression_head(section) in action_heads
+        ]
+        preserve_declarations = True
+    else:
+        preserve_declarations = False
     selected_names = set(action_names)
     referenced = set()
 
@@ -132,7 +137,7 @@ def format_domain(domain, problem, action_names):
     declarations = [
         declaration
         for declaration in declarations
-        if predicate_name(declaration) in referenced
+        if preserve_declarations or predicate_name(declaration) in referenced
     ]
     actions = {
         section[1].lower(): section
@@ -268,17 +273,23 @@ def format_problem(problem):
 
 
 def atomic_write(path, text):
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as temporary:
-        temporary.write(text)
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
+    """仅用于导出产物；替换成功前保留已有文件。"""
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(text)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def inspect_init(problem):
@@ -318,6 +329,11 @@ def inspect_init(problem):
 # ============================================================
 
 def find_image(task_domain, task_id, episode_id):
+    # 增强指令的官方映射可能指向中间帧，优先尊重该映射。
+    image_path = IMAGES_ROOT / task_domain / task_id / f"{episode_id}.png"
+    if image_path.is_file():
+        return str(image_path)
+
     directory = KEYFRAMES_ROOT / task_domain / task_id / episode_id / "seg_00"
     try:
         with os.scandir(directory) as entries:
@@ -333,14 +349,11 @@ def find_image(task_domain, task_id, episode_id):
     if images:
         return str(min(images, key=lambda path: int(path.stem)))
 
-    image_path = IMAGES_ROOT / task_domain / task_id / f"{episode_id}.png"
-    if image_path.is_file():
-        return str(image_path)
     return None
 
 
 def find_task_rounds(item):
-    """扫描指令中包含的 episode 的最大 round，仅要求源 PDDL 存在。"""
+    """选择包含 PDDL 的最大 round；不回退到较旧的有效模型。"""
     task_dir, allowed_episodes = item
     task_id = Path(task_dir).name
     with os.scandir(task_dir) as entries:
@@ -359,7 +372,9 @@ def find_task_rounds(item):
             rounds = [
                 Path(entry.path)
                 for entry in entries
-                if re.fullmatch(r"round\d+", entry.name) and entry.is_dir()
+                if re.fullmatch(r"round\d+", entry.name)
+                and entry.is_dir()
+                and any((Path(entry.path) / name).is_file() for name in ("domain.pddl", "problem.pddl"))
             ]
         round_dir = max(rounds, key=lambda path: int(path.name[5:]), default=None)
         if round_dir is None:
@@ -368,6 +383,10 @@ def find_task_rounds(item):
             (round_dir / name).is_file()
             for name in ("domain.pddl", "problem.pddl")
         ):
+            judge_warnings.append((
+                (task_id, episode_id),
+                f"[PDDL ERROR] {round_dir.relative_to(ROOT_DIR)}: 缺少 domain.pddl 或 problem.pddl；排除该 episode，不回退旧 round",
+            ))
             continue
         try:
             judge = json.loads((round_dir / "judge.json").read_text(encoding="utf-8"))
@@ -405,16 +424,23 @@ def prepare_round(item):
         domain_raw, problem_raw = (
             path.read_text(encoding="utf-8") for path in source_paths[:2]
         )
-        # 先保留源文本，解析、计划或格式化失败时仍可导出。
-        prepared = (domain_raw, problem_raw)
-
         domain = parse_pddl(domain_raw)
         problem = parse_pddl(problem_raw)
         raw_plan, _ = parse_plan(source_paths[2])
         if not raw_plan:
             raise ValueError("没有可用 action")
-        # 依赖已有评审和计划，只裁剪定义、调整排版，不重新求解或回放。
-        action_names = list(dict.fromkeys(name for name, _arguments in raw_plan))
+        plan_lines = [
+            line.strip()
+            for line in source_paths[2].read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith(";")
+        ]
+        if len(plan_lines) != len(raw_plan):
+            raise ValueError("plan.txt 包含无法解析的非注释行")
+        schemas = parse_domain(source_paths[0])
+        model = parse_problem_model(source_paths[1], schemas)
+        plan = ground_plan(raw_plan, schemas, model.objects)
+        final_state = rollout(model.init_state, plan)
+        assert_goals(final_state, model.goal_positive, model.goal_negative, "计划未达成目标")
         conflicts, hand_states = inspect_init(problem)
         if conflicts:
             problem_path = source_paths[1].relative_to(ROOT_DIR)
@@ -422,14 +448,9 @@ def prepare_round(item):
             review = "[INIT CONFLICT] " + message
             init_review = message
 
-        source_domain = format_domain(domain, problem, action_names).strip() + "\n"
+        source_domain = format_domain(domain).strip() + "\n"
         source_problem = format_problem(problem).strip() + "\n"
         prepared = (source_domain, source_problem)
-
-        if source_problem != problem_raw:
-            atomic_write(source_paths[1], source_problem)
-        if source_domain != domain_raw:
-            atomic_write(source_paths[0], source_domain)
 
         if ROBOT_CONFIGURATION == "single_arm" and len(hand_states) > 1:
             message = (
@@ -440,11 +461,11 @@ def prepare_round(item):
             review = f"{review}\n{hand_review}" if review else hand_review
 
         return key, prepared, review, init_review, None
-    except Exception as error:  # noqa: BLE001 - 处理异常仅告警，保留已读取的 PDDL
+    except Exception as error:  # noqa: BLE001 - 单条失败记录后排除，继续处理其余样本
         message = f"{round_dir.relative_to(ROOT_DIR)}: {error}"
-        warning = "[PDDL WARNING] " + message
+        warning = "[PDDL ERROR] " + message
         review = f"{review}\n{warning}" if review else warning
-        return key, prepared, review, init_review, message
+        return key, None, review, init_review, message
 
 
 def prepare_episode(item):
@@ -611,11 +632,11 @@ def main():
         output_files.append((ONLY_PROBLEM_OUT_JSON_PATH, only_problem_samples))
     for path, dataset in output_files:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write(path, json.dumps(dataset, ensure_ascii=False, indent=2))
         print(f"[done] samples={len(dataset)} -> {path}")
 
     if review_messages:
-        ERROR_LOG_PATH.write_text("\n".join(review_messages) + "\n", encoding="utf-8")
+        atomic_write(ERROR_LOG_PATH, "\n".join(review_messages) + "\n")
         print(f"[review] {len(review_messages)} warning(s) -> {ERROR_LOG_PATH}")
     else:
         ERROR_LOG_PATH.unlink(missing_ok=True)

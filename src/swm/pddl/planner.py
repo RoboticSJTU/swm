@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 from swm.pddl.reorder import plan_reorder
-from swm.pddl.strips import validate_untyped_pddl
 
 fast_downward_path = Path(__file__).parents[3] / "downward" / "fast-downward.py"
 _FAST_DOWNWARD_TIME_LIMIT_SECONDS = 60
@@ -166,9 +165,6 @@ def solve_pddl(domain_file, problem_file, *, reorder_plan=True, capture: dict | 
     plan_file.unlink(missing_ok=True)
     error_file.unlink(missing_ok=True)
     try:
-        domain_text = domain_file.read_text(encoding="utf-8")
-        validate_untyped_pddl(domain_text)
-        validate_untyped_pddl(problem_file.read_text(encoding="utf-8"))
         stdout, stderr = _run_fast_downward(cmd, domain_file.parent)
         if reorder_plan:
             plan_reorder(domain_file, problem_file, plan_file, plan_file)

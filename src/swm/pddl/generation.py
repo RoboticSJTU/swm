@@ -6,7 +6,7 @@ from pathlib import Path
 from swm.llm import call_gpt_json
 from swm.pddl.generation_contract import validate_generated_pddl, validate_generated_plan
 from swm.pddl.planner import solve_pddl, summarize_solver_error
-from swm.pddl.strips import format_pddl, validate_untyped_pddl
+from swm.pddl.strips import format_pddl
 from swm.prompts import construct_prompt_with_feedback
 
 
@@ -96,8 +96,6 @@ def generate_pddl(
         invalid = [name for name, text in (("domain", domain_str), ("problem", problem_str)) if not text.strip()]
         if invalid:
             raise ValueError("expected non-empty string field(s): " + ", ".join(invalid))
-        validate_untyped_pddl(domain_str)
-        validate_untyped_pddl(problem_str)
         domain_str = format_pddl(domain_str)
         problem_str = format_pddl(problem_str)
         domain_path.write_text(domain_str, encoding="utf-8")

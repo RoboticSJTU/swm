@@ -10,29 +10,25 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolE
 from multiprocessing import Manager
 from pathlib import Path
 from queue import Empty
-from tempfile import TemporaryDirectory
 
-root_dir = Path("/inspire/hdd/global_user/xiaoyunxiao-240108120113/swm")
+root_dir = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root_dir / "src"))
 
 from swm.llm import call_gpt
 from swm.pddl.attribution import attribute_failure
-from swm.pddl.eval_progress import ProgressDisplay, print_results
 from swm.pddl.eval_report import render_markdown_report
 from swm.pddl.generation import parse_pddl_output, strip_code_block
 from swm.pddl.planner import solve_pddl
 from swm.pddl.postprocess import repair_pddl
 from swm.pddl.reorder import plan_reorder
-from swm.pddl.strips import format_action_conditions, validate_untyped_pddl
+from swm.pddl.strips import format_action_conditions
 from swm.pddl.validate import validate_plan_feasibility
 
 # 基本配置
 eval_models = ["9B_1031"]  # 按顺序对应本地端口 8001、8002、8003……
 judge_model = "Qwen3.8-27B"
-# ROBOT_CONFIGURATION = "single_arm"
-# datasets = ["swm", "swm_v2", "unidomain"]
-ROBOT_CONFIGURATION = "dual_arm"
-datasets = ["swm_dual"]
+ROBOT_CONFIGURATION = "single_arm"
+datasets = ["swm_v3"]
 generation_max_workers = 200
 attribution_model = judge_model
 judge_max_workers = generation_max_workers
@@ -197,8 +193,6 @@ def generate_one(task: dict):
         problem_file.write_text(problem, encoding="utf-8")
         plan_file.unlink(missing_ok=True)
         domain, problem, changes = repair_pddl(domain, problem)
-        validate_untyped_pddl(domain)
-        validate_untyped_pddl(problem)
         if not problem_only:
             domain = format_action_conditions(domain)
         domain_file.write_text(domain, encoding="utf-8")
@@ -243,7 +237,6 @@ def judge_one(task: dict):
                     save_dir / "problem.pddl",
                     plan_file,
                     plan_file,
-                    allow_effect_overlap=True,
                 )
             except Exception as e:
                 plan_file.write_text(original_plan, encoding="utf-8")
@@ -354,17 +347,10 @@ def generate_tasks(tasks, progress):
 
 
 def attribute_one(task):
-    with TemporaryDirectory(prefix="swm_attribution_") as temporary:
-        artifact_dir = Path(temporary)
-        result = attribute_failure(
-            task["save_dir"], task["gt_dir"], task["instruction"], task["image"],
-            model=attribution_model, reasoning_effort="medium", artifact_dir=artifact_dir,
-        )
-        # Preserve parser evidence for the report after temporary files are removed.
-        solver_path = artifact_dir / "attribution_solver/result.json"
-        if result is not None and solver_path.is_file():
-            result["checks"]["fast_downward"] = json.loads(solver_path.read_text(encoding="utf-8"))
-        return result
+    return attribute_failure(
+        task["save_dir"], task["gt_dir"], task["instruction"], task["image"],
+        model=attribution_model, reasoning_effort="medium",
+    )
 
 
 def judge_and_attribute(all_tasks, progress):
@@ -479,50 +465,52 @@ def evaluate_model(model: str, port: int, *, model_index, events):
     return results
 
 
+def print_progress(event, labels, previous):
+    key = event["run"], event["stage"]
+    completed, total, state = event["completed"], event["total"], event["state"]
+    mark = state, completed * 10 // max(total, 1)
+    if previous.get(key) != mark:
+        previous[key] = mark
+        print(f"{labels[event['run']]} | {event['stage']} {completed}/{total} {state}", flush=True)
+
+
 def run_evaluations():
     if not eval_models or len(set(eval_models)) != len(eval_models):
         raise ValueError("At least one model is required; model names must be unique")
-    runs = []
-    for model_index, model in enumerate(eval_models):
-        for prompt_index, prompt_file in enumerate(prompt_files):
-            stages = ("generation", "judge") if prompt_file == "vlm_cot.txt" else ("generation", "judge", "attribution")
-            runs.append({"id": f"{model_index}:{prompt_index}",
-                         "label": model if len(prompt_files) == 1 else f"{model}/{Path(prompt_file).stem}", "stages": stages})
+    labels = {f"{i}:{j}": model if len(prompt_files) == 1 else f"{model}/{Path(prompt).stem}"
+              for i, model in enumerate(eval_models) for j, prompt in enumerate(prompt_files)}
     print(f"full evaluation | models={len(eval_models)} | pddl_workers={generation_max_workers} "
           f"judge_workers={judge_max_workers} attribution_workers={attribution_max_workers}", flush=True)
     print("Attribution total grows as judge failures arrive. Details are saved in reports and logs.", flush=True)
     results = []
     with Manager() as manager, ProcessPoolExecutor(max_workers=len(eval_models)) as executor:
         events = manager.Queue()
-        # Start workers before tqdm creates its terminal monitor thread.
         pending = {executor.submit(evaluate_model, model, 8001 + index,
                    model_index=index, events=events): index
                    for index, model in enumerate(eval_models)}
-        display = ProgressDisplay(runs)
-        try:
-            while pending:
-                try:
-                    display.update(events.get(timeout=0.2))
-                except Empty:
-                    pass
-                for future in list(pending):
-                    if future.done():
-                        index = pending.pop(future)
-                        try:
-                            results.extend(future.result())
-                        except Exception as error:
-                            results.append({"run": f"{index}:0", "label": eval_models[index], "status": "failed",
-                                            "error": str(error), "log": str(root_dir / "eval_results" / eval_models[index] / "evaluation.log")})
-                display.heartbeat()
-            while True:
-                try:
-                    display.update(events.get_nowait())
-                except Empty:
-                    break
-        finally:
-            display.close()
+        previous = {}
+        while pending:
+            try:
+                print_progress(events.get(timeout=0.2), labels, previous)
+            except Empty:
+                pass
+            for future in list(pending):
+                if future.done():
+                    index = pending.pop(future)
+                    try:
+                        results.extend(future.result())
+                    except Exception as error:
+                        results.append({"run": f"{index}:0", "label": eval_models[index], "status": "failed",
+                                        "error": str(error), "log": str(root_dir / "eval_results" / eval_models[index] / "evaluation.log")})
+        while True:
+            try:
+                print_progress(events.get_nowait(), labels, previous)
+            except Empty:
+                break
     results.sort(key=lambda item: tuple(map(int, item["run"].split(":"))))
-    print_results(results)
+    for result in results:
+        detail = result.get("error") or result.get("report") or result.get("log", "")
+        print(f"{result['label']} | {result['status']} | {detail}", flush=True)
     return results
 
 
