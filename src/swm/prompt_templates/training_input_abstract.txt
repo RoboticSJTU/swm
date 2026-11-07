@@ -8,8 +8,8 @@ PDDL requirements
 1. Symbolic representation
 - Use untyped PDDL with unary category predicates. Declare every used predicate with consistent names, argument counts and argument order. Include :requirements for the PDDL constructs you use.
 2. Objects and initial state
-- Use visible object IDs and symbols defined by the game rules. Ground the entities and locations needed for the task, and encode their categories and depicted initial states in :init.
-- Interpret the image using the meanings and conventions stated in the game rules. Derive any additional initial facts only from the depicted state and those rules, never from the desired goal.
+- Use visible object IDs and symbols defined by the game rules. Ground the entities and locations needed for the task, and encode their categories and depicted physical initial states and explicitly supplied nonvisual controller initial values in :init.
+- Interpret the image using the meanings and conventions stated in the game rules. Derive any additional initial facts only from the depicted state, the explicitly supplied controller initial values, and those rules, never from the desired goal.
 3. Task goal
 - Encode all required final conditions in :goal, grounded in the correct objects and locations.
 4. Game operators

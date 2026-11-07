@@ -40,6 +40,41 @@ def _atoms(node, bound=frozenset()):
         yield node, bound
 
 
+def _explicit_empty_expressions(node, path=()):
+    """Make logical true/no-op explicit, leaving terms and bound lists alone."""
+    if not isinstance(node, list):
+        return []
+    if not node:
+        node.append("and")
+        return [list(path)]
+    if not isinstance(node[0], str):
+        return []
+    if node[0] in {"and", "or", "not", "imply", "when"}:
+        return [location for i, child in enumerate(node[1:], 1)
+                for location in _explicit_empty_expressions(child, (*path, i))]
+    if node[0] in {"forall", "exists"} and len(node) == 3:
+        return _explicit_empty_expressions(node[2], (*path, 2))
+    return []
+
+
+def _unconditional_effects(node, path=()):
+    """Drop true when guards for validators requiring nonempty conditions."""
+    if not isinstance(node, list) or not node or not isinstance(node[0], str):
+        return []
+    if node[0] == "and":
+        return [location for i, child in enumerate(node[1:], 1)
+                for location in _unconditional_effects(child, (*path, i))]
+    if node[0] == "forall" and len(node) == 3:
+        return _unconditional_effects(node[2], (*path, 2))
+    if node[0] == "when" and len(node) == 3:
+        paths = _unconditional_effects(node[2], (*path, 2))
+        if node[1] == ["and"] and isinstance(node[2], list):
+            node[:] = node[2]
+            paths.append(list(path))
+        return paths
+    return []
+
+
 def _sexpr(node):
     return "(" + " ".join(map(_sexpr, node)) + ")" if isinstance(node, list) else node
 
@@ -119,6 +154,9 @@ def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
     arities = defaultdict(set)
     used_objects = set()
     added_parameters = {}
+    action_defaults = {}
+    empty_expressions = []
+    true_when_effects = []
 
     def record(atom):
         if atom[0] != "=":
@@ -132,13 +170,31 @@ def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
         if any(not isinstance(key, str) for key in action[2::2]):
             raise ValueError("Action fields must start with a symbol")
         fields = dict(zip(action[2::2], action[3::2]))
-        if len(fields) != (len(action) - 2) // 2 or set(fields) != {":parameters", ":precondition", ":effect"}:
+        if (len(fields) != (len(action) - 2) // 2
+                or not set(fields) <= {":parameters", ":precondition", ":effect"}
+                or ":effect" not in fields):
             raise ValueError(f"Malformed fields in action {action[1]}")
+        # PDDL permits omitted empty parameters and an omitted true
+        # precondition. Make these defaults explicit for the interpreter.
+        defaults = {key: value for key, value in ((":parameters", []), (":precondition", ["and"]))
+                    if key not in fields}
+        if defaults:
+            action_defaults[action[1]] = {key: value.copy() for key, value in defaults.items()}
+            fields.update(defaults)
+            action[2:] = [item for key in (":parameters", ":precondition", ":effect")
+                          for item in (key, fields[key])]
         if not isinstance(fields[":parameters"], list):
             raise ValueError("Action parameters must be a list")
         parameters = parse_symbols(fields[":parameters"], variables=True)
         free = set()
         for key in (":precondition", ":effect"):
+            paths = _explicit_empty_expressions(fields[key])
+            if paths:
+                empty_expressions.append({"action": action[1], "field": key, "paths": paths})
+            if key == ":effect":
+                paths = _unconditional_effects(fields[key])
+                if paths:
+                    true_when_effects.append({"action": action[1], "field": key, "paths": paths})
             for atom, bound in _atoms(fields[key], set(parameters)):
                 record(atom)
                 free.update(arg for arg in atom[1:] if arg.startswith("?") and arg not in bound)
@@ -146,7 +202,12 @@ def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
             added_parameters[action[1]] = sorted(free)
             fields[":parameters"].extend(sorted(free))
 
-    for expression in _section(problem_root, ":init")[1:] + _section(problem_root, ":goal")[1:]:
+    goal = _section(problem_root, ":goal")
+    if len(goal) == 2:
+        paths = _explicit_empty_expressions(goal[1])
+        if paths:
+            empty_expressions.append({"field": ":goal", "paths": paths})
+    for expression in _section(problem_root, ":init")[1:] + goal[1:]:
         for atom, _ in _atoms(expression):
             record(atom)
             used_objects.update(arg for arg in atom[1:] if not arg.startswith("?"))
@@ -168,10 +229,13 @@ def repair_pddl(domain: str, problem: str) -> tuple[str, str, dict]:
 
     changes = {key: value for key, value in {
         "predicates": added_predicates, "objects": added_objects, "parameters": added_parameters,
-        "duplicate_actions": dict(duplicate_actions),
+        "duplicate_actions": dict(duplicate_actions), "action_defaults": action_defaults,
+        "empty_expressions": empty_expressions,
+        "true_when_effects": true_when_effects,
     }.items() if value}
     return (
-        _format(domain_root) if added_predicates or added_parameters or duplicate_actions else domain,
-        _format(problem_root) if added_objects else problem,
+        _format(domain_root) if added_predicates or added_parameters or duplicate_actions or action_defaults
+            or true_when_effects or any("action" in change for change in empty_expressions) else domain,
+        _format(problem_root) if added_objects or any("action" not in change for change in empty_expressions) else problem,
         changes,
     )
