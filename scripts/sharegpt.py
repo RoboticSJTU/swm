@@ -33,11 +33,11 @@ NORMALIZE_PDDL_NAMES = True  # 仅在导出的 JSON 中将 domain/problem 名称
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
-# ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
+ROBOT_CONFIGURATION = "dual_arm"
+TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug", "epic"]
 
-ROBOT_CONFIGURATION = "single_arm"
-TASK_DOMAINS = ["human", "human_aug"]
+# ROBOT_CONFIGURATION = "single_arm"
+# TASK_DOMAINS = ["human", "human_aug"]
 
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
@@ -95,8 +95,8 @@ def predicate_name(expression):
     return expression_head(expression)
 
 
-def format_domain(domain, problem=None, action_names=None):
-    """格式化完整 domain；显式传入 action_names 时才裁剪导出副本。"""
+def format_domain(domain, problem, action_names):
+    """仅保留 plan 使用的动作及保留动作、problem 引用的谓词。"""
     action_heads = {":action", ":durative-action"}
     declarations = [
         predicate
@@ -105,16 +105,7 @@ def format_domain(domain, problem=None, action_names=None):
         for predicate in section[1:]
     ]
     declared = {predicate_name(predicate) for predicate in declarations}
-    if action_names is None:
-        action_names = [
-            section[1].lower()
-            for section in domain[2:]
-            if expression_head(section) in action_heads
-        ]
-        preserve_declarations = True
-    else:
-        preserve_declarations = False
-    selected_names = set(action_names)
+    selected_names = {name.lower() for name in action_names}
     referenced = set()
 
     def collect(expression):
@@ -137,14 +128,14 @@ def format_domain(domain, problem=None, action_names=None):
     declarations = [
         declaration
         for declaration in declarations
-        if preserve_declarations or predicate_name(declaration) in referenced
+        if predicate_name(declaration) in referenced
     ]
-    actions = {
-        section[1].lower(): section
+    selected_actions = [
+        section
         for section in domain[2:]
         if expression_head(section) in action_heads
-    }
-    selected_actions = [actions[name] for name in action_names]
+        and section[1].lower() in selected_names
+    ]
 
     lines = ["(define " + pddl_line(domain[1])]
     for section in domain[2:]:
@@ -329,6 +320,11 @@ def inspect_init(problem):
 # ============================================================
 
 def find_image(task_domain, task_id, episode_id):
+    if task_domain == "gelaxea":
+        image_path = KEYFRAMES_ROOT / task_domain / task_id / episode_id / "initial_views" / "initial.png"
+        if image_path.is_file():
+            return str(image_path)
+
     # 增强指令的官方映射可能指向中间帧，优先尊重该映射。
     image_path = IMAGES_ROOT / task_domain / task_id / f"{episode_id}.png"
     if image_path.is_file():
@@ -448,7 +444,7 @@ def prepare_round(item):
             review = "[INIT CONFLICT] " + message
             init_review = message
 
-        source_domain = format_domain(domain).strip() + "\n"
+        source_domain = format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n"
         source_problem = format_problem(problem).strip() + "\n"
         prepared = (source_domain, source_problem)
 

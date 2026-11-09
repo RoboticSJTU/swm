@@ -1,5 +1,8 @@
 Vocabulary and predicate-specific constraints; select needed entries under RULES, not a complete domain to copy.
 
+Use state/process-result predicates on the affected object/material; bind tools in action preconditions, not in redundant *_with result variants.
+Add a separate history predicate only for required intermediate events, repetitions, or ordering that final states and causal dependencies cannot enforce (e.g., closed -> open -> closed). Preserve physical effects; never replace or duplicate a sufficient result such as wiped, folded, or stirred with a history marker.
+
 (:predicates
   ; Static categories and structural/supply/control relations
   (hand ?h)

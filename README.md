@@ -154,10 +154,10 @@ pytest
 
 ## 详细文档
 
-- [项目规格](docs/PROJECT_SPEC.md)
-- [关键帧方法说明](docs/KEYFRAME_EXTRACTION_THEORY.md)
-- [Operator 清洗手册](docs/OPERATOR_CLEANUP_PLAYBOOK.md)
-- [主实验测试集设计](docs/experience.md)
+- [RSS 2027 论文入口](rss27_anydomain/README.md)
+- [论文定义与方法](rss27_anydomain/PAPER_BRIEF.md)
+- [论文写作任务书](rss27_anydomain/TASK.md)
+- [独立关键帧研究材料](archive/keyframe_research/README.md)
 
 ## License
 
