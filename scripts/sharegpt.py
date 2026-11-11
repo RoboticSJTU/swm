@@ -1,4 +1,4 @@
-"""Export locally replayed PDDL rounds without modifying their source models."""
+"""Normalize source PDDL rounds and export the same models to ShareGPT."""
 
 import json
 import os
@@ -16,7 +16,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+sys.path.insert(0, str(ROOT_DIR / "scripts/clean_operator"))
 
+from kf_reference import verify_plan
+from swm.pddl.planner import solve_pddl
 from swm.pddl.strips import (
     assert_goals,
     ground_plan,
@@ -28,16 +31,16 @@ from swm.pddl.strips import (
 
 MODEL_NAME = "gpt-5.6-sol"
 EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
-NORMALIZE_PDDL_NAMES = True  # 仅在导出的 JSON 中将 domain/problem 名称统一为 ROBOT_CONFIGURATION
+NORMALIZE_PDDL_NAMES = False  # 源 PDDL 与导出 JSON 的 domain/problem 名称统一为 ROBOT_CONFIGURATION
 
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
-ROBOT_CONFIGURATION = "dual_arm"
-TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug", "epic"]
+# ROBOT_CONFIGURATION = "dual_arm"
+# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug", "epic"]
 
-# ROBOT_CONFIGURATION = "single_arm"
-# TASK_DOMAINS = ["human", "human_aug"]
+ROBOT_CONFIGURATION = "single_arm"
+TASK_DOMAINS = ["human", "human_aug"]
 
 
 KEYFRAMES_ROOT = ROOT_DIR / "dataset/keyframes"
@@ -264,7 +267,7 @@ def format_problem(problem):
 
 
 def atomic_write(path, text):
-    """仅用于导出产物；替换成功前保留已有文件。"""
+    """替换成功前保留已有文件。"""
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -444,8 +447,30 @@ def prepare_round(item):
             review = "[INIT CONFLICT] " + message
             init_review = message
 
+        if NORMALIZE_PDDL_NAMES:
+            domain[1][1] = problem[1][1] = ROBOT_CONFIGURATION
+            for section in problem[2:]:
+                if expression_head(section) == ":domain":
+                    section[1] = ROBOT_CONFIGURATION
         source_domain = format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n"
         source_problem = format_problem(problem).strip() + "\n"
+        if (source_domain, source_problem) != (domain_raw, problem_raw):
+            with tempfile.TemporaryDirectory() as directory:
+                staged = Path(directory)
+                (staged / "domain.pddl").write_text(source_domain, encoding="utf-8")
+                (staged / "problem.pddl").write_text(source_problem, encoding="utf-8")
+                if not solve_pddl(staged / "domain.pddl", staged / "problem.pddl", reorder_plan=False):
+                    raise ValueError("格式化后的 PDDL 求解失败")
+                generated_plan, _ = parse_plan(staged / "plan.txt")
+                verify_plan(
+                    source_domain, source_problem,
+                    (round_dir.parent / "kf_actions.txt").read_text(encoding="utf-8"),
+                    generated_plan,
+                )
+                for path, text in zip(source_paths, (
+                    source_domain, source_problem, (staged / "plan.txt").read_text(encoding="utf-8"),
+                )):
+                    atomic_write(path, text)
         prepared = (source_domain, source_problem)
 
         if ROBOT_CONFIGURATION == "single_arm" and len(hand_states) > 1:
@@ -555,17 +580,6 @@ def process_domain(task_domain, prompt_template, only_problem_template=None):
         if image_path is None:
             missing_image += 1
             continue
-
-        if NORMALIZE_PDDL_NAMES:
-            domain_text, problem_text = (
-                re.sub(
-                    r"(?i)(\(\s*define\s*\(\s*(?:domain|problem)\s+"
-                    r"|\(\s*:domain\s+)[^\s();]+",
-                    rf"\g<1>{ROBOT_CONFIGURATION}",
-                    text,
-                )
-                for text in (domain_text, problem_text)
-            )
 
         problem_output = f"<problem>\n{problem_text}\n</problem>"
         domain_output = f"<domain>\n{domain_text}\n</domain>"

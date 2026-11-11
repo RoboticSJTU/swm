@@ -500,11 +500,16 @@ def reorder_by_search(
         core |= owned_cleanup
         bundles[members] = bundles.get(members, 0) | core
 
-    # Prepare the complete holding episode, including later grips, rather than
-    # counting just the cheapest immediate use. Work that needs this pick cannot
-    # be moved before it and is therefore excluded.
+    # Prepare the independent inputs of a chain before starting it. Holdings
+    # retain their complete episode, including later grips and release.
+    preparation_ends = dict(episode_ends)
+    for end, providers in enumerate(support_preds):
+        for root in bit_indices(providers):
+            if not acquisitions[root]:
+                preparation_ends[root] = preparation_ends.get(root, 0) | (1 << end)
+
     preparations = defaultdict(int)
-    for root, endings in episode_ends.items():
+    for root, endings in preparation_ends.items():
         for end in bit_indices(endings):
             for i in bit_indices(ancestors[end]):
                 if i != root and not ancestors[i] & (1 << root):
@@ -649,7 +654,7 @@ def reorder_by_search(
                  for a in preserving_uses or uses),
                 default=0,
             )
-            if i in episode_ends:
+            if i in preparations:
                 waiting = (preparations[i] & ~done_mask).bit_count()
             # Prefer the nearest completion of an established or already-used condition.
             finish = max(

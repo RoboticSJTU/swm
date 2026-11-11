@@ -24,7 +24,7 @@ Candidate `Before` and `State change` are claims to verify, not established fact
 
 - Identify required objects, quantities, operations, methods, relations, and final conditions. Required actions must be performed, even if the final state already holds (e.g., pick up and return the cup). Verify all requirements; collective symbols must represent actual items and executable transfers, not just quantities implied by their names.
 - Ground each object, source, and target in the actual scene. Accept different labels only when they uniquely identify the same physical entity or region: for example, `counter`/`table`, `cup`/`mug`, or `top_drawer`/`cabinet` when both clearly denote the same pickup surface. Do not assume equivalence among competing referents or substitute an indirect support, containment, or parent-child relation for the actual source or target (e.g., a kettle rests on its base, and the base rests on the table; stating that the kettle is directly on the table is incorrect).
-- Default to no ordering requirement unless Instruction explicitly specifies one (e.g., `before`, `after`, `then`) or an evidence-supported execution dependency requires it. Commas, `and`, and Reference order alone do not impose a sequence.
+- Ignore all non-causal ordering constraints in Instruction, including explicit before, after, and then, as such constraints are outside the scope of our current PDDL modeling. Enforce ordering only when required by causal or physical dependencies. Reference order alone does not impose constraints.
 
 ## 2. Establish initial facts and dependencies
 

@@ -15,6 +15,7 @@ from swm.pddl.validate import (
     validate_plan_feasibility,
     validate_plan_soundness,
     format_kf_actions,
+    current_psv_passed,
 )
 from swm.pddl.reorder import ReorderModel
 from swm.pddl.strips import format_pddl
@@ -122,20 +123,23 @@ def prepare_temporal_gradient_keyframes(task: dict) -> None:
         raise ValueError(f"No keyframes found in {task['keyframe_dir']}")
 
 
-def _round_has_verified_plan(round_dir: Path) -> bool:
-    judge_path = round_dir / "judge.json"
-    try:
-        judge = json.loads(judge_path.read_text(encoding="utf-8"))
-        return judge['pfv']['pass'] is True and judge['psv']['pass'] is True
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+def _round_has_verified_plan(round_dir: Path, **expected) -> bool:
+    return current_psv_passed(round_dir, **expected)
 
 
 def _latest_verified_round(task: dict) -> Path | None:
+    reference = task['save_dir'] / 'kf_actions.txt'
+    if STEP_SOURCE == 'steps_json' and 'steps' in task:
+        kf_actions = '\n'.join(task['steps'])
+    elif reference.is_file():
+        kf_actions = reference.read_text(encoding='utf-8')
+    else:
+        return None
     rounds = []
     for round_dir in task['save_dir'].glob("round*"):
         suffix = round_dir.name.removeprefix("round")
-        if suffix.isdigit() and _round_has_verified_plan(round_dir):
+        if suffix.isdigit() and _round_has_verified_plan(
+                round_dir, instruction=task['instruction'], kf_actions=kf_actions, model=JUDGE_MODEL):
             rounds.append((int(suffix), round_dir))
     return max(rounds, default=(0, None), key=lambda item: item[0])[1]
 

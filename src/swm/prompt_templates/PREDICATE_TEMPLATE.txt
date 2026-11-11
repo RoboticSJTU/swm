@@ -1,6 +1,6 @@
 Vocabulary and predicate-specific constraints; select needed entries under RULES, not a complete domain to copy.
 
-Use state/process-result predicates on the affected object/material; bind tools in action preconditions, not in redundant *_with result variants.
+Use canonical core state/process-result predicates on the affected object/material or local position (e.g., wipe -> wiped, fold -> folded, wet -> wet); bind tools in action preconditions, not in redundant *_with result variants.
 Add a separate history predicate only for required intermediate events, repetitions, or ordering that final states and causal dependencies cannot enforce (e.g., closed -> open -> closed). Preserve physical effects; never replace or duplicate a sufficient result such as wiped, folded, or stirred with a history marker.
 
 (:predicates
@@ -36,8 +36,8 @@ Add a separate history predicate only for required intermediate events, repetiti
   ; Mutually exclusive state pairs
   (open ?o)
   (closed ?c)
-  (is_on ?io)
-  (is_off ?io)
+  (is_on ?io) ; Device/control enabled; electrical supply is a separate condition.
+  (is_off ?io) ; Device/control disabled; does not imply disconnection.
   (locked ?l)
   (unlocked ?u)
   (pressed ?p)

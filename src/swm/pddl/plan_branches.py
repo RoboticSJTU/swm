@@ -3,21 +3,33 @@
 This represents action orders only. It neither merges execution states nor
 identifies plans as equivalent. A continuation is executed for every branch.
 """
+from collections import Counter
 
 
 def order_similar_plans(candidates: list[dict]) -> list[dict]:
-    """Medoid first, then longest shared prefix and smallest Kendall distance.
+    """Medoid first, then shared prefix and occurrence-order distance.
 
     Only action orders and anonymous IDs enter this ordering. No states,
     equivalence judgments, reference verdicts or task-specific rules are used.
     """
     if not candidates:
         raise ValueError('Expected at least one candidate')
-    positions = {c['id']: {action: i for i, action in enumerate(c['order'])} for c in candidates}
+    occurrences = {}
+    for candidate in candidates:
+        counts = Counter()
+        tokens = []
+        for action in candidate['order']:
+            counts[action] += 1
+            tokens.append((action, counts[action]))
+        occurrences[candidate['id']] = tokens
+    positions = {identifier: {token: i for i, token in enumerate(tokens)}
+                 for identifier, tokens in occurrences.items()}
 
     def distance(a, b):
-        order, target = a['order'], positions[b['id']]
-        return sum(target[x] > target[y] for i, x in enumerate(order) for y in order[i+1:])
+        left, target = occurrences[a['id']], positions[b['id']]
+        shared = [token for token in left if token in target]
+        missing = len(set(left) ^ set(target))
+        return missing + sum(target[x] > target[y] for i, x in enumerate(shared) for y in shared[i+1:])
 
     first = min(candidates, key=lambda a: (sum(distance(a, b) for b in candidates), a['id']))
     ordered, remaining = [first], [c for c in candidates if c is not first]
@@ -49,7 +61,8 @@ def render_named_orders(candidates: list[dict], actions: dict[int, str], *, sort
 def factor_plan_orders(candidates: list[dict]) -> dict:
     """Build a compressed prefix tree, factoring each node's common suffix.
 
-    Callers supply distinct IDs and valid orders of the same action multiset.
+    Callers supply distinct IDs and complete equal-length paths. References
+    may repeat and different paths may use different operation subsets.
     Step ranges always refer to positions in the complete original plans.
     """
     if not candidates or len({len(c['order']) for c in candidates}) != 1:

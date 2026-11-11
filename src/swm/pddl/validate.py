@@ -6,14 +6,19 @@ from functools import reduce
 import heapq
 import json
 import re
+import time
 from operator import or_
 from pathlib import Path
 
 from swm.llm import call_gpt_json
-from swm.pddl.reorder import ReorderModel, evaluate, expression_bits, search_plan_classes
+from swm.pddl.reorder import ReorderModel, evaluate, expression_bits
+from swm.pddl.same_length import SameLengthModel, search_plan_classes
 from swm.pddl.strips import parse_sexpr_file
 from swm.pddl.plan_branches import factor_plan_orders, render_plan_orders, render_named_orders
 from swm.prompts import read_prompt
+
+PSV_SCOPE = 'all_legal_plans_at_reference_length'
+PSV_ALGORITHM = 'same_length_discrete_effect_context_counts_v1'
 
 
 def format_kf_actions(text: str) -> str:
@@ -188,6 +193,8 @@ def build_group_judge_prompt(
     comparison_question: str = "",
     multiview: bool = False,
     presentation: str = "plain",
+    exact_length: int | None = None,
+    _context=None,
 ) -> str:
     """Fill the soundness template with shared operations and labelled paths.
 
@@ -207,9 +214,12 @@ def build_group_judge_prompt(
         raise ValueError("Expected distinct single-line candidate IDs")
     for candidate in candidates:
         order = candidate["order"]
-        if (not isinstance(order, (list, tuple)) or any(type(i) is not int for i in order)
-                or sorted(order) != sorted(actions)):
-            raise ValueError("Every candidate must preserve all action occurrences")
+        if not isinstance(order, (list, tuple)) or any(type(i) is not int for i in order):
+            raise ValueError("Expected an ordered path of action IDs")
+        if not order or any(i not in actions for i in order):
+            raise ValueError("Every candidate must be a nonempty path of known action IDs")
+        if exact_length is not None and len(order) != exact_length:
+            raise ValueError("Every candidate must be a complete exact-length path of known action IDs")
 
     if presentation not in {"branches", "linear", "plain", "named"}:
         raise ValueError("Unknown group presentation")
@@ -228,8 +238,10 @@ def build_group_judge_prompt(
     else:
         trace.append("Plan branches:")
         trace.append(render_plan_orders(factor_plan_orders(candidates)))
-    prompt = read_prompt("verify_soundness.txt").format(
-        instruction=instruction, kf_actions=format_kf_actions(kf_actions),
+    template, reference = (_context if _context is not None else
+                           (read_prompt("verify_soundness.txt"), format_kf_actions(kf_actions)))
+    prompt = template.format(
+        instruction=instruction, kf_actions=reference,
         evaluated_symbolic_trace="\n".join(trace), comparison_question=comparison_question,
     )
     if multiview:
@@ -265,11 +277,16 @@ def validate_plan_feasibility(
 
 
 # One declared state policy for single- and dual_arm plans.
-PROCESS_SCHEMA = {'version': 2,
+PROCESS_SCHEMA = {'version': 3,
+ 'relation_arities': {'on': 2, 'in': 2, 'at': 2, 'part_of': 2, 'drawer_of': 2,
+                      'lock_of': 2, 'scanned_with': 2, 'holding': 2, 'robot_holding': 3},
  'location_relations': {'on': [1, 2], 'in': [1, 2], 'at': [1, 2]},
  'hierarchy_relations': {'part_of': [1, 2], 'drawer_of': [1, 2], 'lock_of': [1, 2]},
  'record_relations': {'scanned_with': [1]},
  'resource_free_predicates': ['hand_free'],
+ 'resource_type_predicates': ['hand'],
+ 'resource_types': ['hand'],
+ 'resource_identity_source': 'explicit_types_or_initial_roles_only',
  'resource_relations': {'holding': {'resource': 1, 'payload': 2},
                         'robot_holding': {'resource': 2, 'payload': 3}},
  'unknown_relations': 'protect_all_participants_and_current_connections',
@@ -286,10 +303,37 @@ PROCESS_SCHEMA = {'version': 2,
 class ProcessModel:
     """Project parameter, nested-content, enclosing-environment and resource state."""
 
-    def __init__(self, model, observer):
-        self.model, self.schema = (model, PROCESS_SCHEMA)
+    def __init__(self, model, observer, *, schema=None):
+        self.model, self.schema = (model, dict(schema or PROCESS_SCHEMA))
+        # A familiar spelling is insufficient to declare a relation's roles.
+        # If its PDDL arity disagrees with the semantic declaration, retain the
+        # conservative unknown-relation policy instead (e.g. unary ``on``).
+        arities = self.schema.get('relation_arities', {})
+        for field in ('location_relations', 'hierarchy_relations', 'record_relations', 'resource_relations'):
+            self.schema[field] = {
+                name: roles for name, roles in self.schema[field].items()
+                if name in model.predicates and len(model.predicates[name]) == arities.get(
+                    name, max(roles.values() if isinstance(roles, dict) else roles))
+            }
         facts = set(model.bits) | model.initial_facts
-        self.resource_names = {f[1] for f in facts if len(f) == 2 and (f[0] == 'hand' or f[0] in self.schema['resource_free_predicates'])}
+        # A possible future free/holding fact does not turn a named object into
+        # an anonymous hand. Underspecified operators can bind ordinary items
+        # in those positions; those legal counterexamples must keep identity.
+        type_predicates = set(self.schema.get('resource_type_predicates', ()))
+        declared = {f[1] for f in model.initial_facts if len(f) == 2 and f[0] in type_predicates}
+        for obj, kind in model.objects.items():
+            if any(model.subtype(kind, resource_type) for resource_type in self.schema.get('resource_types', ())
+                   if resource_type in model.parents):
+                declared.add(obj)
+        if declared:
+            self.resource_names = declared
+        else:
+            self.resource_names = {f[1] for f in model.initial_facts
+                                   if len(f) == 2 and f[0] in self.schema['resource_free_predicates']}
+            for fact in model.initial_facts:
+                role = self.schema['resource_relations'].get(fact[0])
+                if role:
+                    self.resource_names.add(fact[role['resource']])
         location, records = (self.schema['location_relations'], self.schema['record_relations'])
         hierarchical = {**location, **self.schema['hierarchy_relations']}
         self.owners, self.resource_facts, self.link_facts = ({}, [], [])
@@ -681,7 +725,7 @@ def group_plan_classes(model, representatives, observer, instruction, kf_actions
 
 
 def save_validation(round_dir, pfv, psv):
-    """Persist only the PFV and PSV output verdicts; unfinished output is null."""
+    """Persist a compact verdict and a separate resumable PSV checkpoint."""
     verdict = None
     if psv is not None and psv['status'] == 'rejected':
         verdict = {k: psv['counterexample'][k] for k in ('reasoning', 'pass', 'feedback')}
@@ -693,6 +737,11 @@ def save_validation(round_dir, pfv, psv):
     temporary = path.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     temporary.replace(path)
+    if psv is not None:
+        state = Path(round_dir) / 'psv_state.json'
+        temporary = state.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(psv, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.replace(state)
     passed, feedback = None, ''
     if pfv is not None and not pfv['pass']:
         passed, feedback = False, pfv['feedback']
@@ -702,68 +751,165 @@ def save_validation(round_dir, pfv, psv):
     return {**result, 'pass': passed, 'feedback': feedback}
 
 
-def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir):
-    """Review every other operation-logic class after this round's PFV passed.
+def _psv_artifacts(directory):
+    return {name: (Path(directory) / name).read_text(encoding='utf-8')
+            for name in ('domain.pddl', 'problem.pddl', 'plan.txt')}
 
-    Search and transport failures remain incomplete. Only completed, validated
-    responses produce verdicts. Removed orders inherit no instruction verdict.
-    """
-    kf_actions = format_kf_actions(kf_actions)
+
+def _image_versions(images):
+    return [{'path': str(Path(path).resolve()), 'size': Path(path).stat().st_size,
+             'mtime_ns': Path(path).stat().st_mtime_ns} for path in images]
+
+
+def current_psv_passed(directory, *, instruction=None, kf_actions=None, model=None):
+    """Old-scope or stale artifact passes never bypass the expanded search."""
+    try:
+        directory = Path(directory)
+        judge = json.loads((directory / 'judge.json').read_text())
+        state = json.loads((directory / 'psv_state.json').read_text())
+        return (judge['pfv']['pass'] is True and judge['psv']['pass'] is True
+                and state['scope'] == PSV_SCOPE and state['algorithm'] == PSV_ALGORITHM
+                and state['status'] == 'passed' and state['search_complete'] is True
+                and state['unresolved_representatives'] == 0
+                and state['inputs']['artifacts'] == _psv_artifacts(directory)
+                and state['inputs']['pfv'] == judge['pfv']
+                and (instruction is None or state['inputs']['instruction'] == instruction)
+                and (kf_actions is None or state['inputs']['kf_actions'] == format_kf_actions(kf_actions))
+                and (model is None or state['inputs']['model'] == model)
+                and state['inputs']['images'] == _image_versions(
+                    [entry['path'] for entry in state['inputs']['images']]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir,
+                            *, search_options=None, max_batches=None):
+    """Judge exact-L classes lazily; passes require complete independent review."""
+    from swm.pddl.discrete_observations import DiscreteObserver
+    from swm.pddl.batching import group_same_length_classes, RankBatchPlan
+
+    if max_batches is not None and (type(max_batches) is not int or max_batches < 0):
+        raise ValueError('max_batches must be a nonnegative integer or None')
     directory = Path(round_dir)
-    record = json.loads((directory / 'judge.json').read_text())
-    pfv = _validate_verdict(record['pfv'])
+    pfv = _validate_verdict(json.loads((directory / 'judge.json').read_text())['pfv'])
     if not pfv['pass']:
         raise ValueError('PSV requires a passed PFV')
+    kf_actions = format_kf_actions(kf_actions)
+    images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
+    cached = {}
+    try:
+        cached = json.loads((directory / 'psv_state.json').read_text())
+    except (OSError, ValueError):
+        pass
+    if not isinstance(cached, dict):
+        cached = {}
+    try:
+        inputs = {'artifacts': _psv_artifacts(directory), 'images': _image_versions(images),
+                  'instruction': instruction, 'kf_actions': kf_actions, 'model': model, 'pfv': pfv}
+    except OSError as error:
+        # A temporary missing image/artifact must neither fabricate a verdict
+        # nor discard previously validated rows. Reuse still requires the
+        # complete original input snapshot after the file becomes available.
+        prior = cached if (cached.get('scope') == PSV_SCOPE and
+                           cached.get('algorithm') == PSV_ALGORITHM) else {}
+        psv = {'search_complete': False, 'reviews': [], 'requests': [], **prior,
+               'status': 'incomplete', 'scope': PSV_SCOPE, 'algorithm': PSV_ALGORITHM,
+               'error_phase': 'input_preparation', 'error_type': type(error).__name__,
+               'error': str(error), 'requests_this_call': 0}
+        save_validation(directory, pfv, psv)
+        return psv
+    compatible = (cached.get('scope') == PSV_SCOPE and cached.get('algorithm') == PSV_ALGORITHM
+                  and cached.get('inputs') == inputs)
+    resolved = (cached.get('status') == 'rejected' or
+                cached.get('status') == 'passed' and cached.get('search_complete') is True
+                and cached.get('unresolved_representatives') == 0)
+    if compatible and resolved:
+        cached = {**cached, 'requests_this_call': 0}
+        save_validation(directory, pfv, cached)
+        return cached
     psv = {'status': 'incomplete', 'search_complete': False, 'reviews': [], 'requests': [],
-           'instruction_verdict_inherited': False, 'scope': 'fixed_reference_action_multiset'}
+           'instruction_verdict_inherited': False, 'scope': PSV_SCOPE,
+           'algorithm': PSV_ALGORITHM, 'inputs': inputs, 'reference_review_source': 'pfv',
+           'vlm_seconds': cached.get('vlm_seconds', 0) if compatible else 0,
+           'requests_this_call': 0}
+    found = {}
+    if compatible:
+        for row in cached.get('reviews', []):
+            try:
+                _validate_verdict({key: row[key] for key in ('reasoning', 'pass', 'feedback')})
+                if isinstance(row['candidate_id'], str) and isinstance(row['order'], list):
+                    found[row['candidate_id']] = row
+            except (KeyError, TypeError, ValueError):
+                pass
+        psv['requests'] = cached.get('requests', [])
+        psv['reviews'] = list(found.values())
+
     def save():
         save_validation(directory, pfv, psv)
 
     try:
-        symbolic = ReorderModel(*(directory / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
-        observer = ExecutionObserver(symbolic)
-        representatives, proof = search_plan_classes(symbolic, observer)
+        began = time.perf_counter()
+        symbolic = SameLengthModel(*(directory / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
+        observer = DiscreteObserver(symbolic)
+        psv['preprocessing_seconds'] = time.perf_counter() - began
+        representatives, proof = search_plan_classes(symbolic, observer, **(search_options or {}))
+        class_count = getattr(representatives, 'class_count', None)
+        if class_count is None:
+            class_count = len(representatives)
         psv.update(search_complete=proof['coverage_complete'], search_status=proof['status'],
                    legal_orders=proof['raw_orders_including_reference'],
-                   legal_order_count_exact=proof['raw_order_count_exact'], classes=len(representatives),
+                   legal_order_count_exact=proof['raw_order_count_exact'], classes=class_count,
                    covered_orders=proof['accounted_orders'], class_counts=proof['classes'],
-                   factorization=proof['factorization'])
-        # The exact reference representative already has this round's PFV.
-        pending = [c for c in representatives if c['id'] != 'reference']
-        found = {}
-        images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
-        library, batches = group_plan_classes(symbolic, pending, observer, instruction, kf_actions,
-                                             multiview=len(images) > 1)
-        psv['groups'] = len(batches)
-        psv['reference_review_source'] = 'pfv'
+                   factorization=proof['factorization'], proof=proof)
+        grouping_began = time.perf_counter()
+        library, batches = group_same_length_classes(
+            symbolic, representatives, observer, instruction, kf_actions,
+            multiview=len(images) > 1, exclude_reference=True)
+        is_lazy = isinstance(batches, RankBatchPlan)
+        pending_count = batches.candidate_count if is_lazy else sum(len(b['candidates']) for b in batches)
+        psv['groups'] = batches.batch_count if is_lazy else len(batches)
+        psv['grouping_seconds'] = time.perf_counter() - grouping_began
+        grouping_preprocessing = psv['grouping_seconds']
+        unverified_cached, found = found, {}
 
         def checkpoint():
-            psv['reviews'] = [found[c['id']] for c in pending if c['id'] in found]
-            rejected = [r for r in psv['reviews'] if not r['pass']]
-            psv['unresolved_representatives'] = len(pending) - len(found)
-            if rejected:
-                psv['status'], psv['counterexample'] = 'rejected', rejected[0]
-                psv['counterexample'] = {**rejected[0], 'plan': '\n'.join(
-                    symbolic.actions[i - 1].line for i in rejected[0]['order']) + '\n'}
+            psv['reviews'] = list(found.values())
+            rejected = next((r for r in found.values() if not r['pass']), None)
+            psv['unresolved_representatives'] = pending_count - len(found)
+            if rejected is not None:
+                psv['status'] = 'rejected'
+                psv['counterexample'] = {**rejected, 'plan': '\n'.join(
+                    symbolic.actions[i - 1].line for i in rejected['order']) + '\n'}
             elif proof['coverage_complete'] and not psv['unresolved_representatives']:
                 psv['status'] = 'passed'
             else:
                 psv['status'] = 'incomplete'
+            if is_lazy:
+                psv['grouping'] = batches.metadata()
+                psv['grouping_seconds'] = grouping_preprocessing + batches.rendering_seconds
             save()
 
-        checkpoint()
+        def prompt_for(candidates):
+            used = {i for c in candidates for i in c['order']}
+            return build_group_judge_prompt([a for a in library if a['action_id'] in used], candidates,
+                instruction=instruction, kf_actions=kf_actions, multiview=len(images) > 1,
+                exact_length=symbolic.length)
 
         def review(candidates, prompt):
+            if max_batches is not None and psv['requests_this_call'] >= max_batches:
+                return False
+            psv['requests_this_call'] += 1
             capture = {}
             request = {'candidates': candidates, 'status': 'in_progress'}
             psv['requests'].append(request)
-            save()
+            checkpoint()
+            began = time.perf_counter()
             try:
                 response = call_gpt_json(model, prompt, images, response_format={'type': 'json_object'},
-                                         attempts=1, reasoning_effort='xhigh',
-                                         temperature=0, capture=capture)
+                                         attempts=1, reasoning_effort='xhigh', temperature=0, capture=capture,
+                                         **({'max_retries': 0} if max_batches is not None else {}))
                 request['response'] = response
-                if set(response) != {'results'} or not isinstance(response['results'], list):
+                if not isinstance(response, dict) or set(response) != {'results'} or not isinstance(response['results'], list):
                     raise ValueError('Group judge must return a results list')
                 allowed = {c['id']: c for c in candidates}
                 counts = defaultdict(int)
@@ -774,42 +920,49 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
                     if not isinstance(row, dict) or set(row) != {'candidate_id', 'reasoning', 'pass', 'feedback'}:
                         continue
                     identifier = row['candidate_id']
-                    if not isinstance(identifier, str) or not identifier or not identifier.strip():
-                        continue
-                    original_id = identifier
-                    if len(candidates) == len(response['results']) == 1:
-                        identifier = candidates[0]['id']
-                    if identifier not in allowed or counts[original_id] != 1:
+                    if identifier not in allowed or counts[identifier] != 1:
                         continue
                     try:
-                        verdict = _validate_verdict({k: row[k] for k in ('reasoning', 'pass', 'feedback')})
+                        verdict = _validate_verdict({key: row[key] for key in ('reasoning', 'pass', 'feedback')})
                     except ValueError:
                         continue
                     found[identifier] = {'candidate_id': identifier, 'order': allowed[identifier]['order'],
-                                         **verdict, 'response_candidate_id': original_id,
+                                         **verdict, 'response_candidate_id': identifier,
                                          'request_index': len(psv['requests']) - 1}
                 request['status'] = 'complete'
             except Exception as error:
                 request.update(status='request_error', error_type=type(error).__name__, error=str(error))
-            request['capture'] = {k: v for k, v in capture.items() if k not in {'raw_output', 'json_text'}}
+            psv['vlm_seconds'] += time.perf_counter() - began
+            request['capture'] = {key: value for key, value in capture.items() if key not in {'raw_output', 'json_text'}}
             checkpoint()
+            return True
 
+        checkpoint()
         for batch in batches:
+            for candidate in batch['candidates']:
+                previous = unverified_cached.get(candidate['id'])
+                if previous is not None and previous['order'] == candidate['order']:
+                    found[candidate['id']] = previous
+            checkpoint()
+            if psv['status'] == 'rejected':
+                return psv
             candidates = [c for c in batch['candidates'] if c['id'] not in found]
             if not candidates:
                 continue
-            review(candidates, batch['prompt'] if len(candidates) == len(batch['candidates']) else
-                   build_group_judge_prompt(library, candidates, instruction=instruction,
-                                            kf_actions=kf_actions, multiview=len(images) > 1))
-            # Invalid/missing rows get one independent retry. Valid rejections
-            # and valid passes are never retried to seek a different answer.
+            if not review(candidates, batch['prompt'] if len(candidates) == len(batch['candidates']) else prompt_for(candidates)):
+                break
+            if psv['status'] == 'rejected':
+                return psv
             for candidate in candidates:
                 if candidate['id'] not in found:
-                    review([candidate], build_group_judge_prompt(library, [candidate], instruction=instruction,
-                                                                kf_actions=kf_actions, multiview=len(images) > 1))
+                    if not review([candidate], prompt_for([candidate])):
+                        break
+                    if psv['status'] == 'rejected':
+                        return psv
+            if any(c['id'] not in found for c in candidates):
+                break
         checkpoint()
-    except (OSError, ValueError, KeyError, NotImplementedError) as error:
+    except (OSError, ValueError, KeyError, NotImplementedError, OverflowError, TimeoutError) as error:
         psv.update(status='incomplete', error_type=type(error).__name__, error=str(error))
         save()
     return psv
-

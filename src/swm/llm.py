@@ -155,6 +155,7 @@ def call_gpt_json(
     temperature: float | None = None,
     strict_json: bool = False,
     capture: dict | None = None,
+    max_retries: int | None = None,
 ):
     if type(attempts) is not int or not 1 <= attempts <= 5:
         raise ValueError("attempts must be an integer from 1 to 5")
@@ -173,6 +174,8 @@ def call_gpt_json(
                 call_kwargs["temperature"] = temperature
             if call_capture is not None:
                 call_kwargs["capture"] = call_capture
+            if max_retries is not None:
+                call_kwargs["max_retries"] = max_retries
             if response_format is None:
                 raw_output = call_gpt(
                     model,
