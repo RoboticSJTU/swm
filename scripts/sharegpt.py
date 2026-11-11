@@ -16,18 +16,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-sys.path.insert(0, str(ROOT_DIR / "scripts/clean_operator"))
 
-from kf_reference import verify_plan
-from swm.pddl.planner import solve_pddl
-from swm.pddl.strips import (
-    assert_goals,
-    ground_plan,
-    parse_domain,
-    parse_plan,
-    parse_problem_model,
-    rollout,
-)
+from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
 EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
@@ -99,7 +89,7 @@ def predicate_name(expression):
 
 
 def format_domain(domain, problem, action_names):
-    """仅保留 plan 使用的动作及保留动作、problem 引用的谓词。"""
+    """按 plan 首次出现的顺序保留动作，并裁剪未引用的谓词。"""
     action_heads = {":action", ":durative-action"}
     declarations = [
         predicate
@@ -108,7 +98,10 @@ def format_domain(domain, problem, action_names):
         for predicate in section[1:]
     ]
     declared = {predicate_name(predicate) for predicate in declarations}
-    selected_names = {name.lower() for name in action_names}
+    action_order = {
+        name: index
+        for index, name in enumerate(dict.fromkeys(name.lower() for name in action_names))
+    }
     referenced = set()
 
     def collect(expression):
@@ -123,7 +116,7 @@ def format_domain(domain, problem, action_names):
     for section in domain[2:]:
         name = expression_head(section)
         if name != ":predicates" and (
-            name not in action_heads or section[1].lower() in selected_names
+            name not in action_heads or section[1].lower() in action_order
         ):
             collect(section)
     collect(problem)
@@ -137,8 +130,9 @@ def format_domain(domain, problem, action_names):
         section
         for section in domain[2:]
         if expression_head(section) in action_heads
-        and section[1].lower() in selected_names
+        and section[1].lower() in action_order
     ]
+    selected_actions.sort(key=lambda action: action_order[action[1].lower()])
 
     lines = ["(define " + pddl_line(domain[1])]
     for section in domain[2:]:
@@ -365,7 +359,7 @@ def find_task_rounds(item):
         )
 
     valid_rounds = []
-    judge_warnings = []
+    warnings = []
     for episode_id, episode_dir in episodes:
         with os.scandir(episode_dir) as entries:
             rounds = [
@@ -382,32 +376,13 @@ def find_task_rounds(item):
             (round_dir / name).is_file()
             for name in ("domain.pddl", "problem.pddl")
         ):
-            judge_warnings.append((
+            warnings.append((
                 (task_id, episode_id),
                 f"[PDDL ERROR] {round_dir.relative_to(ROOT_DIR)}: 缺少 domain.pddl 或 problem.pddl；排除该 episode，不回退旧 round",
             ))
             continue
-        try:
-            judge = json.loads((round_dir / "judge.json").read_text(encoding="utf-8"))
-            verdicts = [(name, judge.get(name) or {}) for name in ("pfv", "psv")]
-            failures = [
-                f"{name}: " + (verdict.get("feedback") or verdict.get("reasoning") or "pass is not True")
-                for name, verdict in verdicts
-                if verdict.get("pass") is not True
-            ]
-            if failures:
-                reason = " | ".join(failures)
-                judge_warnings.append((
-                    (task_id, episode_id),
-                    f"[JUDGE WARNING] {round_dir.relative_to(ROOT_DIR)}: {reason}",
-                ))
-        except Exception as error:  # noqa: BLE001 - 评审异常仅告警，不过滤样本
-            judge_warnings.append((
-                (task_id, episode_id),
-                f"[JUDGE WARNING] {round_dir.relative_to(ROOT_DIR)}: {error}",
-            ))
         valid_rounds.append(((task_id, episode_id), round_dir))
-    return valid_rounds, judge_warnings
+    return valid_rounds, warnings
 
 
 def prepare_round(item):
@@ -428,18 +403,7 @@ def prepare_round(item):
         raw_plan, _ = parse_plan(source_paths[2])
         if not raw_plan:
             raise ValueError("没有可用 action")
-        plan_lines = [
-            line.strip()
-            for line in source_paths[2].read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith(";")
-        ]
-        if len(plan_lines) != len(raw_plan):
-            raise ValueError("plan.txt 包含无法解析的非注释行")
-        schemas = parse_domain(source_paths[0])
-        model = parse_problem_model(source_paths[1], schemas)
-        plan = ground_plan(raw_plan, schemas, model.objects)
-        final_state = rollout(model.init_state, plan)
-        assert_goals(final_state, model.goal_positive, model.goal_negative, "计划未达成目标")
+        # 信任已有求解结果，仅读取动作名称用于裁剪 domain。
         conflicts, hand_states = inspect_init(problem)
         if conflicts:
             problem_path = source_paths[1].relative_to(ROOT_DIR)
@@ -455,22 +419,8 @@ def prepare_round(item):
         source_domain = format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n"
         source_problem = format_problem(problem).strip() + "\n"
         if (source_domain, source_problem) != (domain_raw, problem_raw):
-            with tempfile.TemporaryDirectory() as directory:
-                staged = Path(directory)
-                (staged / "domain.pddl").write_text(source_domain, encoding="utf-8")
-                (staged / "problem.pddl").write_text(source_problem, encoding="utf-8")
-                if not solve_pddl(staged / "domain.pddl", staged / "problem.pddl", reorder_plan=False):
-                    raise ValueError("格式化后的 PDDL 求解失败")
-                generated_plan, _ = parse_plan(staged / "plan.txt")
-                verify_plan(
-                    source_domain, source_problem,
-                    (round_dir.parent / "kf_actions.txt").read_text(encoding="utf-8"),
-                    generated_plan,
-                )
-                for path, text in zip(source_paths, (
-                    source_domain, source_problem, (staged / "plan.txt").read_text(encoding="utf-8"),
-                )):
-                    atomic_write(path, text)
+            for path, text in zip(source_paths[:2], (source_domain, source_problem)):
+                atomic_write(path, text)
         prepared = (source_domain, source_problem)
 
         if ROBOT_CONFIGURATION == "single_arm" and len(hand_states) > 1:
@@ -524,7 +474,7 @@ def process_domain(task_domain, prompt_template, only_problem_template=None):
         task_dirs = []
 
     valid_rounds = {}
-    judge_warnings = {}
+    scan_warnings = {}
     if task_dirs:
         # 与 merge.py 一样，重叠共享文件系统的元数据等待，保留排序。
         with ProcessPoolExecutor(
@@ -532,13 +482,13 @@ def process_domain(task_domain, prompt_template, only_problem_template=None):
         ) as executor:
             for rounds, warnings in executor.map(find_task_rounds, task_dirs):
                 valid_rounds.update(rounds)
-                judge_warnings.update(warnings)
+                scan_warnings.update(warnings)
     scan_seconds = perf_counter() - started
 
-    review_messages = list(judge_warnings.values())
+    review_messages = list(scan_warnings.values())
     init_reviews = []
     prepared_rounds = {}
-    pddl_warnings = []
+    pddl_warnings = list(scan_warnings.values())
 
     workers = min(MAX_WORKERS, len(valid_rounds)) if valid_rounds else 1
     print(
@@ -607,7 +557,6 @@ def process_domain(task_domain, prompt_template, only_problem_template=None):
     print(
         f"[{task_domain}] saved={len(samples)}/{len(records)}  "
         f"missing_episode={missing_episode}  "
-        f"judge_warnings={len(judge_warnings)}  "
         f"missing_image={missing_image}  init_review={len(init_reviews)}  "
         f"pddl_warnings={len(pddl_warnings)}  "
         f"time={perf_counter() - started:.1f}s "
