@@ -8,6 +8,7 @@
 4. **Explain only what matters.** Lead with the main takeaway, then the core mechanism and necessary evidence. Match depth to the request, including paper and module explanations; avoid incidental details, exhaustive lists, and repetition.
 5. **Avoid unnecessary hashing.** Do not compute or compare file hashes, generate checksum manifests, or create before-and-after hash snapshots for routine changes. Use `git diff` to inspect modifications and task-specific tests to verify correctness. Only use hashing when explicitly requested or strictly necessary for data integrity.
 6. **Require explicit API authorization.** Complete tasks yourself; call third-party APIs only when explicitly authorized by the user.
+7. **Keep temporary files separate.** Store all nonessential artifacts, intermediate outputs, debug logs, and test files in the project's `temp/` directory. Keep only necessary deliverables in their intended locations.
 
 ## PDDL Artifact Consistency
 
