@@ -1,17 +1,16 @@
 # Project Instructions
 
-## Working Principles
+## General
 
-1. **Find the main bottleneck.** Use evidence and first principles to identify the constraint whose resolution most advances the goal and eases other problems. Reassess when blocked or evidence changes; verify the goal at completion.
-2. **Make the smallest effective change.** Focus effort on that bottleneck, handle secondary issues as needed, and stay within the requested scope. Prefer local edits and existing simple patterns.
-3. **Keep solutions simple and general.** Keep code, pipelines, and prompts concise; add complexity only for a demonstrated need. Fix root causes without speculative abstractions or special-case patches for specific tasks, objects, or test-set scores.
-4. **Explain only what matters.** Lead with the main takeaway, then the core mechanism and necessary evidence. Match depth to the request, including paper and module explanations; avoid incidental details, exhaustive lists, and repetition.
-5. **Avoid unnecessary hashing.** Do not compute or compare file hashes, generate checksum manifests, or create before-and-after hash snapshots for routine changes. Use `git diff` to inspect modifications and task-specific tests to verify correctness. Only use hashing when explicitly requested or strictly necessary for data integrity.
-6. **Require explicit API authorization.** Complete tasks yourself; call third-party APIs only when explicitly authorized by the user.
-7. **Keep temporary files separate.** Store all nonessential artifacts, intermediate outputs, debug logs, and test files in the project's `temp/` directory. Keep only necessary deliverables in their intended locations.
+- Use evidence and first principles to prioritize the bottleneck whose resolution most advances the goal and eases other problems. Reassess when blocked or evidence changes; verify completion.
+- Make minimal, scoped changes; prefer local edits and simple existing patterns. Keep code, pipelines, and prompts concise and general; address secondary issues as needed and add complexity only for demonstrated needs. Fix root causes; avoid speculative abstractions and patches for specific tasks, objects, or test scores.
+- Lead with the takeaway, core mechanism, and evidence. Match depth to the request, including paper and module explanations; avoid incidental detail, exhaustive lists, and repetition.
+- Complete tasks yourself; third-party API calls require explicit user authorization.
+- Never use file hashes, checksum manifests, or hash snapshots.
+- Keep nonessential artifacts, intermediate outputs, debug logs, and test files in `temp/`. Save final deliverables in their intended locations only when explicitly requested by the user or approved after asking; otherwise use `temp/`.
 
-## PDDL Artifact Consistency
+## PDDL
 
-- After changing `domain.pddl` or `problem.pddl`, re-solve it and overwrite the corresponding `plan.txt` with the generated plan. Never manually rename actions in a stale plan.
-- A PDDL change is valid and complete only when solving succeeds and the new plan is verified to accomplish the same task as the episode's `kf_actions.txt`.
-- Regenerate only the requested rounds; when only the maximum round is in scope, leave older rounds untouched.
+- Default all inspection, modification, and regeneration to the maximum round. Do not model noncausal ordering in task instructions.
+- After editing `domain.pddl` or `problem.pddl`, solve optimally, overwrite the corresponding `plan.txt`, and verify it against the observed scene and current task instruction before considering the change complete. Ignore counterexamples based on suboptimal plans.
+- Use `kf_actions.txt` as supporting evidence; require its exact action order, counts, temporary placements, or complete final state only when explicitly required by the instruction.

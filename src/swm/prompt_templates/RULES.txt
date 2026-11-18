@@ -1,42 +1,20 @@
-## PDDL profile
+## PDDL modeling
 
-- Use untyped PDDL with :strips; add :negative-preconditions and :equality only when used. Conditions/goals are conjunctions of atoms or atomic negations; effects only add/delete atoms. No types, quantifiers, disjunctions, conditional effects, derived predicates, numeric fluents, or durative actions.
-- Represent functional categories as static unary predicates in init. Give every action parameter a positive guard for its concrete category, not catch-all object, support, or container categories. Express states and relations separately, not as composite categories.
+- Syntax: Use untyped :strips; add :negative-preconditions/:equality only when used. Conditions/goals are conjunctions of atoms or atomic negations; effects add/delete atoms. No types, quantifiers, disjunctions, conditional effects, derived predicates, numeric fluents, or durative actions.
+- Parameters: Give every action parameter a positive concrete-category guard, not catch-all object/support/container.
+- Abstraction: Ground init in evidence; keep distinctions needed for applicability, transitions, or task requirements. Removal/merging must preserve participant bindings, legal transitions, required outcomes, and processes.
+- Components: Merge fixed doors/handles/controls into their whole unless independent identity/state/location/operation matters; keep detachable parts and independently operated compartments distinct. Use structural/control relations only for necessary bindings/dependencies; keep necessary source/target components explicit in those roles and bind them to their whole with part_of.
+- Hands and tools: Pick immediately replaces source location with holding; place replaces holding with target location. Avoid unsupported hand preferences. Simultaneous hands must differ; use (not (= ?x ?y)) only for roles requiring distinct participants. Tools are handheld auxiliaries, not hands/built-in controls.
+- Actions: Each operator completes one manipulation/wait with its prerequisites, resource changes, and direct results. Enforce required operations/repetitions/order through final physical states and causal dependencies.
 
-## Model selection
-
-- Ground initial facts in evidence. Model only distinctions needed for action applicability, transitions, or task requirements; omit predicates unused by actions/goals and synonymous facts. Remove or merge representations only if participant bindings, legal transitions, and required outcomes and processes are preserved within the task model.
-- Reuse the vocabulary by meaning; extend it only for necessary new semantics with fixed argument roles and a defined lifecycle.
-- Merge fixed doors, handles, and controls into their functional whole unless independent identity, state, location, or operation matters. Keep detachable parts and independently operated compartments distinct. Use structural/control relations only for necessary bindings or dependencies. When a component's separate source/target role matters, bind it to its whole with part_of and use it in that role.
-- Put access/lock state on the controlled unit, switch state on the device, pose on the oriented object, and process results on the affected material/object. Single-door access belongs to the appliance; independently modeled doors carry their own access state without duplication on the whole.
-- Keep evidence-supported spatial details needed for execution or task results, even if unstated in the instruction. Use concrete positions when specified; use relative placement predicates only when no concrete spot is specified. Omit incidental layout and transient alignment or tilt/reset internal to an operation.
-- Retain poses needed for applicability or explicit task results, including static distinctions. Remove a static pose guard only if the remaining immutable guards imply it for every candidate. A negated pose implies another specific pose only when the alternatives are exhaustive and mutually exclusive.
-- Prefer direct relations to auxiliary bookkeeping. Remove a precondition only when other conditions and reachable invariants of the current task imply it. Retain necessary access, lock, obstruction, and supply constraints, including device interlocks without adding unused operating actions.
-
-## Transitions and invariants
-
-- Bind actual participants in every update. Require and replace the old state when changing a modeled state pair. Delete facts made false, including superseded external location/alignment relations and physical results undone; preserve unchanged pose, carried contents/loads, internal assembly relations, and intrinsic results.
-- Keep each tracked predicate consistent with its definition in init and every relevant action for all affected objects, including acquisition, release, handoff, and load changes. Establish an absence predicate only when no relevant instance remains; removing or excluding one instance is insufficient unless a reachable invariant proves it was the last.
-- Bind electrical supply to the actual device or its base and require it at process startup and completion. Connection does not itself enable the switch; change switch state on disconnection only with evidence of reset. Preserve completed heated/boiled results after disconnection or removal from a base.
-- Pick acquires holding and immediately removes the source location; place releases holding and establishes the target location. Each hand has unit capacity: account for acquisition, release, and sustained control without unsupported hand preferences. Require distinct simultaneous hands and use (not (= ?x ?y)) only for roles that must differ.
-- Require accessible targets and acyclic support/containment, including when placing a carried object relative to its descendants.
-- Represent modeled material with containment relations and its own states, without duplicate container-state predicates. Separate portions only when locations, composition, or processing results require independent tracking. Finite-container transfers replace the source location. Unlimited supplies use static dispenses without in(material, source) or artificial available flags; check flow separately, prevent duplicate delivery of a portion, and never copy prior results to fresh portions.
-
-## Task semantics
-
-- One operator represents one completed manipulation or waiting event with its prerequisites, resource changes, and direct results. Keep independently completed acquisition, use, handoff, placement, and start/stop events separate; omit incidental contact and internal motion.
-- Active filling positions a held receiver and preserves holding; autonomous filling requires prior placement/alignment. Momentary controls do not occupy a hand after activation; sustained controls do. Waiting checks process conditions and preserves occupancy without acquiring or positioning the receiver. A free hand does not imply an autonomous device is stopped.
-- Explicitly establish each operation's canonical core result in its effects, even when accompanying physical effects suffice for the task. Preserve other necessary physical effects. Establish process results at completion, never at startup or arbitrary shutdown. Include automatic shutdown only when supported by device behavior.
-- Encode required operations, repetitions, and ordering through causal dependencies. If final physical facts cannot prove a required event, use a reusable event relation bound to its essential participants, not generic waiting/done flags. Counters or phases express task semantics, never demonstration step numbers; do not impose demonstration order on independent actions. Check legal alternatives and illegal counterexamples, not just demonstration solvability.
-
-## Naming and layout
+## Naming
 
 OPERATION_OBJECT[_RESULT][_<RELATION>_<ENTITY>]*
 
-- Use lowercase snake_case, canonical operations, and functional categories. Exclude instances, numbering suffixes, incidental context, and irrelevant attributes such as color from action/predicate names. Tools are handheld auxiliaries, not hands or built-in controls; use *_top only to distinguish exterior support from a container's interior.
-- Order relation roles source, target, tool; keep fields/prepositions consistent within each family: pick_*_from_*, place_*_on/in/at_*, fill_*_from_*, pour_*_from_*_into_*, scoop_*_from_*_with_*, insert_*_into_*, remove_*_from_*, open_*, close_*, turn_on/off_*, wipe_*_with_*. Extend by the same rule.
-- Name active filling fill_<RECEIVER>_from_<SOURCE> and autonomous completion wait_until_<OBJECT>_<RESULT>[_<RELATION>_<ENTITY>]*. For concrete surface positions, use pick_*_from_<surface>_position and place_*_at_<surface>_position.
-- Include indispensable support/containment context, including nested relations; omit noncausal context. Use in/on/at for positive relations and outside for required container exclusion. For placement, name support/containment before relative position. RESULT names only a necessary core result not already expressed by the operation.
-- In domains with pose transitions, name every pose-dependent operator with the pose, participant, and polarity; transitions name the resulting pose. Otherwise qualify pose only when essential to applicability.
-- Use one name and causal model for equivalent operations in the same necessary context. Compare participant roles and transitions, not variable names/order or local vocabulary. Prefer an existing sufficient implementation; otherwise combine only causally justified conditions/effects, never union all prerequisites or drop necessary ones. Distinguish genuine execution modes, indispensable relations, or required results with concise names.
-- Order parameters by hand(s), core object, source, target, tool, then other participants. Prefer initials with suffixes for unique variable names. List category guards first; put each precondition/effect on one line and each old-state deletion beside its new-state addition.
+RESULT names only a necessary core result not already expressed by OPERATION.
+
+- Vocabulary: Use lowercase snake_case, canonical operations, and functional categories for action/predicate names; exclude instances, numbering suffixes, incidental context, and irrelevant attributes. Use *_top only to distinguish exterior support from container interiors.
+- Relations: Order roles source, target, tool; keep family fields/prepositions consistent: pick_*_from_*, place_*_on/in/at_*, pour_*_from_*_into_*, scoop_*_from_*_with_*, insert_*_into_*, remove_*_from_*, open_*, close_*, turn_on/off_*, wipe_*_with_*. Include indispensable support/containment context, including nesting; omit noncausal context. Use in/on/at for positive relations; name support/containment before relative position.
+- Placement: Use pick/place for stacking/nesting and name direct source/target. Surface positions use place_*_at_<surface>_position.
+- Poses: Include relevant participants and required poses in pose-dependent action names; name transitions by the resulting pose. Omit pose qualifiers that do not distinguish applicability or effects.
+- Processes: Active filling uses fill_<RECEIVER>_from_<SOURCE>; autonomous completion uses wait_until_<OBJECT>_<RESULT>[_<RELATION>_<ENTITY>]*.

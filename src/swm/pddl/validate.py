@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from copy import copy
-from functools import reduce
-import heapq
+from collections import Counter, defaultdict
 import json
 import re
-import time
-from operator import or_
 from pathlib import Path
 
 from swm.llm import call_gpt_json
-from swm.pddl.reorder import ReorderModel, evaluate, expression_bits
-from swm.pddl.same_length import SameLengthModel, search_plan_classes
+from swm.pddl.reorder import (
+    SameLengthModel, evaluate, expression_bits,
+    search_same_length_classes as search_plan_classes,
+)
 from swm.pddl.strips import parse_sexpr_file
-from swm.pddl.plan_branches import factor_plan_orders, render_plan_orders, render_named_orders
 from swm.prompts import read_prompt
-
-PSV_SCOPE = 'all_legal_plans_at_reference_length'
-PSV_ALGORITHM = 'same_length_discrete_effect_context_counts_v1'
 
 
 def format_kf_actions(text: str) -> str:
@@ -85,7 +78,7 @@ class SymbolicTraceError(ValueError):
 def _evaluated_symbolic_trace(
     candidate_plan: str,
     predicted_domain: str | Path | None,
-    pddl_plan: str | Path | None,
+    pddl_plan: str | Path | list[str] | None,
 ) -> str:
     if predicted_domain is None and pddl_plan is None:
         return candidate_plan  # Explicit natural-language evaluation mode.
@@ -93,9 +86,10 @@ def _evaluated_symbolic_trace(
         raise SymbolicTraceError("PDDL judging requires both domain and plan paths")
 
     try:
-        domain_path, plan_path = Path(predicted_domain), Path(pddl_plan)
+        domain_path = Path(predicted_domain)
+        lines = pddl_plan if isinstance(pddl_plan, list) else Path(pddl_plan).read_text(encoding="utf-8").splitlines()
         raw_plan = []
-        for line in plan_path.read_text(encoding="utf-8").splitlines():
+        for line in lines:
             line = line.split(";", 1)[0].strip()
             if line and (not line.startswith("(") or not line.endswith(")")
                          or "(" in line[1:] or ")" in line[:-1]):
@@ -192,17 +186,10 @@ def build_group_judge_prompt(
     kf_actions: str,
     comparison_question: str = "",
     multiview: bool = False,
-    presentation: str = "plain",
     exact_length: int | None = None,
-    _context=None,
+    comparison_order: list[int] | None = None,
 ) -> str:
-    """Fill the soundness template with shared operations and labelled paths.
-
-    Only bound operator descriptions enter the trace. Predicted problem init
-    and simulated states are deliberately absent from this interface.
-    Plain preserves complete input paths; named adds bound headlines; linear
-    also orders similar paths; branches retains the prefix-tree presentation.
-    """
+    """用原审核模板呈现完整计划；支持重复绑定及固定比较锚点。"""
     actions = {item["action_id"]: item["description"] for item in action_library}
     if (not actions or len(actions) != len(action_library)
             or any(type(i) is not int or i < 1 for i in actions)
@@ -212,36 +199,30 @@ def build_group_judge_prompt(
     if (not ids or any(not isinstance(i, str) or not i or any(c.isspace() or c in ':,[]' for c in i) for i in ids)
             or len(set(ids)) != len(ids)):
         raise ValueError("Expected distinct single-line candidate IDs")
-    for candidate in candidates:
-        order = candidate["order"]
-        if not isinstance(order, (list, tuple)) or any(type(i) is not int for i in order):
-            raise ValueError("Expected an ordered path of action IDs")
-        if not order or any(i not in actions for i in order):
-            raise ValueError("Every candidate must be a nonempty path of known action IDs")
-        if exact_length is not None and len(order) != exact_length:
-            raise ValueError("Every candidate must be a complete exact-length path of known action IDs")
+    orders = [candidate['order'] for candidate in candidates]
+    if comparison_order is not None:
+        orders.append(comparison_order)
+    for order in orders:
+        if (not isinstance(order, (list, tuple)) or not order
+                or any(type(i) is not int or i not in actions for i in order)
+                or exact_length is not None and len(order) != exact_length):
+            raise ValueError("Expected complete paths of known action IDs at the required length")
 
-    if presentation not in {"branches", "linear", "plain", "named"}:
-        raise ValueError("Unknown group presentation")
     trace = ["Shared actions:"]
     definitions = {}
-    for identifier, description in sorted(actions.items()):
-        definitions.setdefault(description, []).append(f"A{identifier:02d}")
+    used = {identifier for order in orders for identifier in order}
+    for identifier in sorted(used):
+        definitions.setdefault(actions[identifier], []).append(f"A{identifier:02d}")
     trace.extend(", ".join(labels) + ": " + description for description, labels in definitions.items())
-    if presentation in {"linear", "plain", "named"}:
-        trace.append("Plan orders:")
-        if presentation in {"linear", "named"}:
-            trace.append(render_named_orders(candidates, actions, sort_similar=presentation == "linear"))
-        else:
-            trace.extend(candidate['id'] + ': ' + ' -> '.join(f'A{i:02d}' for i in candidate['order'])
-                         for candidate in candidates)
-    else:
-        trace.append("Plan branches:")
-        trace.append(render_plan_orders(factor_plan_orders(candidates)))
-    template, reference = (_context if _context is not None else
-                           (read_prompt("verify_soundness.txt"), format_kf_actions(kf_actions)))
-    prompt = template.format(
-        instruction=instruction, kf_actions=reference,
+    trace.append("Every appearance executes that operation again.")
+    if comparison_order is not None:
+        trace.append("Comparison anchor (context only; no candidate verdict requested): " +
+                     ' -> '.join(f'A{i:02d}' for i in comparison_order))
+    trace.append("Plan orders:")
+    trace.extend(candidate['id'] + ': ' + ' -> '.join(f'A{i:02d}' for i in candidate['order'])
+                 for candidate in candidates)
+    prompt = read_prompt("verify_soundness.txt").format(
+        instruction=instruction, kf_actions=format_kf_actions(kf_actions),
         evaluated_symbolic_trace="\n".join(trace), comparison_question=comparison_question,
     )
     if multiview:
@@ -276,7 +257,6 @@ def validate_plan_feasibility(
     return _call_validated_judge(model, prompt, first_img, capture)
 
 
-# One declared state policy for single- and dual_arm plans.
 PROCESS_SCHEMA = {'version': 3,
  'relation_arities': {'on': 2, 'in': 2, 'at': 2, 'part_of': 2, 'drawer_of': 2,
                       'lock_of': 2, 'scanned_with': 2, 'holding': 2, 'robot_holding': 3},
@@ -300,432 +280,562 @@ PROCESS_SCHEMA = {'version': 3,
                 'attachment. Unknown multi-object relations conservatively protect all '
                 'participants. No action or episode names enter the policy.'}
 
-class ProcessModel:
-    """Project parameter, nested-content, enclosing-environment and resource state."""
 
-    def __init__(self, model, observer, *, schema=None):
-        self.model, self.schema = (model, dict(schema or PROCESS_SCHEMA))
-        # A familiar spelling is insufficient to declare a relation's roles.
-        # If its PDDL arity disagrees with the semantic declaration, retain the
-        # conservative unknown-relation policy instead (e.g. unary ``on``).
-        arities = self.schema.get('relation_arities', {})
-        for field in ('location_relations', 'hierarchy_relations', 'record_relations', 'resource_relations'):
-            self.schema[field] = {
-                name: roles for name, roles in self.schema[field].items()
-                if name in model.predicates and len(model.predicates[name]) == arities.get(
-                    name, max(roles.values() if isinstance(roles, dict) else roles))
-            }
-        facts = set(model.bits) | model.initial_facts
-        # A possible future free/holding fact does not turn a named object into
-        # an anonymous hand. Underspecified operators can bind ordinary items
-        # in those positions; those legal counterexamples must keep identity.
-        type_predicates = set(self.schema.get('resource_type_predicates', ()))
-        declared = {f[1] for f in model.initial_facts if len(f) == 2 and f[0] in type_predicates}
-        for obj, kind in model.objects.items():
-            if any(model.subtype(kind, resource_type) for resource_type in self.schema.get('resource_types', ())
-                   if resource_type in model.parents):
-                declared.add(obj)
-        if declared:
-            self.resource_names = declared
-        else:
-            self.resource_names = {f[1] for f in model.initial_facts
-                                   if len(f) == 2 and f[0] in self.schema['resource_free_predicates']}
-            for fact in model.initial_facts:
-                role = self.schema['resource_relations'].get(fact[0])
-                if role:
-                    self.resource_names.add(fact[role['resource']])
-        location, records = (self.schema['location_relations'], self.schema['record_relations'])
-        hierarchical = {**location, **self.schema['hierarchy_relations']}
-        self.owners, self.resource_facts, self.link_facts = ({}, [], [])
-        for fact in sorted(facts):
-            args, names = (set(fact[1:]), set(fact[1:]) & self.resource_names)
-            if names and fact[0] not in records:
-                payloads = args - self.resource_names
-                role = self.schema['resource_relations'].get(fact[0])
-                if role and max(role.values()) < len(fact) and (fact[role['resource']] in names):
-                    payloads = {fact[role['payload']]}
-                self.resource_facts.append((fact, names, payloads))
-            elif len(fact) > 1:
-                if fact[0] in hierarchical:
-                    payload, parent = hierarchical[fact[0]]
-                    if not (1 <= payload < len(fact) and 1 <= parent < len(fact) and (payload != parent)):
-                        raise ValueError('Location relation argument roles do not match ' + repr(fact))
-                    owners = {fact[payload]}
-                    self.link_facts.append((fact, {fact[payload], fact[parent]}, fact[payload], fact[parent]))
-                elif fact[0] in records:
-                    roles = records[fact[0]]
-                    if not roles or not all((1 <= p < len(fact) for p in roles)):
-                        raise ValueError('Record relation owner roles do not match ' + repr(fact))
-                    owners = {fact[p] for p in roles}
-                else:
-                    owners = args - self.resource_names
-                    if len(owners) > 1:
-                        self.link_facts.append((fact, owners, None, None))
-                self.owners[fact] = owners
-        written = reduce(or_, (a.possible_add | a.possible_delete for a in model.actions), 0)
-        written_owners = set().union(*(owners for f, owners in self.owners.items() if model.bits.get(f, 0) & written))
-        self.references = set()
-        for obj in set(model.objects) - self.resource_names - written_owners:
-            relevant = [f for f in facts if obj in f[1:]]
-            incoming = False
-            for fact in relevant:
-                if len(fact) == 2:
-                    continue
-                role = location.get(fact[0])
-                if role and fact[role[1]] == obj and (fact[role[0]] != obj):
-                    incoming = True
-                else:
-                    break
-            else:
-                if incoming:
-                    self.references.add(obj)
-        objects = sorted(set(model.objects) - self.resource_names - self.references)
-        self.object_bits = {obj: 1 << i for i, obj in enumerate(objects)}
-        self.owner_masks, self.selector_masks = ({o: 0 for o in objects}, {o: 0 for o in objects})
-        self.global_mask = sum((bit for fact, bit in model.bits.items() if len(fact) == 1))
-        for fact, owners in self.owners.items():
-            for owner in owners:
-                if owner in self.owner_masks:
-                    self.owner_masks[owner] |= model.bits.get(fact, 0)
-        self.links = []
-        for fact, endpoints, child, parent in self.link_facts:
-            members = sum((self.object_bits.get(o, 0) for o in endpoints))
-            selector = model.bits.get(fact, 0)
-            active_static = not selector and fact in model.initial_facts
-            if parent in self.selector_masks:
-                self.selector_masks[parent] |= selector
-            if not endpoints & self.references:
-                self.links.append((selector, active_static, members, self.object_bits.get(child, 0), self.object_bits.get(parent, 0), child is not None))
-        self.resource_masks = {name: 0 for name in self.resource_names}
-        self.resource_selectors = []
-        for fact, names, payloads in self.resource_facts:
+
+# PSV 等价去重：具体动作、相关前态及实际非手效果的计数多重集。
+class LogicObserver:
+    version = "hand_free_recursive_relevant_prestate_effect_counts_v2"
+    class_equivalence = "context_counts"
+    channel_history_semantics = True
+
+    def __init__(self, model, *, schema=None):
+        self.model = model
+        self.schema = schema or PROCESS_SCHEMA
+        self.resource_relations = self.schema.get("resource_relations", {})
+        self.resource_set = self._hands()
+        self.resource_names = tuple(sorted(self.resource_set))
+        self.channels = (("all_events",),)
+        self.tokens, self.events, self.token_channels = {}, {}, {}
+        self.cache = {}
+        self.trace_nodes, self.trace_intern = [None], {}
+        self._scope_cache, self._link_cache = {}, {}
+
+        arities = self.schema.get("relation_arities", {})
+        self.hierarchy = {
+            name: roles
+            for field in ("location_relations", "hierarchy_relations")
+            for name, roles in self.schema.get(field, {}).items()
+            if name in model.predicates
+            and len(model.predicates[name]) == arities.get(name, max(roles))
+        }
+        self.records = {
+            name: roles for name, roles in self.schema.get("record_relations", {}).items()
+            if name in model.predicates
+            and len(model.predicates[name]) == arities.get(name, max(roles))
+        }
+        self.owner_masks = defaultdict(int)
+        self.selector_masks = defaultdict(int)
+        self.nonhand_mask = 0
+        self.links, self.link_mask = [], 0
+        # 每个状态位归属谁；包含关系同时保存父子链接及内容物成员位。
+        for fact in set(model.bits) | model.initial_facts:
             bit = model.bits.get(fact, 0)
-            for name in names:
-                self.resource_masks[name] |= bit
-            self.resource_selectors.append((bit, not bit and fact in model.initial_facts, sum((self.object_bits.get(o, 0) for o in payloads)), names))
-        resource_roles = {f: (names, payloads) for f, names, payloads in self.resource_facts}
-        self.roots, self.context_roots, self.dependencies, self.explicit = ([], [], [], [])
-        for i, action in enumerate(model.actions):
-            relevant = model.facts(observer.guards[i] | action.possible_add | action.possible_delete)
-            mentioned = set(action.args) | {o for f in relevant for o in f[1:]}
-            focal, context = (set(), set())
-            for fact in relevant:
-                if fact in resource_roles:
-                    _, payloads = resource_roles[fact]
-                    focal.update(payloads)
-                    context.update(set(fact[1:]) - payloads - self.resource_names)
-                elif fact in self.owners:
-                    focal.update(self.owners[fact])
-                    context.update(set(fact[1:]) - self.owners[fact] - self.resource_names)
-            focal.update(mentioned - focal - context - self.resource_names)
-            context.difference_update(focal)
-            self.roots.append(sum((self.object_bits.get(o, 0) for o in focal)))
-            self.context_roots.append(sum((self.object_bits.get(o, 0) for o in context)))
-            self.dependencies.append(mentioned & self.resource_names)
-            self.explicit.append(observer.guards[i])
-        self.selection_bits = reduce(or_, (row[0] for row in self.links), 0) | reduce(or_, (row[0] for row in self.resource_selectors if row[2]), 0)
-        self.mask_cache = [{} for _ in model.actions]
-        self.reads = [self.project((1 << len(model.atoms)) - 1, i)[0] for i in range(len(model.actions))]
+            if self._hand_fact(fact):
+                continue
+            self.nonhand_mask |= bit
+            for owner in self._owners(fact):
+                self.owner_masks[owner] |= bit
+            if fact[0] in self.hierarchy:
+                child_pos, parent_pos = self.hierarchy[fact[0]]
+                child, parent = fact[child_pos], fact[parent_pos]
+                self.links.append((bit, not bit and fact in model.initial_facts, child, parent))
+                self.link_mask |= bit
+                self.selector_masks[parent] |= bit
 
-    def project(self, state, index):
-        # Cache the selected objects/facts, never their current truth values.
-        key = state & self.selection_bits
-        observed = self.mask_cache[index].get(key)
-        if observed is None:
-            observed = self.select_mask(state, index)
-            self.mask_cache[index][key] = observed
-        return (observed, state & observed)
+        self.operations, self.parameters, self.direct, self.explicit = [], [], [], []
+        for action in model.actions:
+            name = action.line[1:-1].split()[0]
+            args = tuple(arg for arg in action.args if arg not in self.resource_set)
+            self.operations.append((name, args))
+            self.parameters.append(set(args))
+            written = action.possible_add | action.possible_delete
+            read = expression_bits(action.guard)
+            for guard, _, _ in action.effects:
+                read |= expression_bits(guard)
+            self.direct.append(self._direct_roots(written, read))
+            self.explicit.append((read | written) & self.nonhand_mask)
+        self.reference = self.profile(model.reference_order)
 
-    def select_mask(self, state, index):
-        focal, context = (self.roots[index], self.context_roots[index])
-        changed = True
-        while changed:
-            changed = False
-            for selector, static, members, child, parent, hierarchy in self.links:
-                if not (static or state & selector):
-                    continue
-                old = (focal, context)
-                if hierarchy:
-                    if focal & parent:
-                        focal |= child
-                    if (focal | context) & child:
-                        context |= parent
-                elif (focal | context) & members:
-                    focal |= members
-                context &= ~focal
-                changed |= (focal, context) != old
-        scope = focal | context
-        observed = self.global_mask | self.explicit[index]
-        for obj, bit in self.object_bits.items():
-            if scope & bit:
-                observed |= self.owner_masks[obj]
-            if focal & bit:
-                observed |= self.selector_masks[obj]
-        needed = set(self.dependencies[index])
-        for selector, static, members, names in self.resource_selectors:
-            if scope & members and (static or state & selector):
-                needed.update(names)
-        for name in needed:
-            observed |= self.resource_masks[name]
-        return observed
-
-    def restrict(self, identifiers, model):
-        result = copy(self)
-        result.model = model
-        result.mask_cache = [{} for _ in identifiers]
-        for name in ('roots', 'context_roots', 'dependencies', 'explicit', 'reads'):
-            setattr(result, name, [getattr(self, name)[i - 1] for i in identifiers])
+    def _hands(self):
+        model, schema = self.model, self.schema
+        result = {fact[1] for fact in model.initial_facts
+                  if len(fact) == 2 and fact[0] in schema.get("resource_type_predicates", ())}
+        for obj, kind in model.objects.items():
+            if any(t in model.parents and model.subtype(kind, t)
+                   for t in schema.get("resource_types", ())):
+                result.add(obj)
+        if not result:
+            result.update(f[1] for f in model.initial_facts
+                          if len(f) == 2 and f[0] in schema.get("resource_free_predicates", ()))
+            for fact in model.initial_facts:
+                role = self.resource_relations.get(fact[0])
+                if role and max(role.values()) < len(fact):
+                    result.add(fact[role["resource"]])
         return result
 
-    def mask_stable_under_action(self, index):
-        """Prove once that an action cannot change its own observation scope.
+    def _hand_fact(self, fact):
+        return bool(set(fact[1:]) & self.resource_set)
 
-        Changed hierarchy edges already have a focal child and a seeded parent;
-        changed unknown edges have every endpoint focal. Changed resource links
-        name resources already required by the action. Their activation/deletion
-        therefore cannot add/remove any object/resource from this action's view.
-        """
-        action = self.model.actions[index]
-        writes = action.possible_add | action.possible_delete
-        focal, context = (self.roots[index], self.context_roots[index])
-        for selector, _, members, child, parent, hierarchy in self.links:
-            if not selector & writes:
-                continue
-            if hierarchy:
-                if child & ~focal or parent & ~(focal | context):
-                    return False
-            elif members & ~focal:
-                return False
-        return all((not selector & writes or names <= self.dependencies[index] for selector, _, members, names in self.resource_selectors if members))
+    def _owners(self, fact):
+        if fact[0] in self.hierarchy:
+            return {fact[self.hierarchy[fact[0]][0]]}
+        if fact[0] in self.records:
+            return {fact[p] for p in self.records[fact[0]]}
+        return set(fact[1:]) - self.resource_set
 
-def shared_questions(model, representatives, observer, signatures):
-    if not representatives:
-        return []
-    catalog = observer.catalog()
-    variants = defaultdict(set)
-    groups = {}
-    for signature in [observer.reference, *signatures.values()]:
-        for action, token in enumerate(signature[1], 1):
-            variants[action].add(token)
-    owners = observer.process.owners
-    resources = observer.process.resource_names
-    locations = observer.process.schema['location_relations']
+    def _direct_roots(self, written, read):
+        # 直接对象由动作可能写入的状态确定；仅作支撑的对象不递归展开内容物。
+        anchors, unknown = set(), set()
+        for fact in self.model.facts(written):
+            if self._hand_fact(fact):
+                role = self.resource_relations.get(fact[0])
+                if role and max(role.values()) < len(fact):
+                    anchors.update({fact[role["payload"]]} - self.resource_set)
+            elif len(fact) == 2:
+                anchors.add(fact[1])
+            elif fact[0] in self.hierarchy:
+                anchors.add(fact[self.hierarchy[fact[0]][0]])
+            else:
+                unknown.update(self._owners(fact))
+        parents = {
+            fact[self.hierarchy[fact[0]][1]]
+            for fact in self.model.facts(read | written)
+            if not self._hand_fact(fact) and fact[0] in self.hierarchy
+        }
+        return anchors | (unknown - parents)
 
-    def key_for(fact):
-        hands = tuple(sorted(set(fact[1:]) & resources))
-        if hands:
-            return ('resource', *hands)
-        if fact[0] in locations:
-            return ('contents_or_location', fact[locations[fact[0]][1]])
-        return ('object', *sorted(owners.get(fact, set(fact[1:])))) if len(fact) > 1 else ('scene',)
+    def _adjacency(self, state):
+        key = state & self.link_mask
+        if key not in self._link_cache:
+            children, parents = defaultdict(set), defaultdict(set)
+            for bit, static, child, parent in self.links:
+                if static or state & bit:
+                    children[parent].add(child)
+                    parents[child].add(parent)
+            self._link_cache[key] = children, parents
+        return self._link_cache[key]
 
-    def add(key, row):
-        if key not in groups:
-            groups[key] = {'key': key, 'kind': key[0], 'subjects': list(key[1:]), 'rows': [], 'members': set()}
-        groups[key]['rows'].append(row)
-        for candidate in representatives:
-            sig = signatures[candidate['id']]
-            value = bool(sig[0] & model.bits[tuple(row['fact'])]) if row['phase'] == 'final' else row['variants'][str(sig[1][row['action_id'] - 1])]
-            if value != row['baseline']:
-                groups[key]['members'].add(candidate['id'])
-    for action, tokens in sorted(variants.items()):
-        if len(tokens) == 1:
-            continue
-        events = {str(t): catalog[str(t)] for t in tokens}
-        baseline = str(observer.reference[1][action - 1])
-        for phase in ('before', 'after'):
-            observed = {t: set(map(tuple, e[phase + '_observed'])) for t, e in events.items()}
-            truth = {t: set(map(tuple, e[phase + '_true'])) for t, e in events.items()}
-            for fact in sorted(set().union(*observed.values())):
-                values = {t: ('true' if fact in truth[t] else 'false') if fact in observed[t] else 'unobserved' for t in events}
-                if len(set(values.values())) > 1:
-                    add(key_for(fact), {'action_id': action, 'phase': phase, 'fact': list(fact), 'variants': values, 'baseline': values[baseline]})
-        for field in ('add', 'delete'):
-            sets = {t: set(map(tuple, e[field])) for t, e in events.items()}
-            for fact in sorted(set().union(*sets.values())):
-                values = {t: fact in fs for t, fs in sets.items()}
-                if len(set(values.values())) > 1:
-                    add(key_for(fact), {'action_id': action, 'phase': field, 'fact': list(fact), 'variants': values, 'baseline': values[baseline]})
-        for field in ('branches', 'supports'):
-            values = {t: json.dumps(e[field], separators=(',', ':')) for t, e in events.items()}
-            if len(set(values.values())) > 1:
-                add(('operation_outcome', action), {'action_id': action, 'phase': field, 'variants': values, 'baseline': values[baseline]})
-    finals = {s[0] for s in [observer.reference, *signatures.values()]}
-    different = 0
-    for state in finals:
-        different |= state ^ observer.reference[0]
-    for fact in sorted(model.facts(different)):
-        add(key_for(fact), {'action_id': 0, 'phase': 'final', 'fact': list(fact), 'bit': model.bits[fact], 'baseline': bool(observer.reference[0] & model.bits[fact])})
-    return [{**g, 'members': sorted(g['members'])} for _, g in sorted(groups.items(), key=lambda p: repr(p[0]))]
+    @staticmethod
+    def _closure(seeds, adjacency):
+        result, pending = set(seeds), list(seeds)
+        while pending:
+            node = pending.pop()
+            for child in adjacency.get(node, ()):
+                if child not in result:
+                    result.add(child)
+                    pending.append(child)
+        return result
 
-
-class ExecutionObserver:
-    """One observation policy for every arm count; no instruction-based merging."""
-
-    def __init__(self, model):
-        self.model = model
-        self.guards = []
-        for action in model.actions:
-            reads = expression_bits(action.guard)
-            for guard, _, _ in action.effects:
-                reads |= expression_bits(guard)
-            self.guards.append(reads)
-        self.process = ProcessModel(model, self)
-        self.simple_context = all(
-            (a.guard is True or isinstance(a.guard, tuple) and a.guard[0] == 'mask')
-            and all(g is True for g, _, _ in a.effects)
-            and self.process.mask_stable_under_action(i)
-            for i, a in enumerate(model.actions)
-        )
-        self.cache, self.tokens, self.events = {}, {}, {}
-        self.reference = self.profile(list(range(1, len(model.actions) + 1)))
+    def observation_mask(self, state, index):
+        key = state & self.link_mask, index
+        if key not in self._scope_cache:
+            children, parents = self._adjacency(state)
+            # 内容物向下递归，环境向上追溯；祖先的其他内容物不进入范围。
+            focal = self._closure(self.direct[index], children)
+            environment = self._closure(focal, parents)
+            scope = self.parameters[index] | focal | environment
+            observed = self.explicit[index]
+            for obj in scope:
+                observed |= self.owner_masks[obj]
+            for obj in focal:
+                observed |= self.selector_masks[obj]
+            self._scope_cache[key] = observed
+        return self._scope_cache[key]
 
     def event(self, state, identifier):
+        if type(identifier) is not int or not 1 <= identifier <= len(self.model.actions):
+            raise ValueError("Expected an original bound action ID")
         key = state, identifier
         if key not in self.cache:
-            i, model = identifier - 1, self.model
-            after = model.apply(state, i)
-            if after is None:
-                raise ValueError('Operation observation requires an applicable action')
-            before = self.process.project(state, i)
-            action = model.actions[i]
-            if self.simple_context:
-                fixed = 0 if action.guard is True else action.guard[1] | action.guard[2]
-                token_key = identifier, (before[0] & ~fixed, before[1] & ~fixed)
-                signature = (identifier, before, (before[0], after & before[0]),
-                             (action.possible_add, action.possible_delete), tuple(True for _ in action.effects), ())
-            else:
-                signature = (identifier, before, self.process.project(after, i), model.activated(state, i),
-                             tuple(evaluate(g, state) for g, _, _ in action.effects), ())
-                token_key = signature
-            if token_key not in self.tokens:
+            index = identifier - 1
+            successor = self.model.apply(state, index)
+            if successor is None:
+                raise ValueError("Event action is not executable")
+            observed = self.observation_mask(state, index)
+            add, delete = self.model.activated(state, index)
+            effect = add & self.nonhand_mask, delete & ~add & self.nonhand_mask
+            # mask 本身也进签名，因此「未观察」与「观察到为假」可以区分。
+            signature = self.operations[index], (observed, state & observed), effect
+            token = self.tokens.get(signature)
+            if token is None:
                 token = len(self.tokens) + 1
-                self.tokens[token_key] = token
+                self.tokens[signature] = token
                 self.events[token] = signature
-            self.cache[key] = after, self.tokens[token_key]
+                self.token_channels[token] = (0,)
+            self.cache[key] = successor, token
         return self.cache[key]
 
+    def initial_profile(self):
+        return (0,)
+
+    def extend(self, profile, token):
+        key = profile[0], token
+        if key not in self.trace_intern:
+            self.trace_intern[key] = len(self.trace_nodes)
+            self.trace_nodes.append(key)
+        return (self.trace_intern[key],)
+
+    def finish(self, state, profile):
+        # Constant end marker: final state is not an extra equivalence condition.
+        return (), profile
+
+    def decode_history(self, profile):
+        tokens, node = [], profile[0]
+        while node:
+            node, token = self.trace_nodes[node]
+            tokens.append(token)
+        return (tuple(reversed(tokens)),)
+
     def profile(self, order):
-        if sorted(order) != list(range(1, len(self.model.actions) + 1)):
-            raise ValueError('Reordering must preserve every action occurrence')
-        state, tokens = self.model.initial, [0] * len(order)
+        if len(order) != self.model.length:
+            raise ValueError("Expected reference length")
+        state, counts = self.model.initial, Counter()
         for identifier in order:
-            state, tokens[identifier - 1] = self.event(state, identifier)
+            state, token = self.event(state, identifier)
+            counts[token] += 1
         if not evaluate(self.model.goal, state):
-            raise ValueError('Expected a goal-reaching plan')
-        return state, tuple(tokens), ()
+            raise ValueError("Expected an original goal-reaching path")
+        return (), tuple(sorted(counts.items()))
 
     def catalog(self):
-        def facts(mask):
-            return [list(f) for f in sorted(self.model.facts(mask))]
+        return {str(token): event for token, event in self.events.items()}
 
-        return {str(token): {'action_id': e[0], 'before_observed': facts(e[1][0]), 'before_true': facts(e[1][1]),
-                            'after_observed': facts(e[2][0]), 'after_true': facts(e[2][1]),
-                            'add': facts(e[3][0]), 'delete': facts(e[3][1]), 'branches': list(e[4]), 'supports': []}
-                for token, e in self.events.items()}
+    def metadata(self):
+        return {"version": self.version, "hand_objects_ignored": list(self.resource_names),
+                "final_state_is_equivalence_key": False,
+                "event_count": len(self.events),
+                "hierarchy_relations": sorted(self.hierarchy),
+                "direct_cargo_rule": "strong_anchors_plus_unknown_participants_except_unanchored_known_parents",
+                "unknown_relation_state_ownership": "all_nonhand_participants_conservative",
+                "actual_nonhand_effect_recorded": True}
+
+
+# PSV 对照分组：匹配重复动作，再比较固定焦点与背景。
+def action_key(value):
+    """Return a hashable concrete non-hand operation from an event or action."""
+    if isinstance(value, dict):
+        value = value['action']
+    return value[0], tuple(value[1])
+
+
+def jaccard_bits(left, right):
+    union = (left | right).bit_count()
+    return ((left ^ right).bit_count() / union) if union else 0.0
+
+
+def event_distances(left, right):
+    """Exact positive/domain and signed-effect Jaccard distances in [0,1]."""
+    lm, rm = left['mask'], right['mask']
+    lt, rt = left['pre'] & lm, right['pre'] & rm
+    context = .5 * (jaccard_bits(lt, rt) + jaccard_bits(lm, rm))
+    union = (left['add'] | right['add']).bit_count() + (left['delete'] | right['delete']).bit_count()
+    intersection = (left['add'] & right['add']).bit_count() + (left['delete'] & right['delete']).bit_count()
+    effect = 1 - intersection / union if union else 0.0
+    return context, effect
+
+
+def assignment(cost):
+    """Minimum-cost square assignment; no external library or service."""
+    n = len(cost)
+    if not n:
+        return []
+    if any(len(row) != n for row in cost):
+        raise ValueError('Hungarian cost must be square')
+    u, v, match, way = [0.0] * (n + 1), [0.0] * (n + 1), [0] * (n + 1), [0] * (n + 1)
+    for row in range(1, n + 1):
+        match[0] = row
+        column, minimum, used = 0, [float('inf')] * (n + 1), [False] * (n + 1)
+        while True:
+            used[column] = True
+            active = match[column]
+            delta, following = float('inf'), 0
+            for target in range(1, n + 1):
+                if used[target]:
+                    continue
+                value = cost[active - 1][target - 1] - u[active] - v[target]
+                if value < minimum[target]:
+                    minimum[target], way[target] = value, column
+                if minimum[target] < delta:
+                    delta, following = minimum[target], target
+            for target in range(n + 1):
+                if used[target]:
+                    u[match[target]] += delta
+                    v[target] -= delta
+                else:
+                    minimum[target] -= delta
+            column = following
+            if match[column] == 0:
+                break
+        while column:
+            previous = way[column]
+            match[column] = match[previous]
+            column = previous
+            if not column:
+                break
+    result = [0] * n
+    for target in range(1, n + 1):
+        result[match[target] - 1] = target - 1
+    return result
+
+
+def edit_distance(left, right):
+    previous = list(range(len(right) + 1))
+    for i, a in enumerate(left, 1):
+        current = [i]
+        for j, b in enumerate(right, 1):
+            current.append(min(current[-1] + 1, previous[j] + 1,
+                               previous[j - 1] + (a != b)))
+        previous = current
+    return previous[-1]
+
+
+def action_comparison(action, left, right, *, details=False):
+    original_left_count, original_right_count = len(left), len(right)
+    left_contexts = Counter((e['mask'], e['pre'] & e['mask']) for e in left)
+    right_contexts = Counter((e['mask'], e['pre'] & e['mask']) for e in right)
+    differs = bool(left and right and any(
+        left_contexts[key] * len(right) != right_contexts[key] * len(left)
+        for key in left_contexts.keys() | right_contexts.keys()))
+    # Canonical occurrence order and orientation make tie-breaking symmetric:
+    # equal combined assignment costs cannot select different context/effect
+    # subtotals merely because the caller reversed the two plans.
+    key = lambda event: (event['mask'], event['pre'], event['add'], event['delete'])
+    left_order = sorted(range(len(left)), key=lambda i: key(left[i]))
+    right_order = sorted(range(len(right)), key=lambda i: key(right[i]))
+    left = [left[i] for i in left_order]
+    right = [right[i] for i in right_order]
+    swapped = tuple(map(key, left)) > tuple(map(key, right))
+    if swapped:
+        left, right = right, left
+        left_order, right_order = right_order, left_order
+    n = max(len(left), len(right))
+    if not n:
+        raise ValueError('At least one occurrence is required')
+    differences = [[event_distances(a, b) for b in right] for a in left]
+    cost = [[sum(differences[i][j]) / 2 if i < len(left) and j < len(right) else 1.0
+             for j in range(n)] for i in range(n)]
+    pairs = assignment(cost)
+    context, effect, matched_context, matched_effect = 0.0, 0.0, 0.0, 0.0
+    matched = 0
+    rows = []
+    for i, j in enumerate(pairs):
+        real = i < len(left) and j < len(right)
+        c, e = differences[i][j] if real else (1.0, 1.0)
+        context += c
+        effect += e
+        if real:
+            matched += 1
+            matched_context += c
+            matched_effect += e
+        if details:
+            li = left_order[i] if i < len(left) else None
+            rj = right_order[j] if j < len(right) else None
+            if swapped:
+                li, rj = rj, li
+            rows.append({'left_occurrence': li, 'right_occurrence': rj,
+                         'context_distance': c, 'effect_distance': e})
+    result = {'action': [action[0], list(action[1])], 'left_count': original_left_count, 'right_count': original_right_count,
+              'matched_count': matched, 'missing_occurrences': abs(len(left) - len(right)),
+              'left_only_occurrences': max(0, original_left_count - original_right_count),
+              'right_only_occurrences': max(0, original_right_count - original_left_count),
+              'context_distance': context / n, 'effect_distance': effect / n,
+              'matched_context_distance': matched_context / matched if matched else 0.0,
+              'matched_effect_distance': matched_effect / matched if matched else 0.0,
+              'context_distribution_differs': differs,
+              'context_support_differs': left_contexts.keys() != right_contexts.keys(),
+              'focal_eligible': differs}
+    if details:
+        result['occurrence_pairs'] = rows
+    return result
+
+
+def pair_compare(left, right, *, details=False):
+    """Compare two saved plan dictionaries; action counts may differ.
+
+    per_action is a JSON-compatible list. Every distance is symmetric. Focal
+    eligibility requires the action in both plans and an actual change in its
+    normalized pre-context distribution, not merely more identical repeats.
+    """
+    le, re = defaultdict(list), defaultdict(list)
+    for event in left['events']:
+        le[action_key(event)].append(event)
+    for event in right['events']:
+        re[action_key(event)].append(event)
+    actions = sorted(le.keys() | re.keys())
+    rows = [action_comparison(action, le[action], re[action], details=details) for action in actions]
+    intersection = sum(min(len(le[action]), len(re[action])) for action in actions)
+    union = sum(max(len(le[action]), len(re[action])) for action in actions)
+    ls = [action_key(event) for event in left['events']]
+    rs = [action_key(event) for event in right['events']]
+    maximum, order_edit = max(len(ls), len(rs)), edit_distance(ls, rs)
+    return {'left_class_rank': left.get('class_rank'), 'right_class_rank': right.get('class_rank'),
+            'per_action': rows, 'shared_concrete_actions': sum(bool(le[a] and re[a]) for a in actions),
+            'missing_occurrences': sum(row['missing_occurrences'] for row in rows),
+            'composition_distance': 1 - intersection / union if union else 0.0,
+            'composition_similarity': intersection / union if union else 1.0,
+            'order_edit_distance': order_edit,
+            'order_distance': order_edit / maximum if maximum else 0.0,
+            'context_distance': sum(row['context_distance'] * max(row['left_count'], row['right_count'])
+                                    for row in rows) / union if union else 0.0,
+            'effect_distance': sum(row['effect_distance'] * max(row['left_count'], row['right_count'])
+                                   for row in rows) / union if union else 0.0,
+            'focal_actions': [row['action'] for row in rows if row['focal_eligible']]}
+
+
+class Distances:
+    def __init__(self, plans):
+        self.plans = {p['class_rank']: p for p in plans}
+        self.cache = {}
+        self.focus_cache = {}
+
+    def get(self, left, right):
+        if left > right:
+            left, right = right, left
+        key = left, right
+        if key not in self.cache:
+            self.cache[key] = pair_compare(self.plans[left], self.plans[right])
+        return self.cache[key]
+
+    def focused(self, left, right, focus):
+        key = min(left, right), max(left, right), focus
+        if key in self.focus_cache:
+            return self.focus_cache[key]
+        comparison = self.get(left, right)
+        rows = comparison['per_action']
+        target = next((row for row in rows if action_key(row['action']) == focus), None)
+        shared = [row for row in rows if row['matched_count']]
+        strongest = max((row['matched_context_distance'] for row in shared), default=0)
+        eligible = bool(target and target['focal_eligible'] and
+                        target['matched_context_distance'] + 1e-12 >= strongest)
+        background = [row for row in rows if action_key(row['action']) != focus]
+        weight = sum(max(row['left_count'], row['right_count']) for row in background)
+        distance = sum(max(row['left_count'], row['right_count']) *
+                       (row['context_distance'] + row['effect_distance']) / 2
+                       for row in background) / weight if weight else 0.0
+        value = {'eligible': eligible, 'background_distance': distance,
+                 'composition_distance': comparison['composition_distance'],
+                 'order_distance': comparison['order_distance'],
+                 'focus_context_distance': target['matched_context_distance'] if target else 0.0}
+        self.focus_cache[key] = value
+        return value
+
+
+def group_metrics(ranks, anchor, focus, distances):
+    anchor_rows = [distances.focused(anchor, rank, focus) for rank in ranks if rank != anchor]
+    pair_rows = [distances.focused(left, right, focus)
+                 for position, left in enumerate(ranks) for right in ranks[position + 1:]]
+    return {'anchor_background_mean': sum(x['background_distance'] for x in anchor_rows) / len(anchor_rows)
+                if anchor_rows else 0,
+            'anchor_background_max': max((x['background_distance'] for x in anchor_rows), default=0),
+            'pair_background_max': max((x['background_distance'] for x in pair_rows), default=0),
+            'composition_distance_max': max((x['composition_distance'] for x in pair_rows), default=0),
+            'anchor_order_distance_mean': sum(x['order_distance'] for x in anchor_rows) / len(anchor_rows)
+                if anchor_rows else 0}
+
+
+def logical_groups(case, config, distances):
+    # 先列出每个“锚点＋焦点”的候选，再按人数、背景和顺序距离择优成组。
+    plans = {p['class_rank']: p for p in case['plans']}
+    ranks = sorted(plans)
+    background, diameter, composition = (config['background_limit'], config['pair_background_limit'],
+                                         config['composition_limit'])
+    candidates = []
+    for anchor in ranks:
+        focuses = sorted({action_key(event) for event in plans[anchor]['events']})
+        for focus in focuses:
+            possible = []
+            for other in ranks:
+                if other == anchor:
+                    continue
+                value = distances.focused(anchor, other, focus)
+                if (value['eligible'] and value['background_distance'] <= background + 1e-12
+                        and value['composition_distance'] <= composition + 1e-12):
+                    possible.append((value['background_distance'], value['composition_distance'],
+                                     value['order_distance'], other))
+            if possible:
+                candidates.append((anchor, focus, sorted(possible)))
+    available, groups = set(ranks), []
+    while available:
+        best = None
+        for anchor, focus, possible in candidates:
+            if anchor not in available:
+                continue
+            members = [anchor]
+            for _, _, _, other in possible:
+                if other not in available:
+                    continue
+                if any(distances.focused(member, other, focus)['background_distance'] > diameter + 1e-12
+                       or distances.focused(member, other, focus)['composition_distance'] > composition + 1e-12
+                       for member in members):
+                    continue
+                members.append(other)
+            if len(members) < 2:
+                continue
+            metrics = group_metrics(members, anchor, focus, distances)
+            score = (-len(members), metrics['anchor_background_mean'],
+                     metrics['anchor_order_distance_mean'], focus, anchor, tuple(members))
+            if best is None or score < best[0]:
+                best = score, anchor, focus, members, metrics
+        if best is None:
+            anchor = min(available)
+            members, focus, metrics = [anchor], None, {}
+        else:
+            _, anchor, focus, members, metrics = best
+        groups.append({'id': f'g{len(groups):04d}', 'focus_action': focus,
+                       'anchor_rank': anchor, 'class_ranks': sorted(members),
+                       'size': len(members), 'metrics': metrics})
+        available.difference_update(members)
+    return groups
 
 
 def _action_library(model):
-    trace = _evaluated_symbolic_trace('', model.domain_path, model.plan_path)
+    trace = _evaluated_symbolic_trace('', model.domain_path, [action.line for action in model.actions])
     chunks = re.findall(r'^\d+\. (.*?)(?=^\d+\. |\Z)', trace, re.M | re.S)
     if len(chunks) != len(model.actions):
-        raise ValueError('Bound action descriptions do not match the plan')
+        raise ValueError('Bound action descriptions do not match the action library')
     return [{'action_id': i, 'description': text.rstrip('\n')} for i, text in enumerate(chunks, 1)]
 
 
 def group_plan_classes(model, representatives, observer, instruction, kf_actions, *, multiview=False):
-    """Pack by shared state questions, retaining complete independent timelines."""
-    signatures = {c['id']: observer.profile(c['order']) for c in representatives}
-    if len(signatures) != len(representatives):
-        raise ValueError('Duplicate representative ID')
-    topics = shared_questions(model, representatives, observer, signatures)
-    by_candidate = defaultdict(list)
-    frequency = {repr(t['key']): len(t['members']) for t in topics}
-    for topic in topics:
-        for identifier in topic['members']:
-            by_candidate[identifier].append(repr(topic['key']))
-    catalog, library = observer.catalog(), _action_library(model)
-    event_cost = {int(t): len(json.dumps(e, separators=(',', ':'))) for t, e in catalog.items()}
+    """按完整代表集形成固定焦点组，参考类沿用PFV，每组独立分包。"""
+    plans = []
+    for candidate in representatives:
+        state, events = model.initial, []
+        for identifier in candidate['order']:
+            state, token = observer.event(state, identifier)
+            action, (mask, pre), (add, delete) = observer.events[token]
+            events.append(dict(action=[action[0], list(action[1])], mask=mask, pre=pre,
+                               add=add, delete=delete))
+        plans.append(dict(class_rank=candidate['class_rank'], events=events))
+    config = dict(background_limit=.35, pair_background_limit=.50, composition_limit=.40)
+    groups = logical_groups({'plans': plans}, config, Distances(plans))
+    by_rank = {candidate['class_rank']: candidate for candidate in representatives}
+    if not any(candidate['id'] != 'reference' for candidate in representatives):
+        return [], []
+    library, batches = _action_library(model), []
+    for group in groups:
+        members = [by_rank[rank] for rank in group['class_ranks'] if by_rank[rank]['id'] != 'reference']
+        anchor = by_rank[group['anchor_rank']]['order']
+        focus = group['focus_action']
+        question = (f"When {focus[0]}({', '.join(focus[1])}) occurs, do the objects' states, contents "
+                    'and enclosing environment allow the operation and satisfy Instruction in each plan?') if focus else ''
 
-    def sort_key(candidate):
-        shared = sorted(by_candidate[candidate['id']], key=lambda k: (-frequency[k], k))
-        primary = shared[0] if shared else ''
-        return (candidate['id'] != 'reference', -frequency.get(primary, 0), primary, tuple(shared),
-                tuple(observer.events[t] for t in signatures[candidate['id']][1]), tuple(candidate['order']))
+        def prompt(candidates):
+            return build_group_judge_prompt(library, candidates, instruction=instruction,
+                kf_actions=kf_actions, comparison_question=question, multiview=multiview,
+                exact_length=model.length, comparison_order=anchor)
 
-    queue = sorted(representatives, key=sort_key)
-    rank = {c['id']: i for i, c in enumerate(queue)}
-    event_sets = {i: set(s[1]) for i, s in signatures.items()}
-    topic_sets = {i: set(by_candidate[i]) for i in signatures}
-
-    def prompt(candidates):
-        diversity = {}
-        if len(candidates) > 1:
-            for action in candidates[0]['order']:
-                variants = set()
-                for c in candidates:
-                    event = catalog[str(signatures[c['id']][1][action - 1])]
-                    variants.add((tuple(map(tuple, event['before_observed'])), tuple(map(tuple, event['before_true']))))
-                if len(variants) > 1:
-                    diversity[action] = len(variants)
-        question = ''
-        if diversity:
-            focus = max(diversity, key=lambda a: (diversity[a], -a))
-            question = (f"When A{focus:02d} occurs, do the objects' states, contents and enclosing environment "
-                        'allow the operation and satisfy Instruction in each plan?')
-        return build_group_judge_prompt(library, candidates, instruction=instruction, kf_actions=kf_actions,
-                                        comparison_question=question, multiview=multiview)
-
-    def choose(available, used_events, used_topics):
-        return min(available, key=lambda c: (sum(event_cost[t] for t in event_sets[c['id']] - used_events),
-                                            -len(topic_sets[c['id']] & used_topics), rank[c['id']]))
-
-    batches, pending, rendered = [], [], ''
-    while queue:
-        if len(pending) == 10:
-            batches.append({'candidates': pending, 'prompt': rendered})
-            pending = []
-        if not pending:
-            proposed, available, used_events, used_topics = [], list(queue[:64]), set(), set()
-            while available and len(proposed) < 10:
-                c = available[0] if not proposed else choose(available, used_events, used_topics)
-                proposed.append(c)
-                available.remove(c)
-                used_events.update(event_sets[c['id']])
-                used_topics.update(topic_sets[c['id']])
-            rendered = prompt(proposed)
-            if len(rendered) <= 48000:
-                batches.append({'candidates': proposed, 'prompt': rendered})
-                taken = {c['id'] for c in proposed}
-                queue = [c for c in queue if c['id'] not in taken]
-                continue
-        used_events = set().union(*(event_sets[c['id']] for c in pending))
-        used_topics = set().union(*(topic_sets[c['id']] for c in pending))
-        options = (heapq.nsmallest(10, queue[:64], key=lambda c: (
-            sum(event_cost[t] for t in event_sets[c['id']] - used_events),
-            -len(topic_sets[c['id']] & used_topics), rank[c['id']])) if pending else queue[:1])
-        for candidate in options:
-            trial = pending + [candidate]
-            trial_prompt = prompt(trial)
-            if len(trial_prompt) <= 48000:
-                queue.remove(candidate)
-                pending, rendered = trial, trial_prompt
-                break
-        else:
-            if not pending:
+        current = []
+        for position, candidate in enumerate(members):
+            current.append(candidate)
+            rendered = prompt(current)
+            if len(rendered) > 48000:
                 raise ValueError('One complete review prompt exceeds capacity')
-            batches.append({'candidates': pending, 'prompt': rendered})
-            pending = []
-    if pending:
-        batches.append({'candidates': pending, 'prompt': rendered})
-    actual = [c['id'] for b in batches for c in b['candidates']]
-    if len(actual) != len(representatives) or set(actual) != set(signatures):
-        raise AssertionError('Grouping omitted or duplicated a representative')
+            if len(current) < 10 and position + 1 < len(members):
+                if len(prompt(current + [members[position + 1]])) <= 48000:
+                    continue
+            batches.append(dict(candidates=current, prompt=rendered, comparison_question=question,
+                                comparison_order=anchor, group_id=group['id']))
+            current = []
+    actual = [candidate['id'] for batch in batches for candidate in batch['candidates']]
+    expected = [candidate['id'] for candidate in representatives if candidate['id'] != 'reference']
+    if len(actual) != len(expected) or set(actual) != set(expected):
+        raise ValueError('Grouping omitted or duplicated a representative')
     return library, batches
 
 
 def save_validation(round_dir, pfv, psv):
-    """Persist a compact verdict and a separate resumable PSV checkpoint."""
+    """Persist only the PFV and PSV output verdicts; unfinished output is null."""
     verdict = None
     if psv is not None and psv['status'] == 'rejected':
         verdict = {k: psv['counterexample'][k] for k in ('reasoning', 'pass', 'feedback')}
@@ -737,11 +847,6 @@ def save_validation(round_dir, pfv, psv):
     temporary = path.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     temporary.replace(path)
-    if psv is not None:
-        state = Path(round_dir) / 'psv_state.json'
-        temporary = state.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(psv, ensure_ascii=False, indent=2), encoding='utf-8')
-        temporary.replace(state)
     passed, feedback = None, ''
     if pfv is not None and not pfv['pass']:
         passed, feedback = False, pfv['feedback']
@@ -751,165 +856,68 @@ def save_validation(round_dir, pfv, psv):
     return {**result, 'pass': passed, 'feedback': feedback}
 
 
-def _psv_artifacts(directory):
-    return {name: (Path(directory) / name).read_text(encoding='utf-8')
-            for name in ('domain.pddl', 'problem.pddl', 'plan.txt')}
+def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir):
+    """Review every other operation-logic class after this round's PFV passed.
 
-
-def _image_versions(images):
-    return [{'path': str(Path(path).resolve()), 'size': Path(path).stat().st_size,
-             'mtime_ns': Path(path).stat().st_mtime_ns} for path in images]
-
-
-def current_psv_passed(directory, *, instruction=None, kf_actions=None, model=None):
-    """Old-scope or stale artifact passes never bypass the expanded search."""
-    try:
-        directory = Path(directory)
-        judge = json.loads((directory / 'judge.json').read_text())
-        state = json.loads((directory / 'psv_state.json').read_text())
-        return (judge['pfv']['pass'] is True and judge['psv']['pass'] is True
-                and state['scope'] == PSV_SCOPE and state['algorithm'] == PSV_ALGORITHM
-                and state['status'] == 'passed' and state['search_complete'] is True
-                and state['unresolved_representatives'] == 0
-                and state['inputs']['artifacts'] == _psv_artifacts(directory)
-                and state['inputs']['pfv'] == judge['pfv']
-                and (instruction is None or state['inputs']['instruction'] == instruction)
-                and (kf_actions is None or state['inputs']['kf_actions'] == format_kf_actions(kf_actions))
-                and (model is None or state['inputs']['model'] == model)
-                and state['inputs']['images'] == _image_versions(
-                    [entry['path'] for entry in state['inputs']['images']]))
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-
-
-def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir,
-                            *, search_options=None, max_batches=None):
-    """Judge exact-L classes lazily; passes require complete independent review."""
-    from swm.pddl.discrete_observations import DiscreteObserver
-    from swm.pddl.batching import group_same_length_classes, RankBatchPlan
-
-    if max_batches is not None and (type(max_batches) is not int or max_batches < 0):
-        raise ValueError('max_batches must be a nonnegative integer or None')
+    Search and transport failures remain incomplete. Only completed, validated
+    responses produce verdicts. Removed orders inherit no instruction verdict.
+    """
+    kf_actions = format_kf_actions(kf_actions)
     directory = Path(round_dir)
-    pfv = _validate_verdict(json.loads((directory / 'judge.json').read_text())['pfv'])
+    record = json.loads((directory / 'judge.json').read_text())
+    pfv = _validate_verdict(record['pfv'])
     if not pfv['pass']:
         raise ValueError('PSV requires a passed PFV')
-    kf_actions = format_kf_actions(kf_actions)
-    images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
-    cached = {}
-    try:
-        cached = json.loads((directory / 'psv_state.json').read_text())
-    except (OSError, ValueError):
-        pass
-    if not isinstance(cached, dict):
-        cached = {}
-    try:
-        inputs = {'artifacts': _psv_artifacts(directory), 'images': _image_versions(images),
-                  'instruction': instruction, 'kf_actions': kf_actions, 'model': model, 'pfv': pfv}
-    except OSError as error:
-        # A temporary missing image/artifact must neither fabricate a verdict
-        # nor discard previously validated rows. Reuse still requires the
-        # complete original input snapshot after the file becomes available.
-        prior = cached if (cached.get('scope') == PSV_SCOPE and
-                           cached.get('algorithm') == PSV_ALGORITHM) else {}
-        psv = {'search_complete': False, 'reviews': [], 'requests': [], **prior,
-               'status': 'incomplete', 'scope': PSV_SCOPE, 'algorithm': PSV_ALGORITHM,
-               'error_phase': 'input_preparation', 'error_type': type(error).__name__,
-               'error': str(error), 'requests_this_call': 0}
-        save_validation(directory, pfv, psv)
-        return psv
-    compatible = (cached.get('scope') == PSV_SCOPE and cached.get('algorithm') == PSV_ALGORITHM
-                  and cached.get('inputs') == inputs)
-    resolved = (cached.get('status') == 'rejected' or
-                cached.get('status') == 'passed' and cached.get('search_complete') is True
-                and cached.get('unresolved_representatives') == 0)
-    if compatible and resolved:
-        cached = {**cached, 'requests_this_call': 0}
-        save_validation(directory, pfv, cached)
-        return cached
     psv = {'status': 'incomplete', 'search_complete': False, 'reviews': [], 'requests': [],
-           'instruction_verdict_inherited': False, 'scope': PSV_SCOPE,
-           'algorithm': PSV_ALGORITHM, 'inputs': inputs, 'reference_review_source': 'pfv',
-           'vlm_seconds': cached.get('vlm_seconds', 0) if compatible else 0,
-           'requests_this_call': 0}
-    found = {}
-    if compatible:
-        for row in cached.get('reviews', []):
-            try:
-                _validate_verdict({key: row[key] for key in ('reasoning', 'pass', 'feedback')})
-                if isinstance(row['candidate_id'], str) and isinstance(row['order'], list):
-                    found[row['candidate_id']] = row
-            except (KeyError, TypeError, ValueError):
-                pass
-        psv['requests'] = cached.get('requests', [])
-        psv['reviews'] = list(found.values())
-
+           'instruction_verdict_inherited': False, 'scope': 'exact_reference_length_original_bindings'}
     def save():
         save_validation(directory, pfv, psv)
 
     try:
-        began = time.perf_counter()
         symbolic = SameLengthModel(*(directory / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
-        observer = DiscreteObserver(symbolic)
-        psv['preprocessing_seconds'] = time.perf_counter() - began
-        representatives, proof = search_plan_classes(symbolic, observer, **(search_options or {}))
-        class_count = getattr(representatives, 'class_count', None)
-        if class_count is None:
-            class_count = len(representatives)
+        observer = LogicObserver(symbolic)
+        representatives, proof = search_plan_classes(symbolic, observer)
         psv.update(search_complete=proof['coverage_complete'], search_status=proof['status'],
                    legal_orders=proof['raw_orders_including_reference'],
-                   legal_order_count_exact=proof['raw_order_count_exact'], classes=class_count,
+                   legal_order_count_exact=proof['raw_order_count_exact'], classes=len(representatives),
                    covered_orders=proof['accounted_orders'], class_counts=proof['classes'],
-                   factorization=proof['factorization'], proof=proof)
-        grouping_began = time.perf_counter()
-        library, batches = group_same_length_classes(
-            symbolic, representatives, observer, instruction, kf_actions,
-            multiview=len(images) > 1, exclude_reference=True)
-        is_lazy = isinstance(batches, RankBatchPlan)
-        pending_count = batches.candidate_count if is_lazy else sum(len(b['candidates']) for b in batches)
-        psv['groups'] = batches.batch_count if is_lazy else len(batches)
-        psv['grouping_seconds'] = time.perf_counter() - grouping_began
-        grouping_preprocessing = psv['grouping_seconds']
-        unverified_cached, found = found, {}
+                   factorization=proof['factorization'])
+        # The reference operation-logic class already has this round's PFV.
+        pending = [c for c in representatives if c['id'] != 'reference']
+        found = {}
+        images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
+        library, batches = group_plan_classes(symbolic, representatives, observer, instruction, kf_actions,
+                                             multiview=len(images) > 1)
+        psv['groups'] = len(batches)
+        psv['reference_review_source'] = 'pfv'
 
         def checkpoint():
-            psv['reviews'] = list(found.values())
-            rejected = next((r for r in found.values() if not r['pass']), None)
-            psv['unresolved_representatives'] = pending_count - len(found)
-            if rejected is not None:
-                psv['status'] = 'rejected'
-                psv['counterexample'] = {**rejected, 'plan': '\n'.join(
-                    symbolic.actions[i - 1].line for i in rejected['order']) + '\n'}
+            psv['reviews'] = [found[c['id']] for c in pending if c['id'] in found]
+            rejected = [r for r in psv['reviews'] if not r['pass']]
+            psv['unresolved_representatives'] = len(pending) - len(found)
+            if rejected:
+                psv['status'], psv['counterexample'] = 'rejected', rejected[0]
+                psv['counterexample'] = {**rejected[0], 'plan': '\n'.join(
+                    symbolic.actions[i - 1].line for i in rejected[0]['order']) + '\n'}
             elif proof['coverage_complete'] and not psv['unresolved_representatives']:
                 psv['status'] = 'passed'
             else:
                 psv['status'] = 'incomplete'
-            if is_lazy:
-                psv['grouping'] = batches.metadata()
-                psv['grouping_seconds'] = grouping_preprocessing + batches.rendering_seconds
             save()
 
-        def prompt_for(candidates):
-            used = {i for c in candidates for i in c['order']}
-            return build_group_judge_prompt([a for a in library if a['action_id'] in used], candidates,
-                instruction=instruction, kf_actions=kf_actions, multiview=len(images) > 1,
-                exact_length=symbolic.length)
+        checkpoint()
 
         def review(candidates, prompt):
-            if max_batches is not None and psv['requests_this_call'] >= max_batches:
-                return False
-            psv['requests_this_call'] += 1
             capture = {}
             request = {'candidates': candidates, 'status': 'in_progress'}
             psv['requests'].append(request)
-            checkpoint()
-            began = time.perf_counter()
+            save()
             try:
                 response = call_gpt_json(model, prompt, images, response_format={'type': 'json_object'},
-                                         attempts=1, reasoning_effort='xhigh', temperature=0, capture=capture,
-                                         **({'max_retries': 0} if max_batches is not None else {}))
+                                         attempts=1, reasoning_effort='xhigh',
+                                         temperature=0, capture=capture)
                 request['response'] = response
-                if not isinstance(response, dict) or set(response) != {'results'} or not isinstance(response['results'], list):
+                if set(response) != {'results'} or not isinstance(response['results'], list):
                     raise ValueError('Group judge must return a results list')
                 allowed = {c['id']: c for c in candidates}
                 counts = defaultdict(int)
@@ -920,49 +928,45 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
                     if not isinstance(row, dict) or set(row) != {'candidate_id', 'reasoning', 'pass', 'feedback'}:
                         continue
                     identifier = row['candidate_id']
-                    if identifier not in allowed or counts[identifier] != 1:
+                    if not isinstance(identifier, str) or not identifier or not identifier.strip():
+                        continue
+                    original_id = identifier
+                    if len(candidates) == len(response['results']) == 1:
+                        identifier = candidates[0]['id']
+                    if identifier not in allowed or counts[original_id] != 1:
                         continue
                     try:
-                        verdict = _validate_verdict({key: row[key] for key in ('reasoning', 'pass', 'feedback')})
+                        verdict = _validate_verdict({k: row[k] for k in ('reasoning', 'pass', 'feedback')})
                     except ValueError:
                         continue
                     found[identifier] = {'candidate_id': identifier, 'order': allowed[identifier]['order'],
-                                         **verdict, 'response_candidate_id': identifier,
+                                         **verdict, 'response_candidate_id': original_id,
                                          'request_index': len(psv['requests']) - 1}
                 request['status'] = 'complete'
             except Exception as error:
                 request.update(status='request_error', error_type=type(error).__name__, error=str(error))
-            psv['vlm_seconds'] += time.perf_counter() - began
-            request['capture'] = {key: value for key, value in capture.items() if key not in {'raw_output', 'json_text'}}
+            request['capture'] = {k: v for k, v in capture.items() if k not in {'raw_output', 'json_text'}}
             checkpoint()
-            return True
 
-        checkpoint()
         for batch in batches:
-            for candidate in batch['candidates']:
-                previous = unverified_cached.get(candidate['id'])
-                if previous is not None and previous['order'] == candidate['order']:
-                    found[candidate['id']] = previous
-            checkpoint()
-            if psv['status'] == 'rejected':
-                return psv
             candidates = [c for c in batch['candidates'] if c['id'] not in found]
             if not candidates:
                 continue
-            if not review(candidates, batch['prompt'] if len(candidates) == len(batch['candidates']) else prompt_for(candidates)):
-                break
-            if psv['status'] == 'rejected':
-                return psv
+            review(candidates, batch['prompt'] if len(candidates) == len(batch['candidates']) else
+                   build_group_judge_prompt(library, candidates, instruction=instruction,
+                                            kf_actions=kf_actions, multiview=len(images) > 1,
+                                            exact_length=symbolic.length, comparison_question=batch['comparison_question'],
+                                            comparison_order=batch['comparison_order']))
+            # Invalid/missing rows get one independent retry. Valid rejections
+            # and valid passes are never retried to seek a different answer.
             for candidate in candidates:
                 if candidate['id'] not in found:
-                    if not review([candidate], prompt_for([candidate])):
-                        break
-                    if psv['status'] == 'rejected':
-                        return psv
-            if any(c['id'] not in found for c in candidates):
-                break
+                    review([candidate], build_group_judge_prompt(library, [candidate], instruction=instruction,
+                                                                kf_actions=kf_actions, multiview=len(images) > 1,
+                                                                exact_length=symbolic.length, comparison_question=batch['comparison_question'],
+                                                                comparison_order=batch['comparison_order']))
         checkpoint()
-    except (OSError, ValueError, KeyError, NotImplementedError, OverflowError, TimeoutError) as error:
+    except (OSError, ValueError, KeyError, NotImplementedError, OverflowError) as error:
         psv.update(status='incomplete', error_type=type(error).__name__, error=str(error))
         save()
     return psv

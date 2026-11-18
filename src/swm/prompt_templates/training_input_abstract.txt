@@ -1,4 +1,4 @@
-Given the initial scene image and an abstract game's instruction and rules, generate a task-relevant symbolic world model as a valid PDDL domain and problem for game planning.
+Given the initial scene image and an abstract game's instruction and rules, generate a causally sufficient, task-relevant symbolic world model as a valid PDDL domain and problem for game planning.
 
 Input
 - Initial scene image: attached
@@ -6,16 +6,18 @@ Input
 
 PDDL requirements
 1. Symbolic representation
-- Use untyped PDDL with unary category predicates. Declare every used predicate with consistent names, argument counts and argument order. Include :requirements for the PDDL constructs you use.
-2. Objects and initial state
-- Use visible object IDs and symbols defined by the game rules. Ground the entities and locations needed for the task, and encode their categories and depicted physical initial states and explicitly supplied nonvisual controller initial values in :init.
-- Interpret the image using the meanings and conventions stated in the game rules. Derive any additional initial facts only from the depicted state, the explicitly supplied controller initial values, and those rules, never from the desired goal.
-3. Task goal
-- Encode all required final conditions in :goal, grounded in the correct objects and locations.
-4. Game operators
-- Use only allowed game operations, preserving their supplied names. Choose the necessary action parameters and use them consistently within your PDDL. Include the operations needed for a valid plan from :init to :goal.
-- Model each operation's preconditions and effects faithfully. Preserve the game rules' constraints and causal dependencies, including any required preparation or ordering.
+- Use untyped PDDL with unary category predicates. Represent task-relevant entities, states, and relations.
+- Declare every used predicate in `:predicates`, maintaining consistent names, argument counts, and roles across both files. Include `:requirements` for the PDDL constructs you use.
+2. Operators and state transitions
+- Use only allowed game operations, preserving their supplied names. Identify the operations, preparatory steps, and intermediate state transitions needed to accomplish the task under the game rules. Model genuine causal dependencies.
+- Define each operator as one complete allowed game operation, with correctly bound participants, necessary preconditions and effects. Choose the necessary action parameters and use them consistently within your PDDL. Respect the game rules' constraints.
+- Accurately add and delete facts according to each operation's effects, preserving unaffected facts. Maintain consistent object locations, mutually exclusive states, and resource usage according to the game rules.
+- Ensure the operators enable all required task outcomes from the initial state without unintended shortcuts.
 - Do not add entities, operations or constraints unsupported by the scene and game rules.
+3. Problem Definition
+- Use visible object IDs and symbols defined by the game rules. Ground task-relevant entities and locations, and encode only evidence-supported initial facts, including category memberships, depicted physical states, and explicitly supplied nonvisual controller initial values in `:init`.
+- Interpret the image using the meanings and conventions stated in the game rules. Derive any additional initial facts only from the depicted state, the explicitly supplied controller initial values, and those rules. Do not infer initial facts from desired outcomes.
+- Encode the instruction's required final conditions in `:goal`, grounded in the correct objects, locations, and states.
 
 Output only in the following format, without explanations or Markdown fences:
 <domain>

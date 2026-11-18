@@ -22,14 +22,15 @@ def get_client(model: str, *, base_url: str | None = None):
     if base_url is not None:
         api_key = "0"
     elif model.startswith(("gemini", "gpt")):
-        api_key = os.getenv("A6_API_KEY")
-        base_url = "https://api.a6api.com/v1"        
+        # api_key = os.getenv("A6_API_KEY")
+        # base_url = "https://api.a6api.com/v1"        
         # api_key = os.getenv("das_API_KEY")
         # base_url = "https://dasuapi.com/v1"
         # api_key = os.getenv("lin_API_KEY")
         # base_url = "https://direct.linkai.pics/v1" 
-        # api_key = os.getenv("sub2api_key")
+        api_key = os.getenv("sub2api_key")
         # base_url="http://127.0.0.1:5003/v1"
+        base_url="http://10.11.13.213:5003/v1"
         
     elif model.startswith(("kimi", "qwen", "glm", "deepseek")):
         api_key = os.getenv("BOYUE_API_KEY")
@@ -155,7 +156,6 @@ def call_gpt_json(
     temperature: float | None = None,
     strict_json: bool = False,
     capture: dict | None = None,
-    max_retries: int | None = None,
 ):
     if type(attempts) is not int or not 1 <= attempts <= 5:
         raise ValueError("attempts must be an integer from 1 to 5")
@@ -174,8 +174,6 @@ def call_gpt_json(
                 call_kwargs["temperature"] = temperature
             if call_capture is not None:
                 call_kwargs["capture"] = call_capture
-            if max_retries is not None:
-                call_kwargs["max_retries"] = max_retries
             if response_format is None:
                 raw_output = call_gpt(
                     model,

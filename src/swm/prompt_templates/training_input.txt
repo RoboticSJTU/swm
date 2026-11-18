@@ -1,18 +1,25 @@
-Generate a task-relevant PDDL domain and problem from the initial scene image, instruction, and robot configuration.
+Given an initial scene image, an instruction, and a robot configuration, generate the causally sufficient, task-relevant symbolic world model as a valid PDDL domain and problem for robotic task planning.
 
 Input
 - Initial scene image: attached
 - Instruction: {instruction}
 - Robot configuration: {robot_configuration}
 
-Modeling guidance
-- Use the simplest causally sufficient model: untyped PDDL with unary functional category predicates and only task-relevant entities, states, and relations.
-- Ground objects and :init in visual evidence, explicit scene descriptions, and the robot configuration. Explicitly assert supported category facts; object declarations do not imply them. Include direct spatial relations, relevant states, and hand occupancy. Keep entity identities and predicate argument roles consistent across both files. Do not assume a prerequisite or result already holds because the task needs it.
-- Work backward from required outcomes and operations to identify prerequisites, including preparation clearly implied by the image but unstated in the instruction. Encode the initial constraints, actions that resolve them, and downstream preconditions that require their results. Do not invent obstacles or unnecessary dependencies.
-- Include all operators needed from :init to :goal, including any necessary release, regrasp, or resource restoration. Each represents one completed manipulation or waiting event with correctly bound participants and necessary category, physical, and resource preconditions. Add only direct results achieved by that event, delete superseded facts, and preserve unaffected facts. Maintain consistent locations, mutually exclusive states, and unit hand capacity across transitions.
-- Put required final conditions in :goal, keeping temporary staging out. Preserve required operations, methods, repetitions, and ordering through causal dependencies while allowing independent actions in any valid order. Verify static parameter bindings against :init, joint reachability of all goal conditions, and that no shortcut bypasses necessary preparation or required operations.
+PDDL requirements
+1. Symbolic representation
+- Use untyped PDDL with unary category predicates. Represent task-relevant entities, states, and relations.
+- Declare every used predicate in `:predicates`, maintaining consistent names, argument counts, and roles across both files.
+2. Operators and state transitions
+- Identify the operations, preparatory steps, and intermediate state transitions needed to accomplish the task from the initial scene and robot configuration. Model genuine causal dependencies.
+- Define each operator as a complete, executable operation event, with correctly bound participants, necessary preconditions and effects. Respect the instruction's required operations, execution methods, and physical constraints.
+- Accurately add and delete facts according to each operation's effects, preserving unaffected facts. Maintain consistent object locations, mutually exclusive states, and hand occupancy across transitions.
+- Ensure the operators enable all required task outcomes from the initial state without unintended shortcuts.
+3. Problem Definition
+- Ground task-relevant entities using the image, instruction, and robot configuration. Encode only evidence-supported initial facts, including category memberships, direct spatial relations, relevant states, and hand occupancy in `:init`.
+- Encode only direct spatial relations, without inferring transitive relations (e.g., an apple on a plate on a table is not directly on the table). Do not infer initial facts from desired outcomes.
+- Encode the instruction's required final conditions in `:goal`, grounded in the correct objects, target areas, and states.
 
-Output only:
+Output only in the following format, without explanations or Markdown fences:
 <domain>
 [complete PDDL domain]
 </domain>

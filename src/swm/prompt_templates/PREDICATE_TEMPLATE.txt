@@ -1,82 +1,70 @@
-Vocabulary and predicate-specific constraints; select needed entries under RULES, not a complete domain to copy.
+; Reuse predicates by meaning; extend only for necessary semantics with fixed argument roles and a defined lifecycle.
+; Omit predicates unused by actions/goals and synonymous facts; prefer direct relations over bookkeeping.
+; Functional categories are static unary init facts, separate from states and relations.
+; Materials have containment relations and their own states; do not duplicate material states on containers. Split portions only for independently tracked locations, composition, or processing results.
 
-Use canonical core state/process-result predicates on the affected object/material or local position (e.g., wipe -> wiped, fold -> folded, wet -> wet); bind tools in action preconditions, not in redundant *_with result variants.
-Add a separate history predicate only for required intermediate events, repetitions, or ordering that final states and causal dependencies cannot enforce (e.g., closed -> open -> closed). Preserve physical effects; never replace or duplicate a sufficient result such as wiped, folded, or stirred with a history marker.
+; Static categories and bindings
+(hand ?h)
+(dispenses ?s ?m) ; s can supply m, independent of flow, containment, or portion availability.
+; Unlimited supplies use dispenses without in(material, source) or artificial available flags.
+(controls ?c ?d) ; c operates device d.
 
-(:predicates
-  ; Static categories and structural/supply/control relations
-  (hand ?h)
-  (part_of ?p ?w) ; Component or spatial position p belongs to whole w.
-  (dispenses ?s ?m) ; Static capability: source s supplies material m; independent of flow, containment, or portion availability.
-  (controls ?c ?d) ; Control c operates device d.
+; Hands and tool grips: each hand has unit holding/pressing capacity.
+(hand_free ?h) ; Neither holding an object nor sustaining a button press.
+(holding ?h ?o)
+(pressing ?h ?b) ; Sustained control occupies h until release; momentary activation does not.
+(grip_free ?t) ; Active one-payload grip is free; required to put the tool down.
+(gripping ?t ?o) ; Acquire: grip_free -> gripping; release reverses this. Hand keeps holding tool.
 
-  ; Hand resources
-  (hand_free ?hf) ; Neither holding an object nor sustaining button control.
-  (holding ?h ?o)
-  (pressing ?h ?b) ; Sustained button control occupies hand h until release.
+; Spatial relations: default to coarse on/in; retain details needed for execution/results.
+; Use relative placement only without a specified concrete spot. Omit incidental layout and transient alignment/tilt/reset internal to an operation.
+; For stacking/nesting, omit stacked_on, surface roots, and propagated region membership.
+(on ?o ?s) ; Direct support without a fine-grained position.
+(in ?o ?c) ; Direct containment/nesting only; no transitive facts or implied closure.
+(inserted ?o ?s) ; Insertion, distinct from support/containment.
+(at ?o ?p) ; Only for instruction-required fine-grained surface positions: declare (position ?p) and static (part_of ?p ?s). Replaces on for that placement.
+; Relative placement supplements
+(under ?o ?r)
+(aligned ?o ?r)
+(beside ?o ?r)
+(left_of ?o ?r)
+(right_of ?o ?r)
+(centered ?o ?r)
 
-  ; Tool grip
-  (grip_free ?gf) ; Active one-payload tool grip is free; required to put the tool down.
-  (gripping ?t ?o) ; Acquiring a payload replaces grip_free with gripping; release reverses it. The hand still holds the tool.
+; Mutually exclusive pairs.
+; Access/locks belong to controlled units, switches to devices, poses to oriented objects.
+; Single-door access belongs to the appliance; independently modeled doors own it without duplication on the whole.
+(open ?o) (closed ?o)
+(is_on ?o) (is_off ?o) ; Device/control enabled/disabled; electrical supply is separate.
+(locked ?o) (unlocked ?o)
+(pressed ?o) (unpressed ?o)
+; Keep poses needed for applicability or explicit results, including static distinctions.
+; Pose pairs apply within their own dimension; negation implies a specific pose only for exhaustive, mutually exclusive alternatives.
+(folded ?o) (unfolded ?o)
+(upright ?o) (upside_down ?o)
+(flat ?o) (vertical ?o)
 
-  ; Location and insertion
-  (on ?o ?s) ; Direct support without a modeled fine-grained position.
-  (in ?c1 ?c2) ; c1 is directly contained in c2, including actual nesting; containment does not imply closure.
-  (inserted ?o ?s) ; Insertion is distinct from support and containment.
-  (at ?o ?p) ; Fine-grained surface position: declare (position ?p) and static (part_of ?p ?s). at replaces on for that placement rather than duplicating it.
+; Contents, upper loads, and opening access
+(empty ?o) ; No direct in contents of any modeled kind.
+(filled ?o) ; Required fill level reached, not just nonempty.
+(clear ?o) ; No hand holds o and no direct upper load exists. Nested stack members count; ordinary contents do not. Maintain on pickup, release, and load changes.
+(uncovered ?o) ; No opening occluder; use only for required opening access, never pure stacking/nesting.
 
-  ; Location supplements: alignment and relative position
-  (under ?o ?r)
-  (aligned ?o ?r)
-  (beside ?o ?r)
-  (left_of ?o ?r)
-  (right_of ?o ?r)
-  (centered ?o ?r)
+; Motion paths: independent of one another and of empty, clear, uncovered.
+(opening_clear ?u) ; No opening-path blockers.
+(closing_clear ?u) ; No closing-path blockers.
+(blocks_opening ?b ?u) ; b obstructs opening unit u.
+(blocks_closing ?b ?u) ; b obstructs closing unit u.
 
-  ; Mutually exclusive state pairs
-  (open ?o)
-  (closed ?c)
-  (is_on ?io) ; Device/control enabled; electrical supply is a separate condition.
-  (is_off ?io) ; Device/control disabled; does not imply disconnection.
-  (locked ?l)
-  (unlocked ?u)
-  (pressed ?p)
-  (unpressed ?u)
-  (folded ?f)
-  (unfolded ?u)
-
-  ; Stack and opening access
-  (clear ?c) ; No direct upper load and no hand directly holding the object. Actual nested stack members count as loads; ordinary contents do not. Use only for necessary stack constraints: strict single-item pickup or stacking directly onto an object, not ordinary multi-object surface placement. Load-preserving operations use their own guards; not clear does not prove a load.
-  (uncovered ?u) ; No object occludes the opening; ordinary contents need not obstruct it. Use only for opening access beyond open/closed and independently of stack access: a held container can be uncovered while clear is false.
-
-  ; Contents and fill level
-  (empty ?e) ; No direct in contents of any modeled kind.
-  (filled ?f) ; Required fill level reached, not merely nonempty.
-
-  ; Directional motion-path clearance
-  (opening_clear ?oc) ; Opening path has no blockers; distinct from empty, clear, and uncovered. Does not imply closing_clear.
-  (closing_clear ?cc) ; Closing path has no blockers; distinct from empty, clear, and uncovered. Does not imply opening_clear.
-  (blocks_opening ?b ?u) ; b obstructs opening unit u.
-  (blocks_closing ?b ?u) ; b obstructs closing unit u.
-
-  ; Pose pairs by dimension
-  (upright ?u)
-  (upside_down ?ud)
-  (flat ?f)
-  (vertical ?v)
-
-  ; Process results
-  (heated ?h) ; Heating differs from boiling.
-  (boiled ?b) ; Completed boiling of this discrete material portion.
-  (rinsed ?r) ; Rinsing, wiping, and cleanliness are distinct.
-  (wiped ?w)
-  (clean ?c)
-  (wet ?w)
-  (stirred ?s)
-
-  ; Material state and composition
-  (hot ?m) ; Currently hot; distinct from having been heated.
-  (cold ?m) ; Currently cold.
-  (warm ?m) ; Task-required warm temperature; not implied by mixing.
-  (mixed ?m) ; Task-required mixture; does not imply temperature or fill level.
-)
+; Process results belong to affected objects/materials or local positions.
+; Bind tools in action preconditions, not redundant *_with result variants.
+; heated/boiled and rinsed/wiped/scrubbed/clean remain distinct.
+(cut ?o)
+(heated ?o)
+(boiled ?m) ; Completed boiling of this discrete material portion.
+(rinsed ?o)
+(wiped ?o)
+(scrubbed ?o)
+(clean ?o)
+(wet ?o)
+(stirred ?o)

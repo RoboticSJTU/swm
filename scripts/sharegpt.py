@@ -1,4 +1,4 @@
-"""Normalize source PDDL rounds and export the same models to ShareGPT."""
+"""Export plan-pruned PDDL to ShareGPT without modifying source rounds."""
 
 import json
 import os
@@ -21,7 +21,7 @@ from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
 EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
-NORMALIZE_PDDL_NAMES = False  # 源 PDDL 与导出 JSON 的 domain/problem 名称统一为 ROBOT_CONFIGURATION
+NORMALIZE_PDDL_NAMES = True  # 仅导出 JSON 的 domain/problem 名称统一为 ROBOT_CONFIGURATION
 
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
@@ -411,17 +411,18 @@ def prepare_round(item):
             review = "[INIT CONFLICT] " + message
             init_review = message
 
+        source_domain = format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n"
+        source_problem = format_problem(problem).strip() + "\n"
+        prepared = (source_domain, source_problem)
         if NORMALIZE_PDDL_NAMES:
             domain[1][1] = problem[1][1] = ROBOT_CONFIGURATION
             for section in problem[2:]:
                 if expression_head(section) == ":domain":
                     section[1] = ROBOT_CONFIGURATION
-        source_domain = format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n"
-        source_problem = format_problem(problem).strip() + "\n"
-        if (source_domain, source_problem) != (domain_raw, problem_raw):
-            for path, text in zip(source_paths[:2], (source_domain, source_problem)):
-                atomic_write(path, text)
-        prepared = (source_domain, source_problem)
+            prepared = (
+                format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n",
+                format_problem(problem).strip() + "\n",
+            )
 
         if ROBOT_CONFIGURATION == "single_arm" and len(hand_states) > 1:
             message = (
