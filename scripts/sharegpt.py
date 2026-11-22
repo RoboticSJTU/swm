@@ -1,4 +1,4 @@
-"""Export plan-pruned PDDL to ShareGPT without modifying source rounds."""
+"""Export plan-pruned PDDL to ShareGPT and save the pruned source domain."""
 
 import json
 import os
@@ -431,6 +431,9 @@ def prepare_round(item):
             )
             hand_review = "[HAND STATE] " + message
             review = f"{review}\n{hand_review}" if review else hand_review
+
+        if source_domain != domain_raw:
+            atomic_write(source_paths[0], source_domain)
 
         return key, prepared, review, init_review, None
     except Exception as error:  # noqa: BLE001 - 单条失败记录后排除，继续处理其余样本

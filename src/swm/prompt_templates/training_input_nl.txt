@@ -1,0 +1,20 @@
+Given an initial scene image, an instruction, and a robot configuration, generate a natural-language action plan to accomplish the task.
+
+Input
+- Initial scene image: attached
+- Instruction: {instruction}
+- Robot configuration: {robot_configuration}
+
+Requirements
+- Identify the task-relevant objects, their initial states, and spatial relationships.
+- Generate a logically ordered sequence of executable actions, including necessary preparations and intermediate steps.
+- Respect causal dependencies, physical constraints, and robot capabilities.
+- Ensure the plan achieves all required task outcomes without unnecessary actions.
+
+Output only valid JSON in the following format, without explanations or Markdown fences:
+{{
+  "plan_sequence": [
+    "<natural language description of action 1>",
+    "..."
+  ]
+}}

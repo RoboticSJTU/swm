@@ -1,0 +1,38 @@
+Now you need to help a robot with configuration {robot_configuration} to plan to finish the given task.
+The given image shows the initial scene.
+Instruction: {instruction}
+
+Here are the available action types for the robot.
+(1) pick up: lift a supported object and hold it; lifting a loose lid also uncovers its container.
+(2) put down: place or drop a held object at a suitable destination and release it; replacing a loose lid also covers its container.
+(3) open: move an attached door, drawer, lid, or flexible opening to allow access without detaching a part.
+(4) close: move an attached door, drawer, lid, or flexible opening to block access without attaching a part.
+(5) rotate: adjust a control setting, reorient a held object, or rock, shake, or swirl a held container.
+(6) wipe: wipe, scrub, or dry a surface with a held tool.
+(7) scoop: take a portion from a source into a held utensil.
+(8) stir: mix contents using a held tool.
+(9) push: move an object along its support by pushing it.
+(10) pull: move an object along its support by pulling it, or extract an item from a dispenser into the hand.
+(11) press: actuate a button, switch, or lever and apply its effect.
+(12) turn on: start a device, cycle, or flow using its control.
+(13) turn off: stop a device, cycle, or flow using its control.
+(14) pour: transfer some or all contents from a held source into a destination, including emptying or draining it.
+(15) fill: collect the required amount from an active supply in a held or supported receiver aligned with the outlet.
+(16) insert: seat a held part in or on its target without threading, including plugging in; release the part once the target supports it.
+(17) remove: detach a fitted part without unthreading it, including unplugging, and take it into the acting hand.
+(18) lock: engage a lock with a seated key or built-in control; leave any key seated until removed.
+(19) unlock: disengage a lock with a seated key or built-in control; leave any key seated until removed.
+(20) screw: thread a held cap or lid onto a stable container and release it once attached.
+(21) unscrew: unthread a cap or lid from a stable container and take it into the acting hand.
+(22) rinse: rinse an item with running water or by agitating clean water inside it; use water to wet a tool when needed.
+(23) sweep: move debris into a receiver using a held sweeping tool.
+(24) cut: cut a supported or held object using a held tool.
+(25) wait: let an already running device cycle finish, including any automatic shutoff.
+(26) grasp: take a grip on an already supported or held object without lifting it.
+(27) release: let go of a grip while the object remains on its existing support or held by the other hand.
+
+Your output should be in JSON format like below (Do NOT output comments):
+{{
+    "reasoning": "analyze the image and output the reasons",
+    "plan_sequence": ["pick up the green block from table", "place the green block on the red block"]
+}}

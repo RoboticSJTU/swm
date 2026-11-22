@@ -758,6 +758,11 @@ def plan_reorder(
             original_final, goal_pos, goal_neg, "Original plan does not satisfy goal."
         )
 
+        if any(action.guarded_negatives for action in plan):
+            # The ordering heuristic builds causal links from conjunctive literals.
+            output_path.write_text(plan_path.read_text(encoding="utf-8"), encoding="utf-8")
+            return
+
         occupancy_model = infer_occupancy_model(init_state, plan)
         preds, pos_links, neg_links = build_predecessors(
             init_state, goal_pos, goal_neg, plan, occupancy_model

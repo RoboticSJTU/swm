@@ -2,6 +2,7 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -18,6 +19,7 @@ from swm.pddl.reorder import plan_reorder, evaluate, parse_sexpr
 fast_downward_path = Path(__file__).parents[3] / "downward" / "fast-downward.py"
 _FAST_DOWNWARD_TIME_LIMIT_SECONDS = 60
 _SOLVER_WALL_TIMEOUT_SECONDS = 60
+_LOGGER = logging.getLogger(__name__)
 
 
 def summarize_solver_error(log: str) -> str:
@@ -151,29 +153,48 @@ def _run_fast_downward(cmd: list[object], cwd: Path, *, timeout: float | None = 
 
 
 def solve_pddl(domain_file, problem_file, *, reorder_plan=True, capture: dict | None = None):
-    """用 A*(LM-cut) 求最小代价计划；不支持的模型或求解失败返回 False。"""
+    """求最小代价计划，在 LM-cut 不支持条件效果时改用 A*(hmax)。"""
 
     domain_file = Path(domain_file).resolve()
     problem_file = Path(problem_file).resolve()
     plan_file = Path(domain_file).parent / "plan.txt"
     error_file = Path(domain_file).parent / "error.log"
 
-    cmd = [
-        sys.executable,
-        fast_downward_path,
-        "--overall-time-limit",
-        f"{_FAST_DOWNWARD_TIME_LIMIT_SECONDS}s",
-        "--plan-file",
-        plan_file,
-        domain_file,
-        problem_file,
-        "--search",
-        "astar(lmcut())",
-    ]
+    prefix = [sys.executable, fast_downward_path, "--overall-time-limit"]
+    task_args = ["--plan-file", plan_file, domain_file, problem_file, "--search"]
+    cmd = [*prefix, f"{_FAST_DOWNWARD_TIME_LIMIT_SECONDS}s", *task_args, "astar(lmcut())"]
     plan_file.unlink(missing_ok=True)
     error_file.unlink(missing_ok=True)
+    if capture is not None:
+        capture.pop("first_attempt", None)
+    first_attempt = None
+    stdout = stderr = ""
+    deadline = time.monotonic() + min(_FAST_DOWNWARD_TIME_LIMIT_SECONDS, _SOLVER_WALL_TIMEOUT_SECONDS)
     try:
-        stdout, stderr = _run_fast_downward(cmd, domain_file.parent)
+        try:
+            stdout, stderr = _run_fast_downward(cmd, domain_file.parent)
+        except subprocess.CalledProcessError as error:
+            first_stdout = _output_text(error.stdout)
+            first_stderr = _output_text(error.stderr)
+            diagnostic = "This configuration does not support conditional effects"
+            if error.returncode != 34 or not (
+                diagnostic in first_stdout or diagnostic in first_stderr
+            ):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            first_attempt = {
+                "command": [str(part) for part in cmd],
+                "exit_status": error.returncode,
+                "stdout": first_stdout,
+                "stderr": first_stderr,
+            }
+            if capture is not None:
+                capture["first_attempt"] = first_attempt
+            plan_file.unlink(missing_ok=True)
+            cmd = [*prefix, f"{math.ceil(remaining)}s", *task_args, "astar(hmax())"]
+            stdout, stderr = _run_fast_downward(cmd, domain_file.parent, timeout=remaining)
         if reorder_plan:
             plan_reorder(domain_file, problem_file, plan_file, plan_file)
         if capture is not None:
@@ -185,12 +206,18 @@ def solve_pddl(domain_file, problem_file, *, reorder_plan=True, capture: dict | 
                     "stderr": stderr,
                 }
             )
+        if first_attempt is not None:
+            _LOGGER.info(
+                "Fast Downward solved %s with hmax after LM-cut rejected conditional effects.\n"
+                "LM-cut stdout:\n%s\nLM-cut stderr:\n%s\nhmax stdout:\n%s\nhmax stderr:\n%s",
+                problem_file, first_attempt["stdout"], first_attempt["stderr"], stdout, stderr,
+            )
         return True
 
     except Exception as e:
         plan_file.unlink(missing_ok=True)
-        stdout = _output_text(getattr(e, "stdout", None))
-        stderr = _output_text(getattr(e, "stderr", None))
+        stdout = _output_text(getattr(e, "stdout", None)) or stdout
+        stderr = _output_text(getattr(e, "stderr", None)) or stderr
         if capture is not None:
             capture.update(
                 {
@@ -200,7 +227,13 @@ def solve_pddl(domain_file, problem_file, *, reorder_plan=True, capture: dict | 
                     "stderr": stderr,
                 }
             )
-        details = [f"{type(e).__name__}: {e}"]
+        details = []
+        if first_attempt is not None:
+            details.append(
+                f"LM-cut attempt (exit {first_attempt['exit_status']})\n"
+                f"stdout:\n{first_attempt['stdout']}\nstderr:\n{first_attempt['stderr']}"
+            )
+        details.append(f"{type(e).__name__}: {e}")
         if stdout:
             details.append(f"stdout:\n{stdout}")
         if stderr:

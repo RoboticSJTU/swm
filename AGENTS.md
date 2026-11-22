@@ -13,4 +13,4 @@
 
 - Default all inspection, modification, and regeneration to the maximum round. Do not model noncausal ordering in task instructions.
 - After editing `domain.pddl` or `problem.pddl`, solve optimally, overwrite the corresponding `plan.txt`, and verify it against the observed scene and current task instruction before considering the change complete. Ignore counterexamples based on suboptimal plans.
-- Use `kf_actions.txt` as supporting evidence; require its exact action order, counts, temporary placements, or complete final state only when explicitly required by the instruction.
+- Use kf_actions.txt only as optional supporting evidence to identify necessary actions and causal constraints. Do not overfit the PDDL to the demonstrated actions. Prioritize logical consistency among the images, task instruction, and PDDL.

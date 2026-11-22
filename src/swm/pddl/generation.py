@@ -132,7 +132,7 @@ def generate_pddl(
 
 # 生成校验：限定当前建模规则，再回放求解器计划。
 _NAME = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
-_REQUIREMENTS = {":strips", ":negative-preconditions", ":equality"}
+_REQUIREMENTS = {":strips", ":negative-preconditions", ":equality", ":adl"}
 _STATIC = {"hand", "part_of", "dispenses", "controls"}
 _MUTEX = (
     ("open", "closed"),
@@ -170,14 +170,25 @@ def _profile(text: str, kind: str) -> list:
         if section[0] != ":action" and section[0] in seen:
             raise ValueError(f"Duplicate {kind} section '{section[0]}'")
         seen.add(section[0])
-    pending = [root]
+    pending = [(root, False)]
     while pending:
-        node = pending.pop()
+        node, action_precondition = pending.pop()
+        if action_precondition and node and node[0] == "forall":
+            # The shared action parser checks the quantified grammar and variable scope.
+            continue
         if node and isinstance(node[0], str) and node[0] in _UNSUPPORTED:
             raise ValueError(
-                f"Forbidden construct '{node[0]}'; use conjunctive atomic conditions and add/delete effects"
+                f"Forbidden construct '{node[0]}'; use literals, scoped universal guards, and add/delete effects"
             )
-        pending.extend(child for child in reversed(node) if isinstance(child, list))
+        for index in range(len(node) - 1, -1, -1):
+            child = node[index]
+            if not isinstance(child, list):
+                continue
+            permits_forall = (
+                kind == "domain" and node[0] == ":action" and index >= 3
+                and node[index - 1] == ":precondition"
+            ) or (action_precondition and node[0] == "and")
+            pending.append((child, permits_forall))
     # Check original spelling: the shared parser intentionally lowercases input.
     for token in re.findall(r";[^\n]*|[^\s();]+", text):
         if token.startswith((";", ":")) or token == "=":
@@ -219,8 +230,10 @@ def validate_generated_pddl(domain_path: Path, problem_path: Path) -> tuple[Doma
     if len(declarations) != 1 or any(not isinstance(item, str) for item in declarations[0][1:]):
         raise ValueError("Declare one :requirements section")
     requirements = set(declarations[0][1:])
-    if requirements - _REQUIREMENTS or ":strips" not in requirements:
-        raise ValueError("Requirements must contain :strips, with only optional :negative-preconditions and :equality")
+    if requirements - _REQUIREMENTS or not requirements & {":strips", ":adl"}:
+        raise ValueError("Requirements must contain :strips or :adl, with optional :negative-preconditions and :equality")
+    allow_negative = bool(requirements & {":negative-preconditions", ":adl"})
+    allow_equality = bool(requirements & {":equality", ":adl"})
     references = [node for node in problem_root[2:] if node[0] == ":domain"]
     if len(references) != 1 or references[0] != [":domain", domain_root[1][1]]:
         raise ValueError("Problem :domain must match the domain name")
@@ -245,14 +258,16 @@ def validate_generated_pddl(domain_path: Path, problem_path: Path) -> tuple[Doma
         for literal in action.add_eff | action.del_eff:
             if literal[0] in _STATIC or literal[0] == "=":
                 raise ValueError(f"{action.name}: cannot modify static predicate '{literal[0]}'")
-        if action.pre_neg and ":negative-preconditions" not in requirements:
+        if action.quantified_preconditions and ":adl" not in requirements:
+            raise ValueError(f"{action.name}: universal preconditions require :adl")
+        if action.pre_neg and not allow_negative:
             raise ValueError(f"{action.name}: negative preconditions require :negative-preconditions")
-        if any(literal[0] == "=" for literal in action.pre_pos | action.pre_neg) and ":equality" not in requirements:
+        if any(literal[0] == "=" for literal in action.pre_pos | action.pre_neg) and not allow_equality:
             raise ValueError(f"{action.name}: equality requires :equality")
     problem_literals = problem.init_state | problem.init_negative | problem.goal_positive | problem.goal_negative
     if any(literal[0] == "=" for literal in problem_literals):
         raise ValueError("Use equality only in action preconditions, not init or goal")
-    if problem.goal_negative and ":negative-preconditions" not in requirements:
+    if problem.goal_negative and not allow_negative:
         raise ValueError("Negative goals require :negative-preconditions")
     _state_consistent(problem.init_state, "init")
     _consistent(problem.goal_positive, problem.goal_negative, "goal")

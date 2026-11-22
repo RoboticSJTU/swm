@@ -1,9 +1,3 @@
-These are scenario-specific examples, not a complete domain. Select and adapt them using PREDICATE_TEMPLATE and RULES; examples omit merge-generated numeric suffixes and select one causal variant per action. When combining examples, maintain every tracked predicate in all relevant actions. An object's category alone does not require clear. Once clear is tracked for an object, maintain it in every relevant pickup, release, handoff, and upper-load change, including releases onto ordinary supports. Keep it false while any hand directly holds the object.
-
-The strict stack examples below assume each base has at most one direct upper load and remains unheld while loaded. Establish these invariants from the initial state and all relevant actions before using their unconditional clear-restoration effects. Initialize stacked_on for every member of a surface stack and maintain it in all relevant placements, pickups, and support moves; similarly maintain in for every member of a container stack. For multiple loads or supports, update the actual affected objects and restore clear only after the last upper load is removed and the object is unheld. Use uncovered separately when a task needs container-opening access, including access to a held container.
-
-Faucet examples that retain water assume one empty receiver and one initially undelivered portion, with no refill in that scenario. Repeated fills or multiple receivers require guards derived from the actual portion lifecycle.
-
 ## 1. Spatial Change.
 
 ### (1) Source only.
@@ -29,53 +23,25 @@ Faucet examples that retain water assume one empty receiver and one initially un
 :effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (in ?b1 ?b2)))
 )
 
-; Pick up an unloaded block directly from a table in a domain tracking surface stacks.
+; Pick up an unloaded block directly from table ?t; clear is tracked for this block.
 (:action pick_block_from_table
 :parameters (?h ?b ?t)
-:precondition (and (hand ?h) (block ?b) (table ?t) (hand_free ?h) (clear ?b) (on ?b ?t) (stacked_on ?b ?t))
-:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (clear ?b)) (not (on ?b ?t)) (not (stacked_on ?b ?t)))
+:precondition (and (hand ?h) (block ?b) (table ?t) (hand_free ?h) (clear ?b) (on ?b ?t))
+:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (clear ?b)) (not (on ?b ?t)))
 )
 
-; Remove the top block from a stack rooted on table ?t.
-(:action unstack_block_from_table
-:parameters (?h ?b1 ?b2 ?t)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (table ?t) (hand_free ?h) (clear ?b1) (on ?b1 ?b2) (stacked_on ?b1 ?t) (stacked_on ?b2 ?t) (not (= ?b1 ?b2)))
-:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)) (not (stacked_on ?b1 ?t)))
-)
-
-; Remove the top block from a stack inside an open drawer.
-(:action unstack_block_from_drawer
-:parameters (?h ?b1 ?b2 ?d)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (drawer ?d) (hand_free ?h) (open ?d) (clear ?b1) (on ?b1 ?b2) (in ?b1 ?d) (in ?b2 ?d) (not (= ?b1 ?b2)))
-:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)) (not (in ?b1 ?d)))
-)
-
-; Remove the top block from a stack inside an upright bowl.
-(:action unstack_block_from_upright_bowl
-:parameters (?h ?b1 ?b2 ?b)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (bowl ?b) (hand_free ?h) (upright ?b) (clear ?b1) (on ?b1 ?b2) (in ?b1 ?b) (in ?b2 ?b) (not (= ?b1 ?b2)))
-:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)) (not (in ?b1 ?b)))
-)
-
-; Remove the top block from an upright cup inside an open drawer.
-(:action unstack_block_from_upright_cup_in_drawer
-:parameters (?h ?b1 ?b2 ?c ?d)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (cup ?c) (drawer ?d) (hand_free ?h) (upright ?c) (open ?d) (in ?c ?d) (clear ?b1) (on ?b1 ?b2) (in ?b1 ?c) (in ?b2 ?c) (not (= ?b1 ?b2)))
-:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (on ?b1 ?b2)) (not (in ?b1 ?c)))
-)
-
-; Remove a bowl directly from a table in a domain tracking surface stacks.
+; Pick up an unloaded bowl directly from table ?t, preserving its pose and ordinary contents.
 (:action pick_bowl_from_table
 :parameters (?h ?b ?t)
-:precondition (and (hand ?h) (bowl ?b) (table ?t) (hand_free ?h) (clear ?b) (on ?b ?t) (stacked_on ?b ?t))
-:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (clear ?b)) (not (on ?b ?t)) (not (stacked_on ?b ?t)))
+:precondition (and (hand ?h) (bowl ?b) (table ?t) (hand_free ?h) (clear ?b) (on ?b ?t))
+:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (clear ?b)) (not (on ?b ?t)))
 )
 
-; Remove the top bowl from a nested stack rooted on table ?t.
-(:action unstack_bowl_from_table
-:parameters (?h ?b1 ?b2 ?t)
-:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (table ?t) (hand_free ?h) (clear ?b1) (in ?b1 ?b2) (stacked_on ?b1 ?t) (stacked_on ?b2 ?t) (not (= ?b1 ?b2)))
-:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (in ?b1 ?b2)) (not (stacked_on ?b1 ?t)))
+; Pick up upright bowl ?b1 directly nested in unheld upright bowl ?b2.
+(:action pick_bowl_upright_from_upright_bowl
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (hand_free ?h) (upright ?b1) (upright ?b2) (clear ?b1) (in ?b1 ?b2) (not (= ?b1 ?b2)))
+:effect (and (not (hand_free ?h)) (holding ?h ?b1) (not (clear ?b1)) (clear ?b2) (not (in ?b1 ?b2)))
 )
 
 ; Remove towel ?t, the sole upper load on unheld lid ?l; only the lid tracks clear here.
@@ -106,18 +72,18 @@ Faucet examples that retain water assume one empty receiver and one initially un
 :effect (and (not (hand_free ?h)) (holding ?h ?tb) (not (blocks_opening ?tb ?d)) (opening_clear ?d) (not (on ?tb ?f)))
 )
 
-; Ordinary non-stack bowl: pick up bowl ?b from sink ?s with hand ?h.
+; Pick up an unloaded bowl from sink ?s, preserving ordinary contents; this pickup scenario tracks no faucet alignment.
 (:action pick_bowl_from_sink
 :parameters (?h ?b ?s)
-:precondition (and (hand ?h) (bowl ?b) (sink ?s) (hand_free ?h) (in ?b ?s))
-:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (in ?b ?s)))
+:precondition (and (hand ?h) (bowl ?b) (sink ?s) (hand_free ?h) (clear ?b) (in ?b ?s))
+:effect (and (not (hand_free ?h)) (holding ?h ?b) (not (clear ?b)) (not (in ?b ?s)))
 )
 
-; Fill the sole empty kettle ?k with fresh portion ?w from unlimited faucet ?f, preserving hand ?h's hold.
+; Fill the sole empty kettle ?k to its required level with fresh portion ?w from unlimited faucet ?f, preserving hand ?h's hold.
 (:action fill_kettle_from_faucet
 :parameters (?h ?k ?f ?w)
 :precondition (and (hand ?h) (kettle ?k) (faucet ?f) (water ?w) (holding ?h ?k) (open ?k) (empty ?k) (is_on ?f) (dispenses ?f ?w))
-:effect (and (not (empty ?k)) (in ?w ?k))
+:effect (and (not (empty ?k)) (filled ?k) (in ?w ?k))
 )
 
 ; Scoop soup ?sp from pot ?p with spoon ?s held by hand ?h.
@@ -150,56 +116,21 @@ Faucet examples that retain water assume one empty receiver and one initially un
 
 ### (2) Target only.
 
-; Place a block directly on a table, establishing the root for a surface stack.
-(:action place_block_on_table
-:parameters (?h ?b ?t)
-:precondition (and (hand ?h) (block ?b) (table ?t) (holding ?h ?b))
-:effect (and (not (holding ?h ?b)) (hand_free ?h) (on ?b ?t) (stacked_on ?b ?t) (clear ?b))
-)
-
-; Stack a block on a block in a stack rooted on table ?t.
-(:action stack_block_on_table
-:parameters (?h ?b1 ?b2 ?t)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (table ?t) (holding ?h ?b1) (clear ?b2) (stacked_on ?b2 ?t) (not (= ?b1 ?b2)))
-:effect (and (not (holding ?h ?b1)) (hand_free ?h) (on ?b1 ?b2) (stacked_on ?b1 ?t) (not (clear ?b2)) (clear ?b1))
-)
-
-; Stack a block on a block inside an open drawer.
-(:action stack_block_in_drawer
-:parameters (?h ?b1 ?b2 ?d)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (drawer ?d) (holding ?h ?b1) (open ?d) (clear ?b2) (in ?b2 ?d) (not (= ?b1 ?b2)))
-:effect (and (not (holding ?h ?b1)) (hand_free ?h) (on ?b1 ?b2) (in ?b1 ?d) (not (clear ?b2)) (clear ?b1))
-)
-
-; Stack a block on a block inside an upright bowl.
-(:action stack_block_in_upright_bowl
-:parameters (?h ?b1 ?b2 ?b)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (bowl ?b) (holding ?h ?b1) (upright ?b) (clear ?b2) (in ?b2 ?b) (not (= ?b1 ?b2)))
-:effect (and (not (holding ?h ?b1)) (hand_free ?h) (on ?b1 ?b2) (in ?b1 ?b) (not (clear ?b2)) (clear ?b1))
-)
-
-; Stack a block inside an upright cup in an open drawer.
-(:action stack_block_in_upright_cup_in_drawer
-:parameters (?h ?b1 ?b2 ?c ?d)
-:precondition (and (hand ?h) (block ?b1) (block ?b2) (cup ?c) (drawer ?d) (holding ?h ?b1) (upright ?c) (open ?d) (in ?c ?d) (clear ?b2) (in ?b2 ?c) (not (= ?b1 ?b2)))
-:effect (and (not (holding ?h ?b1)) (hand_free ?h) (on ?b1 ?b2) (in ?b1 ?c) (not (clear ?b2)) (clear ?b1))
-)
-
-; Place a bowl directly on a table, establishing the root for a surface stack.
+; Place an unloaded bowl directly on table ?t and restore its clear, preserving pose and ordinary contents.
 (:action place_bowl_on_table
 :parameters (?h ?b ?t)
 :precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b))
-:effect (and (not (holding ?h ?b)) (hand_free ?h) (on ?b ?t) (stacked_on ?b ?t) (clear ?b))
+:effect (and (not (holding ?h ?b)) (hand_free ?h) (on ?b ?t) (clear ?b))
 )
 
-; Nest a bowl in another bowl in a stack rooted on table ?t.
-(:action stack_bowl_on_table
-:parameters (?h ?b1 ?b2 ?t)
-:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (table ?t) (holding ?h ?b1) (clear ?b2) (stacked_on ?b2 ?t) (not (= ?b1 ?b2)))
-:effect (and (not (holding ?h ?b1)) (hand_free ?h) (in ?b1 ?b2) (stacked_on ?b1 ?t) (not (clear ?b2)) (clear ?b1))
+; Place unloaded upright bowl ?b1 directly inside clear upright bowl ?b2.
+(:action place_bowl_upright_in_upright_bowl
+:parameters (?h ?b1 ?b2)
+:precondition (and (hand ?h) (bowl ?b1) (bowl ?b2) (holding ?h ?b1) (upright ?b1) (upright ?b2) (clear ?b2) (not (= ?b1 ?b2)))
+:effect (and (not (holding ?h ?b1)) (hand_free ?h) (in ?b1 ?b2) (not (clear ?b2)) (clear ?b1))
 )
 
-; A bowl tracked for strict stacking is released onto an ordinary flat plate. Restore only the bowl's clear; the plate has no stack role here. If surface stack membership is tracked, adapt this action to establish the plate's actual surface root for the bowl.
+; Place an unloaded bowl on an ordinary flat plate. Restore only the bowl's clear; the plate has no stack role here.
 (:action place_bowl_on_flat_plate
 :parameters (?h ?b ?p)
 :precondition (and (hand ?h) (bowl ?b) (plate ?p) (holding ?h ?b) (flat ?p))
@@ -220,11 +151,11 @@ Faucet examples that retain water assume one empty receiver and one initially un
 :effect (and (not (holding ?h ?p)) (hand_free ?h) (not (vertical ?p)) (flat ?p) (on ?p ?c))
 )
 
-; Ordinary non-stack bowl: place upside-down bowl ?b upright on table ?t; preserve other pose dimensions.
+; Place unloaded upside-down bowl ?b upright on table ?t and restore clear; preserve other pose dimensions.
 (:action place_bowl_upright_on_table
 :parameters (?h ?b ?t)
 :precondition (and (hand ?h) (bowl ?b) (table ?t) (holding ?h ?b) (upside_down ?b))
-:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (upright ?b) (on ?b ?t))
+:effect (and (not (holding ?h ?b)) (hand_free ?h) (not (upside_down ?b)) (upright ?b) (on ?b ?t) (clear ?b))
 )
 
 ; Screw cap ?cp onto bottle ?b to close the bottle with hand ?h.
@@ -364,8 +295,8 @@ Faucet examples that retain water assume one empty receiver and one initially un
 :effect (and (rinsed ?b))
 )
 
-; Soak sponge ?s under running faucet ?f while holding it with hand ?h.
-(:action soak_sponge_under_faucet
+; Wet sponge ?s from running faucet ?f while holding it with hand ?h; positioning under the stream is internal to this action.
+(:action wet_sponge_from_faucet
 :parameters (?h ?s ?f)
 :precondition (and (hand ?h) (sponge ?s) (faucet ?f) (holding ?h ?s) (is_on ?f))
 :effect (and (wet ?s))

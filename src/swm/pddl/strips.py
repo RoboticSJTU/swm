@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import product
 from pathlib import Path
 
 Literal = tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class QuantifiedPrecondition:
+    variables: tuple[str, ...]
+    guard: tuple
+    forbidden: Literal
 
 
 @dataclass
@@ -15,6 +23,7 @@ class ActionSchema:
     pre_neg: set[Literal]
     add_eff: set[Literal]
     del_eff: set[Literal]
+    quantified_preconditions: tuple[QuantifiedPrecondition, ...] = ()
 
 
 class DomainSchemas(dict[str, ActionSchema]):
@@ -47,6 +56,7 @@ class GroundAction:
     del_eff: set[Literal]
     equality_preconditions: set[Literal] = field(default_factory=set)
     inequality_preconditions: set[Literal] = field(default_factory=set)
+    guarded_negatives: tuple[tuple[tuple, Literal], ...] = ()
 
     def to_line(self) -> str:
         return f"({self.name} {' '.join(self.args)})"
@@ -87,6 +97,41 @@ def parse_sexpr(text: str, context: str = "PDDL", *, lowercase: bool = True):
     if index != len(tokens):
         raise ValueError(f"Unparsed tokens remain in {context}")
     return root
+
+
+def validate_untyped_pddl(text: str) -> None:
+    """Reject typed declarations without rewriting the source model."""
+    def visit(node):
+        if not isinstance(node, list) or not node:
+            return
+        head = node[0]
+        if not isinstance(head, str):
+            raise ValueError("PDDL expression must start with a symbol")
+        if head == ":types" or (head == ":requirements" and ":typing" in node):
+            raise ValueError("Use unary category predicates instead of :types/:typing")
+        declarations = []
+        if head in {":parameters", ":objects", ":constants"}:
+            declarations = [node[1:]]
+        elif head in {"forall", "exists"}:
+            if len(node) != 3 or not isinstance(node[1], list):
+                raise ValueError("Malformed quantified expression")
+            declarations = [node[1]]
+        elif head == ":predicates":
+            declarations = [item[1:] for item in node[1:] if isinstance(item, list)]
+        elif head == ":action" and ":parameters" in node:
+            index = node.index(":parameters") + 1
+            if index >= len(node) or not isinstance(node[index], list):
+                raise ValueError("Action parameters must be a list")
+            declarations = [node[index]]
+        if any("-" in declaration for declaration in declarations):
+            raise ValueError("Typed declarations are not allowed; use unary category predicates")
+        for child in node:
+            visit(child)
+
+    root = parse_sexpr(text)
+    if not isinstance(root, list) or root[:1] != ["define"]:
+        raise ValueError("Expected a complete PDDL domain or problem")
+    visit(root)
 
 
 def format_pddl(text: str) -> str:
@@ -223,6 +268,64 @@ def _validate_literals(
                 raise ValueError(f"{context}: undeclared argument '{argument}'")
 
 
+def _read_guard(node, predicate_arities, scope, context) -> tuple:
+    if not isinstance(node, list) or not node or not isinstance(node[0], str):
+        raise ValueError(f"{context}: malformed quantified guard")
+    head = node[0]
+    if head in {"and", "or", "not"}:
+        if head == "not" and len(node) != 2:
+            raise ValueError(f"{context}: malformed negation in quantified guard")
+        return (head, *(_read_guard(child, predicate_arities, scope, context) for child in node[1:]))
+    if head in {"forall", "exists", "imply", "when"}:
+        raise NotImplementedError(f"{context}: unsupported quantified guard '{head}'")
+    if any(not isinstance(argument, str) for argument in node[1:]):
+        raise ValueError(f"{context}: expected atomic predicate in quantified guard")
+    literal = tuple(node)
+    _validate_literals({literal}, predicate_arities, scope, context)
+    return literal
+
+
+def _read_preconditions(expression, predicate_arities, params, context):
+    positive = set()
+    negative = set()
+    quantified = []
+
+    def collect(node):
+        if isinstance(node, list) and node[:1] == ["and"]:
+            for child in node[1:]:
+                collect(child)
+            return
+        if isinstance(node, list) and node[:1] == ["forall"]:
+            if len(node) != 3 or not isinstance(node[1], list) or not node[1]:
+                raise ValueError(f"{context}: expected universally quantified variables and a body")
+            variables = tuple(parse_symbols(node[1], variables=True))
+            scope = params | set(variables)
+            body = node[2]
+            guard = ("and",)
+            if isinstance(body, list) and body[:1] == ["imply"]:
+                if len(body) != 3:
+                    raise ValueError(f"{context}: malformed implication in quantified precondition")
+                guard = _read_guard(body[1], predicate_arities, scope, context)
+                body = body[2]
+            if (
+                not isinstance(body, list) or body[:1] != ["not"] or len(body) != 2
+                or not isinstance(body[1], list) or not body[1]
+                or any(not isinstance(token, str) for token in body[1])
+                or body[1][0] in {"and", "or", "not", "forall", "exists", "imply", "when", "="}
+            ):
+                raise NotImplementedError(f"{context}: quantified preconditions require a negated predicate")
+            forbidden = tuple(body[1])
+            _validate_literals({forbidden}, predicate_arities, scope, context)
+            quantified.append(QuantifiedPrecondition(variables, guard, forbidden))
+            return
+        pos, neg = read_literals(node)
+        positive.update(pos)
+        negative.update(neg)
+
+    collect(expression)
+    return positive, negative, tuple(quantified)
+
+
 def parse_domain(path: Path) -> DomainSchemas:
     text = path.read_text(encoding="utf-8")
     root = parse_sexpr(text, str(path))
@@ -265,13 +368,16 @@ def parse_domain(path: Path) -> DomainSchemas:
             raise ValueError(f"{path}: invalid parameters in action '{item[1]}'")
         params = parse_symbols(fields[":parameters"], variables=True)
 
-        pre_pos, pre_neg = read_literals(fields[":precondition"])
+        context = f"{path}: action {item[1]}"
+        pre_pos, pre_neg, quantified = _read_preconditions(
+            fields[":precondition"], predicate_arities, set(params), context,
+        )
         add_eff, del_eff = read_literals(fields[":effect"])
         _validate_literals(
             pre_pos | pre_neg | add_eff | del_eff,
             predicate_arities,
             set(params),
-            f"{path}: action {item[1]}",
+            context,
         )
         if (add_eff & del_eff):
             raise ValueError(f"{path}: action '{item[1]}' adds and deletes one literal")
@@ -282,6 +388,7 @@ def parse_domain(path: Path) -> DomainSchemas:
             pre_neg,
             add_eff,
             del_eff,
+            quantified,
         )
     return schemas
 
@@ -367,6 +474,7 @@ def ground_plan(
     objects: frozenset[str] | None = None,
 ) -> list[GroundAction]:
     plan = []
+    universe = sorted(objects or ())
     for name, args in raw_plan:
         if name not in schemas:
             raise KeyError(f"Action '{name}' not found in domain")
@@ -396,6 +504,16 @@ def ground_plan(
         if equality_effects or inequality_effects:
             raise ValueError(f"Equality cannot be used as an effect of {name}")
 
+        guarded_negatives = []
+        for condition in schema.quantified_preconditions:
+            if objects is None:
+                raise ValueError(f"Action {name} requires the problem objects for quantified preconditions")
+            for binding in product(universe, repeat=len(condition.variables)):
+                local = mapping | dict(zip(condition.variables, binding))
+                guard = _ground_guard(condition.guard, local)
+                forbidden = tuple(local.get(token, token) for token in condition.forbidden)
+                guarded_negatives.append((guard, forbidden))
+
         plan.append(
             GroundAction(
                 name,
@@ -406,9 +524,30 @@ def ground_plan(
                 del_effects - add_effects,
                 equality_preconditions,
                 inequality_preconditions,
+                tuple(guarded_negatives),
             )
         )
     return plan
+
+
+def _ground_guard(guard: tuple, bindings: dict[str, str]) -> tuple:
+    head, *terms = guard
+    if head in {"and", "or", "not"}:
+        return (head, *(_ground_guard(term, bindings) for term in terms))
+    return (head, *(bindings.get(term, term) for term in terms))
+
+
+def _guard_satisfied(guard: tuple, state: set[Literal]) -> bool:
+    head = guard[0]
+    if head == "and":
+        return all(_guard_satisfied(term, state) for term in guard[1:])
+    if head == "or":
+        return any(_guard_satisfied(term, state) for term in guard[1:])
+    if head == "not":
+        return not _guard_satisfied(guard[1], state)
+    if head == "=":
+        return guard[1] == guard[2]
+    return guard in state
 
 
 def split_equalities(literals: set[Literal]) -> tuple[set[Literal], set[Literal]]:
@@ -432,7 +571,11 @@ def apply_action(state: set[Literal], action: GroundAction) -> set[Literal]:
         for literal in action.inequality_preconditions
         if literal[1] == literal[2]
     }
-    if missing or violated or unequal or equal:
+    forbidden = {
+        literal for guard, literal in action.guarded_negatives
+        if literal in state and _guard_satisfied(guard, state)
+    }
+    if missing or violated or unequal or equal or forbidden:
         message = [f"Action not applicable: {action.to_line()}"]
         if missing:
             message.append(f"Missing positive preconditions: {sorted(missing)}")
@@ -442,6 +585,8 @@ def apply_action(state: set[Literal], action: GroundAction) -> set[Literal]:
             message.append(f"Unsatisfied equality preconditions: {sorted(unequal)}")
         if equal:
             message.append(f"Violated inequality preconditions: {sorted(equal)}")
+        if forbidden:
+            message.append(f"Violated quantified negative preconditions: {sorted(forbidden)}")
         raise ValueError("\n".join(message))
 
     next_state = state - action.del_eff
