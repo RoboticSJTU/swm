@@ -7,8 +7,11 @@ import shutil
 import sys
 import tempfile
 import traceback
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
+
+from openai import APIConnectionError, APIStatusError
 
 root_dir = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root_dir / "src"))
@@ -24,11 +27,13 @@ from swm.pddl.validate import validate_plan_feasibility
 
 ACTIVE_BASELINE = "vlm_nl"
 generation_max_workers = 200
-rule_postprocess = False  # 设为 True 对求解失败的 PDDL 尝试静态修复
+rule_postprocess = False     # True：PDDL 求解失败后尝试静态修复
+pddl_vote = False            # True：每个任务采样 5 份 PDDL 并按计划投票
+PDDL_VOTE_SAMPLES = 5
 
 BASELINES = {
-    "9b_1124": dict(
-        model="9B_1124", reasoning_effort=None, base_url="http://127.0.0.1:8001/v1", mode="pddl",
+    "9B_sft": dict(
+        model="9B_1126", reasoning_effort=None, base_url="http://127.0.0.1:8001/v1", mode="pddl",
         prompt_path=root_dir / "src/swm/prompt_templates/training_input.txt",
     ),
     "vlm_nl": dict(
@@ -36,7 +41,7 @@ BASELINES = {
         prompt_path=root_dir / "src/swm/prompt_templates/vlm_nl.txt",
     ),
     "vlm_pddl": dict(
-        model="gpt-6-sol", reasoning_effort=None, base_url=None, mode="pddl",
+        model="gpt-6-sol", reasoning_effort="none", base_url=None, mode="pddl",
         prompt_path=root_dir / "src/swm/prompt_templates/vlm_pddl.txt",
     ),
 
@@ -46,16 +51,19 @@ eval_model = baseline["model"]
 eval_mode = baseline["mode"]
 prompt_path = baseline["prompt_path"]
 eval_root = root_dir / "eval_results" / eval_model / prompt_path.stem
+if pddl_vote and eval_mode != "nl":
+    eval_root = eval_root.with_name(f"{eval_root.name}_vote{PDDL_VOTE_SAMPLES}")
 
 judge_model = "deepseek/deepseek-flash"
-judge_reasoning_effort = "xhigh"
+judge_reasoning_effort = "high"
 
-# datasets = {
-#     "swm_v3/singe_arm": "single_arm",
-# }
+# judge_model = "Qwen3.8-27B"
+# judge_reasoning_effort = None
+
 datasets = {
     "anydomain/singe_arm": "single_arm",
     "anydomain/dual_arm": "dual_arm",
+    "unidomain/unidomain": "single_arm",
 }
 enable_attribution = False  # 设为 True 启用失败归因
 attribution_model = judge_model
@@ -164,11 +172,70 @@ def load_tasks() -> list[dict]:
     return tasks
 
 
+def parse_generated_pddl(task: dict, output: str) -> tuple[str, str]:
+    if eval_mode == "problem_only":
+        match = re.search(r"<problem>\s*(.*?)\s*</problem>", output, flags=re.S)
+        if match is None or not (problem := strip_code_block(match[1])):
+            raise ValueError("expected a nonempty <problem> block")
+        return task["gt_domain"], problem
+    return parse_pddl_output(output)
+
+
+def solve_generated_pddl(task: dict, domain: str, problem: str) -> tuple[bool, str]:
+    save_dir = task["save_dir"]
+    save_dir.mkdir(parents=True, exist_ok=True)
+    domain_file, problem_file = (save_dir / name for name in PDDL_FILES)
+    domain_file.write_text(domain, encoding="utf-8")
+    problem_file.write_text(problem, encoding="utf-8")
+    (save_dir / "postprocess.json").unlink(missing_ok=True)
+    solved = solve_pddl(domain_file, problem_file, reorder_plan=False)
+    if solved and generation_complete(task):
+        return True, "pddl"
+    if postprocess_enabled() and repair_saved_task(task):
+        return True, "pddl_repaired"
+    return False, "missing_pddl_plan" if solved else "pddl_unsolvable"
+
+
+def vote_pddl(task: dict, outputs: list[str]) -> tuple[bool, str]:
+    if len(outputs) != PDDL_VOTE_SAMPLES:
+        raise ValueError(f"Expected {PDDL_VOTE_SAMPLES} PDDL samples, got {len(outputs)}")
+    temp_root = root_dir / "temp"
+    temp_root.mkdir(exist_ok=True)
+    votes = Counter()
+    candidates = {}
+    with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+        for index, output in enumerate(outputs):
+            try:
+                domain, problem = parse_generated_pddl(task, output or "")
+            except (ValueError, KeyError, TypeError):
+                continue
+            candidate_dir = Path(directory) / str(index)
+            ok, status = solve_generated_pddl({**task, "save_dir": candidate_dir}, domain, problem)
+            plan = (candidate_dir / "plan.txt").read_bytes() if ok else None
+            candidates.setdefault(plan, (candidate_dir, ok, status))
+            if plan is not None:
+                votes[plan] += 1
+
+        if not candidates:
+            raise ValueError("No parseable PDDL samples")
+        selected = max(votes, key=votes.get) if votes else None
+        candidate_dir, ok, status = candidates[selected]
+        save_dir = task["save_dir"]
+        (save_dir / "plan.txt").unlink(missing_ok=True)
+        for name in (*PDDL_FILES, "postprocess.json", "error.log", "plan.txt"):
+            source, target = candidate_dir / name, save_dir / name
+            if source.is_file():
+                shutil.move(source, target)
+            else:
+                target.unlink(missing_ok=True)
+        return ok, status
+
+
 def generate_one(task: dict):
     image_path = task["image"]
     save_dir = task["save_dir"]
     plan_file = save_dir / "plan.txt"
-    api_metrics = {"calls": 0, "seconds": 0.0}
+    generation_api = None
     try:
         if generation_complete(task):
             return task, True, "cached"
@@ -183,31 +250,40 @@ def generate_one(task: dict):
             robot_configuration=task["robot_configuration"],
             domain=f"\n{task['gt_domain']}\n" if eval_mode == "problem_only" else "",
         )
-        for retries_left in range(1000, -1, -1):
-            output = call_gpt(
-                eval_model, prompt, [image_path],
-                base_url=baseline["base_url"], reasoning_effort=baseline["reasoning_effort"],
-                api_metrics=api_metrics,
-            )
+        voting = pddl_vote and eval_mode != "nl"
+        generation_api = {"calls": 0, "seconds": 0.0}
+        for retries_left in reversed(range(10)):
+            attempt = {"calls": 0, "seconds": 0.0}
             try:
-                if eval_mode == "nl":
-                    data = json.loads(strip_code_block(output))
+                output = call_gpt(
+                    eval_model, image_paths=[image_path], prompt=prompt,
+                    base_url=baseline["base_url"], reasoning_effort=baseline["reasoning_effort"],
+                    max_retries=0, api_metrics=attempt, n=PDDL_VOTE_SAMPLES if voting else 1,
+                )
+                if voting:
+                    if not output or not any(sample and sample.strip() for sample in output):
+                        raise ValueError("Empty VLM response")
+                elif eval_mode == "nl":
+                    data = json.loads(strip_code_block(output or ""))
                     steps = data["plan_sequence"]
                     if not isinstance(steps, list) or not steps or any(
                         not isinstance(step, str) or not step.strip() for step in steps
                     ):
                         raise ValueError("plan_sequence must be a nonempty list of non-blank strings")
-                elif eval_mode == "problem_only":
-                    domain = task["gt_domain"]
-                    match = re.search(r"<problem>\s*(.*?)\s*</problem>", output, flags=re.S)
-                    if match is None or not (problem := strip_code_block(match[1])):
-                        raise ValueError("expected a nonempty <problem> block")
                 else:
-                    domain, problem = parse_pddl_output(output)
-            except (ValueError, KeyError, TypeError):
+                    domain, problem = parse_generated_pddl(task, output or "")
+            except APIStatusError as error:
+                if not retries_left or error.status_code not in (408, 502, 503, 504):
+                    raise
+            except (APIConnectionError, AttributeError, IndexError, KeyError, TypeError, ValueError):
                 if not retries_left:
                     raise
             else:
+                if voting:
+                    ok, status = vote_pddl(task, output)
+                    generation_api = attempt
+                    return task, ok, status
+                generation_api = attempt
                 break
 
         if eval_mode == "nl":
@@ -217,28 +293,19 @@ def generate_one(task: dict):
             (save_dir / "error.log").unlink(missing_ok=True)
             return task, True, "nl"
 
-        domain_file, problem_file = (save_dir / name for name in PDDL_FILES)
-        domain_file.write_text(domain, encoding="utf-8")
-        problem_file.write_text(problem, encoding="utf-8")
-        if not solve_pddl(domain_file, problem_file, reorder_plan=False):
-            return task, False, "pddl_unsolvable"
-        if not plan_file.exists() or not plan_file.read_text(encoding="utf-8").strip():
-            return task, False, "missing_pddl_plan"
-        return task, True, "pddl"
+        ok, status = solve_generated_pddl(task, domain, problem)
+        return task, ok, status
 
     except Exception as e:
         save_dir.mkdir(parents=True, exist_ok=True)
         (save_dir / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
         return task, False, str(e)
     finally:
-        if api_metrics["calls"]:
+        if generation_api is not None:
             judge_file = save_dir / "judge.json"
             record = read_judge(judge_file)
-            previous = record.get("generation_api", {})
-            record["generation_api"] = {
-                "calls": previous.get("calls", 0) + api_metrics["calls"],
-                "seconds": round(previous.get("seconds", 0.0) + api_metrics["seconds"], 6),
-            }
+            generation_api["seconds"] = round(generation_api["seconds"], 6)
+            record["generation_api"] = generation_api
             write_judge(judge_file, record)
 
 
@@ -305,7 +372,7 @@ def write_summary(all_tasks: list[dict]) -> Path:
             "solved": generation_complete(task), "passed": load_cached_status(task)[1],
             "attribution": task.get("attribution") if pddl else None,
         })
-    report_root = eval_root / "postprocessed" if postprocess_enabled() else eval_root
+    report_root = eval_root
     report_root.mkdir(parents=True, exist_ok=True)
     dataset_tag = "_".join(datasets).replace("/", "_")
     report_path = report_root / f"summary_{dataset_tag}.md"
@@ -321,47 +388,34 @@ def write_summary(all_tasks: list[dict]) -> Path:
 
 
 def repair_saved_task(task: dict) -> bool:
-    """Use a separately saved, solved repair when available."""
-    source_dir = task["save_dir"]
+    save_dir = task["save_dir"]
+    domain_file, problem_file = (save_dir / name for name in PDDL_FILES)
     try:
-        original_domain, original_problem = ((source_dir / name).read_text(encoding="utf-8") for name in PDDL_FILES)
-        domain, problem, changes = repair_pddl(original_domain, original_problem)
+        original_domain = domain_file.read_text(encoding="utf-8")
+        domain, problem, changes = repair_pddl(original_domain, problem_file.read_text(encoding="utf-8"))
     except (OSError, ValueError, NotImplementedError):
         return False
     if not changes or (eval_mode == "problem_only" and domain != original_domain):
         return False
 
-    save_dir = eval_root / "postprocessed" / source_dir.relative_to(eval_root)
-    repaired_task = {**task, "save_dir": save_dir}
-    outputs = dict(zip(PDDL_FILES, (domain, problem)))
-    changes_file = save_dir / "postprocess.json"
-    changes_text = json.dumps(changes, ensure_ascii=False, indent=2) + "\n"
-    cached = generation_complete(repaired_task) and all(
-        (save_dir / name).read_text(encoding="utf-8") == content for name, content in outputs.items()
+    judge_file = save_dir / "judge.json"
+    try:
+        generation_api = read_judge(judge_file).get("generation_api")
+    except ValueError:
+        generation_api = None
+    if generation_api:
+        write_judge(judge_file, {"generation_api": generation_api})
+    else:
+        judge_file.unlink(missing_ok=True)
+    for name in ("plan.txt", "error.log", "judge_error.log", "attribution.json"):
+        (save_dir / name).unlink(missing_ok=True)
+    shutil.rmtree(save_dir / "attribution_solver", ignore_errors=True)
+    domain_file.write_text(domain, encoding="utf-8")
+    problem_file.write_text(problem, encoding="utf-8")
+    (save_dir / "postprocess.json").write_text(
+        json.dumps(changes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
-    if not cached:
-        save_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("plan.txt", "judge.json", "judge_error.log", "attribution.json"):
-            (save_dir / name).unlink(missing_ok=True)
-        shutil.rmtree(save_dir / "attribution_solver", ignore_errors=True)
-        for name, content in outputs.items():
-            (save_dir / name).write_text(content, encoding="utf-8")
-    if not changes_file.is_file() or changes_file.read_text(encoding="utf-8") != changes_text:
-        changes_file.write_text(changes_text, encoding="utf-8")
-    if not cached:
-        if not solve_pddl(*(save_dir / name for name in PDDL_FILES), reorder_plan=False):
-            return False
-        if not generation_complete(repaired_task):
-            return False
-
-    if generation_api := read_judge(source_dir / "judge.json").get("generation_api"):
-        judge_file = save_dir / "judge.json"
-        record = read_judge(judge_file)
-        if record.get("generation_api") != generation_api:
-            write_judge(judge_file, {**record, "generation_api": generation_api})
-
-    task["save_dir"] = save_dir
-    return True
+    return solve_pddl(domain_file, problem_file, reorder_plan=False) and generation_complete(task)
 
 
 def prepare_task(task):
@@ -371,14 +425,10 @@ def prepare_task(task):
     if (status == "error" and eval_mode != "nl"
         and all((task["save_dir"] / name).is_file() for name in PDDL_FILES)
     ):
-        outcome = task, True, "cached"
-    else:
-        outcome = generate_one(task)
-        if outcome[1] or outcome[2] not in {"pddl_unsolvable", "missing_pddl_plan"}:
-            return outcome
-    if postprocess_enabled() and repair_saved_task(task):
-        return task, True, "pddl_repaired"
-    return outcome
+        if postprocess_enabled() and repair_saved_task(task):
+            return task, True, "pddl_repaired"
+        return task, True, "cached"
+    return generate_one(task)
 
 
 def generate_tasks(tasks, progress):
@@ -471,7 +521,8 @@ def main() -> int:
         raise ValueError(f"Unknown eval_mode: {eval_mode!r}")
     print(f"full evaluation | model={eval_model} | prompt={prompt_path.name} | generation_workers={generation_max_workers} "
           f"judge_workers={judge_max_workers} attribution_enabled={enable_attribution} "
-          f"attribution_workers={attribution_max_workers} rule_postprocess={postprocess_enabled()}", flush=True)
+          f"attribution_workers={attribution_max_workers} rule_postprocess={postprocess_enabled()} "
+          f"pddl_vote={pddl_vote and eval_mode != 'nl'}", flush=True)
     previous = {}
 
     def progress(stage, completed, total, *, state="running"):

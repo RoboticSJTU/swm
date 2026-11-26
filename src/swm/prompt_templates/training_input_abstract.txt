@@ -1,8 +1,11 @@
 Generate a complete PDDL domain and problem for the attached game image, instruction, and rules.
 
-Instruction: {instruction}
+Input
+- Initial scene image: attached
+- Instruction: {instruction}
 
-- Use untyped objects and unary category predicates. Declare all predicates and include the required :requirements. Keep predicate names, arity, and argument order consistent.
+PDDL requirements
+- Use untyped PDDL with mandatory unary category predicates: every action parameter must have its category predicate in :precondition, and every object in :init.
 - Use only the allowed operations with their supplied names. Give each operation its necessary parameters, preconditions, and effects. Include required causal steps and respect rule constraints. Evaluate effect conditions in the pre-action state, apply effects together, and preserve unaffected facts. Keep locations, exclusive states, and resources consistent.
 - Use visible identifiers and rule symbols. Ground entities and :init facts only in the image, rule conventions, and supplied nonvisual controller values. Encode all requested final conditions in :goal.
 

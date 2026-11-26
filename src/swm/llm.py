@@ -89,7 +89,8 @@ def call_gpt(
     capture: dict | None = None,
     max_retries: int | None = None,
     api_metrics: dict | None = None,
-) -> str:
+    n: int = 1,
+) -> str | list[str]:
     global _api_call_count, _api_call_seconds
 
     content = []
@@ -114,6 +115,8 @@ def call_gpt(
         "model": model,
         "messages": [{"role": "user", "content": content}],
     }
+    if n != 1:
+        kwargs["n"] = n
     if response_format is not None:
         kwargs["response_format"] = response_format
     if max_tokens is not None:
@@ -123,20 +126,22 @@ def call_gpt(
     if temperature is not None:
         kwargs["temperature"] = temperature
     elif str(client.base_url).startswith("http://127.0.0.1"):
-        kwargs["temperature"] = 0
+        kwargs["temperature"] = 1
 
     try:
         started = time.perf_counter()
         try:
-            completion = client.chat.completions.create(**kwargs)
+            completions = client.chat.completions
+            if api_metrics is None:
+                completion = completions.create(**kwargs)
+            else:
+                raw_response = completions.with_raw_response.create(**kwargs)
+                completion = raw_response.parse()
         finally:
             elapsed = time.perf_counter() - started
             with _api_call_lock:
                 _api_call_count += 1
                 _api_call_seconds += elapsed
-            if api_metrics is not None:
-                api_metrics["calls"] += 1
-                api_metrics["seconds"] += elapsed
         choice = completion.choices[0]
         if response_format is not None and choice.finish_reason != "stop":
             raise ValueError(
@@ -163,6 +168,11 @@ def call_gpt(
                     "usage": usage_data,
                 }
             )
+        if api_metrics is not None:
+            api_metrics["calls"] += 1
+            api_metrics["seconds"] += raw_response.elapsed.total_seconds()
+        if n != 1:
+            return [candidate.message.content for candidate in completion.choices]
         return choice.message.content
     finally:
         client.close()

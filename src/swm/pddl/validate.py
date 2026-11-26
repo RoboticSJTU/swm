@@ -163,7 +163,7 @@ def _evaluated_symbolic_trace(
             lines.append("Derived rules: " + " ".join(sexpr(node, {}) for node in derived))
         for index, (name, args) in enumerate(raw_plan, start=1):
             fields = source_actions[name]
-            parameters = [token for token in fields[":parameters"]
+            parameters = [token for token in fields.get(":parameters", [])
                           if isinstance(token, str) and token.startswith("?")]
             if len(args) != len(parameters):
                 raise ValueError(f"Arity mismatch for {name}: expected {len(parameters)}, got {len(args)}")
@@ -171,7 +171,7 @@ def _evaluated_symbolic_trace(
             manipulators = [arg for arg in args
                             if any(part in {"arm", "hand", "gripper"} for part in arg.split("_"))]
             objects = [arg for arg in args if arg not in manipulators]
-            before = format_literals(fields[":precondition"], bindings)
+            before = format_literals(fields.get(":precondition", []), bindings)
             changes = format_literals(fields[":effect"], bindings, effect=True)
             action_text = f"{name}({', '.join(objects)})"
             if manipulators:

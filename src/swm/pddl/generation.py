@@ -3,7 +3,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from swm.llm import call_gpt_json
 from swm.pddl.planner import solve_pddl, summarize_solver_error
 from swm.pddl.strips import (
     DomainSchemas, Literal, ProblemModel, apply_action, assert_goals, format_pddl,
@@ -55,6 +54,8 @@ def generate_pddl(
     robot_configuration: str = "dual_arm",
     action_template: str = "",
 ):
+    from swm.llm import call_gpt_json
+
     round_dir = save_dir / f"round{attempt}"
     round_dir.mkdir(parents=True, exist_ok=True)
     domain_path = round_dir / "domain.pddl"

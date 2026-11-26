@@ -2,35 +2,36 @@ Now you need to help a robot with configuration {robot_configuration} to plan to
 The given image shows the initial scene.
 Instruction: {instruction}
 
-The available actions for the robot are:
+Here are the available action types for the robot.
 (1) pick up: lift a supported object and hold it; lifting a loose lid also uncovers its container.
 (2) put down: place or drop a held object at a suitable destination and release it; replacing a loose lid also covers its container.
 (3) open: move an attached door, drawer, lid, or flexible opening to allow access without detaching a part.
 (4) close: move an attached door, drawer, lid, or flexible opening to block access without attaching a part.
-(5) rotate: adjust a control setting, reorient a held object, or rock, shake, or swirl a held container.
+(5) wait: let an already running device cycle finish, including any automatic shutoff.
 (6) wipe: wipe, scrub, or dry a surface with a held tool.
 (7) scoop: take a portion from a source into a held utensil.
 (8) stir: mix contents using a held tool.
 (9) push: move an object along its support by pushing it.
-(10) pull: move an object along its support by pulling it, or extract an item from a dispenser into the hand.
+(10) pull: move an object along its support by pulling it.
 (11) press: actuate a button, switch, or lever and apply its effect.
 (12) turn on: start a device, cycle, or flow using its control.
 (13) turn off: stop a device, cycle, or flow using its control.
-(14) pour: transfer some or all contents from a held source into a destination, including emptying or draining it.
-(15) fill: collect the required amount from an active supply in a held or supported receiver aligned with the outlet.
+(14) pour: tilt a held or supported source to transfer liquid or loose solids, including draining.
+(15) fill: collect the required amount from an active supply in an aligned held or supported receiver. Use a separate action for manual shutoff.
 (16) insert: seat a held part in or on its target without threading, including plugging in; release the part once the target supports it.
 (17) remove: detach a fitted part without unthreading it, including unplugging, and take it into the acting hand.
 (18) lock: engage a lock with a seated key or built-in control; leave any key seated until removed.
 (19) unlock: disengage a lock with a seated key or built-in control; leave any key seated until removed.
 (20) screw: thread a held cap or lid onto a stable container and release it once attached.
 (21) unscrew: unthread a cap or lid from a stable container and take it into the acting hand.
-(22) rinse: rinse an item with running water or by agitating clean water inside it; use water to wet a tool when needed.
-(23) sweep: move debris into a receiver using a held sweeping tool.
-(24) cut: cut a supported or held object using a held tool.
-(25) wait: let an already running device cycle finish, including any automatic shutoff.
-(26) grasp: take a grip on an already supported or held object without lifting it.
-(27) release: let go of a grip while the object remains on its existing support or held by the other hand.
-(28) draw: create a drawing on a surface with a held tool.
+(22) rinse: clean a held or supported item with running water or by swishing clean water inside it. Also use this action to wet a tool.
+(23) sweep: move object into a receiver using a held sweeping tool.
+(24) cut: cut a object using a held tool.
+(25) rotate: adjust a control setting, reorient a held object, or rock, shake, or swirl a held container.
+(26) draw: create a drawing on a surface with a held tool.
+(27) scrunch: gather and squeeze object with a free hand, leaving it crumpled on its support.
+(28) fold: turn one part of a supported flexible item over another with a free hand, leaving it folded on the support.
+(29) slide: guide an object along its support without lifting it.
 
 Now you need to help the robot to generate both PDDL domain file and PDDL problem file to finish the task, according to the given image scene and instructions.
 
