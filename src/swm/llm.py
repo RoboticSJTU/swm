@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from threading import Lock
 
 import httpx
 from dotenv import find_dotenv, load_dotenv
@@ -13,6 +14,16 @@ from json_repair import repair_json
 from openai import OpenAI
 
 load_dotenv(find_dotenv())
+
+_api_call_lock = Lock()
+_api_call_count = 0
+_api_call_seconds = 0.0
+
+
+def api_call_totals() -> tuple[int, float]:
+    """Return process-wide completion call count and cumulative wait in seconds."""
+    with _api_call_lock:
+        return _api_call_count, _api_call_seconds
 
 
 def get_client(model: str, *, base_url: str | None = None):
@@ -28,9 +39,12 @@ def get_client(model: str, *, base_url: str | None = None):
         # base_url = "https://dasuapi.com/v1"
         # api_key = os.getenv("lin_API_KEY")
         # base_url = "https://direct.linkai.pics/v1" 
-        api_key = os.getenv("sub2api_key")
-        # base_url="http://127.0.0.1:5003/v1"
-        base_url="http://10.11.13.213:5003/v1"
+        # api_key = os.getenv("sub2api_key")
+        # # base_url="http://127.0.0.1:5003/v1"
+        # base_url="http://10.11.13.213:5003/v1"
+        api_key = os.getenv("openai_key")
+        base_url = "https://api.openai.com/v1"
+
         
     elif model.startswith(("kimi", "qwen", "glm", "deepseek")):
         api_key = os.getenv("BOYUE_API_KEY")
@@ -74,7 +88,10 @@ def call_gpt(
     temperature: float | None = None,
     capture: dict | None = None,
     max_retries: int | None = None,
+    api_metrics: dict | None = None,
 ) -> str:
+    global _api_call_count, _api_call_seconds
+
     content = []
     if image_paths:
         if not isinstance(image_paths, (list, tuple)):
@@ -105,15 +122,21 @@ def call_gpt(
         kwargs["reasoning_effort"] = reasoning_effort
     if temperature is not None:
         kwargs["temperature"] = temperature
-
-    if temperature is None and (
-        str(client.base_url).startswith("http://127.0.0.1")
-        or model.startswith(("gemini", "gpt"))
-    ):
+    elif str(client.base_url).startswith("http://127.0.0.1"):
         kwargs["temperature"] = 0
 
     try:
-        completion = client.chat.completions.create(**kwargs)
+        started = time.perf_counter()
+        try:
+            completion = client.chat.completions.create(**kwargs)
+        finally:
+            elapsed = time.perf_counter() - started
+            with _api_call_lock:
+                _api_call_count += 1
+                _api_call_seconds += elapsed
+            if api_metrics is not None:
+                api_metrics["calls"] += 1
+                api_metrics["seconds"] += elapsed
         choice = completion.choices[0]
         if response_format is not None and choice.finish_reason != "stop":
             raise ValueError(

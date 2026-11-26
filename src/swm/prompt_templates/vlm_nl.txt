@@ -7,7 +7,7 @@ Here are the available action types for the robot.
 (2) put down: place or drop a held object at a suitable destination and release it; replacing a loose lid also covers its container.
 (3) open: move an attached door, drawer, lid, or flexible opening to allow access without detaching a part.
 (4) close: move an attached door, drawer, lid, or flexible opening to block access without attaching a part.
-(5) rotate: adjust a control setting, reorient a held object, or rock, shake, or swirl a held container.
+(5) wait: let an already running device cycle finish, including any automatic shutoff.
 (6) wipe: wipe, scrub, or dry a surface with a held tool.
 (7) scoop: take a portion from a source into a held utensil.
 (8) stir: mix contents using a held tool.
@@ -27,12 +27,14 @@ Here are the available action types for the robot.
 (22) rinse: rinse an item with running water or by agitating clean water inside it; use water to wet a tool when needed.
 (23) sweep: move debris into a receiver using a held sweeping tool.
 (24) cut: cut a supported or held object using a held tool.
-(25) wait: let an already running device cycle finish, including any automatic shutoff.
-(26) grasp: take a grip on an already supported or held object without lifting it.
-(27) release: let go of a grip while the object remains on its existing support or held by the other hand.
+(25) rotate: adjust a control setting, reorient a held object, or rock, shake, or swirl a held container.
+(26) draw: create a drawing on a surface with a held tool.
 
+Write exactly one action per `plan_sequence` entry on its own line, specifying the acting hand. Split actions joined by "and" into separate entries.
 Your output should be in JSON format like below (Do NOT output comments):
 {{
-    "reasoning": "analyze the image and output the reasons",
-    "plan_sequence": ["pick up the green block from table", "place the green block on the red block"]
+    "plan_sequence": [
+        "pick up the green block from the table with the right hand",
+        "put down the green block on the red block with the right hand"
+    ]
 }}

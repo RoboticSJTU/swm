@@ -85,6 +85,7 @@ def generate_pddl(
     for path in (
         plan_path,
         round_dir / "judge.json",
+        round_dir / "psv_meta.json",
         round_dir / "error.log",
     ):
         path.unlink(missing_ok=True)

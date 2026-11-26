@@ -30,6 +30,7 @@ The available actions for the robot are:
 (25) wait: let an already running device cycle finish, including any automatic shutoff.
 (26) grasp: take a grip on an already supported or held object without lifting it.
 (27) release: let go of a grip while the object remains on its existing support or held by the other hand.
+(28) draw: create a drawing on a surface with a held tool.
 
 Now you need to help the robot to generate both PDDL domain file and PDDL problem file to finish the task, according to the given image scene and instructions.
 

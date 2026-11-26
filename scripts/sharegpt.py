@@ -17,17 +17,27 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from swm.pddl.export_format import (
+    ACTION_HEADS,
+    expression_head,
+    format_problem,
+    normalize_names,
+    parse_pddl,
+    pddl_line,
+    render_domain,
+    reorder_stacks as reorder_stacks,
+)
 from swm.pddl.strips import parse_plan
 
 MODEL_NAME = "gpt-5.6-sol"
 EXPORT_ONLY_PROBLEM = False # 额外导出only_problem
-NORMALIZE_PDDL_NAMES = True  # 仅导出 JSON 的 domain/problem 名称统一为 ROBOT_CONFIGURATION
+NORMALIZE_PDDL_NAMES = True  # 仅在导出的 JSON 中将 domain/problem 分别命名为 domain_name/problem_name
 
 # ROBOT_CONFIGURATION = "single_arm"
 # TASK_DOMAINS = ["droid", "bridgedata_v2"]
 
 # ROBOT_CONFIGURATION = "dual_arm"
-# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug", "epic"]
+# TASK_DOMAINS = ["agibot", "agibot_aug", "agibotworld2026_balanced", "agibotworld2026_balanced_aug", "gelaxea", "gelaxea_aug"]
 
 ROBOT_CONFIGURATION = "single_arm"
 TASK_DOMAINS = ["human", "human_aug"]
@@ -43,44 +53,6 @@ ERROR_LOG_PATH = OUT_JSON_PATH.with_suffix(".error.log")
 
 MAX_WORKERS = 100
 
-# ============================================================
-# PDDL 解析与格式化
-# ============================================================
-
-def parse_pddl(text):
-    text = "\n".join(line.split(";", 1)[0] for line in text.splitlines())
-    tokens = re.findall(r"\(|\)|[^\s()]+", text)
-    root = []
-    stack = [root]
-
-    for token in tokens:
-        if token == "(":
-            expression = []
-            stack[-1].append(expression)
-            stack.append(expression)
-        elif token == ")":
-            if len(stack) == 1:
-                raise ValueError("PDDL 括号不匹配")
-            stack.pop()
-        else:
-            stack[-1].append(token)
-
-    if len(stack) != 1 or len(root) != 1 or not isinstance(root[0], list):
-        raise ValueError("PDDL 结构不完整")
-    return root[0]
-
-
-def pddl_line(expression):
-    if isinstance(expression, str):
-        return expression
-    return "(" + " ".join(pddl_line(item) for item in expression) + ")"
-
-
-def expression_head(expression):
-    if expression and isinstance(expression[0], str):
-        return expression[0].lower()
-    return ""
-
 
 def predicate_name(expression):
     if expression_head(expression) == "not":
@@ -90,7 +62,6 @@ def predicate_name(expression):
 
 def format_domain(domain, problem, action_names):
     """按 plan 首次出现的顺序保留动作，并裁剪未引用的谓词。"""
-    action_heads = {":action", ":durative-action"}
     declarations = [
         predicate
         for section in domain[2:]
@@ -116,7 +87,7 @@ def format_domain(domain, problem, action_names):
     for section in domain[2:]:
         name = expression_head(section)
         if name != ":predicates" and (
-            name not in action_heads or section[1].lower() in action_order
+            name not in ACTION_HEADS or section[1].lower() in action_order
         ):
             collect(section)
     collect(problem)
@@ -129,135 +100,17 @@ def format_domain(domain, problem, action_names):
     selected_actions = [
         section
         for section in domain[2:]
-        if expression_head(section) in action_heads
+        if expression_head(section) in ACTION_HEADS
         and section[1].lower() in action_order
     ]
     selected_actions.sort(key=lambda action: action_order[action[1].lower()])
 
-    lines = ["(define " + pddl_line(domain[1])]
-    for section in domain[2:]:
-        name = expression_head(section)
-        if name in action_heads:
-            continue
-        if name == ":requirements":
-            lines.append("  (:requirements " + " ".join(section[1:]) + ")")
-        elif name == ":predicates":
-            lines.append("  (:predicates")
-            lines.extend("    " + pddl_line(item) for item in declarations)
-            lines.append("  )")
-        else:
-            lines.append("  " + pddl_line(section))
-
-    for action in selected_actions:
-        if len(lines) > 1:
-            lines.append("")
-        if len(action[2:]) % 2:
-            raise ValueError(f"动作 {action[1]} 的字段不完整")
-        lines.append(f"  ({action[0]} {action[1]}")
-        for key, value in zip(action[2::2], action[3::2]):
-            lines.append(f"    {key} {pddl_line(value)}")
-        lines.append("  )")
-    lines.append(")")
-    return "\n".join(lines)
-
-
-def reorder_stacks(atoms, goal=False):
-    """将相连的 (on A B) 按照从上到下的顺序排列。"""
-    on_atoms = [
-        (index, atom)
-        for index, atom in enumerate(atoms)
-        if len(atom) == 3 and expression_head(atom) == "on"
+    sections = [
+        [":predicates", *declarations] if expression_head(section) == ":predicates" else section
+        for section in domain[2:]
+        if expression_head(section) not in ACTION_HEADS
     ]
-    if len(on_atoms) < 2:
-        return atoms
-
-    successors = {index: set() for index, _ in on_atoms}
-    indegree = {index: 0 for index, _ in on_atoms}
-    for upper_index, upper in on_atoms:
-        for lower_index, lower in on_atoms:
-            if upper_index != lower_index and upper[2] == lower[1]:
-                successors[upper_index].add(lower_index)
-                indegree[lower_index] += 1
-
-    if not any(successors.values()):
-        return atoms
-
-    ready = sorted(index for index, degree in indegree.items() if degree == 0)
-    ordered_indexes = []
-    while ready:
-        index = ready.pop(0)
-        ordered_indexes.append(index)
-        for successor in sorted(successors[index]):
-            indegree[successor] -= 1
-            if indegree[successor] == 0:
-                ready.append(successor)
-        ready.sort()
-
-    if len(ordered_indexes) != len(on_atoms):
-        return atoms
-
-    atoms_by_index = dict(on_atoms)
-    ordered_on = [atoms_by_index[index] for index in ordered_indexes]
-
-    if goal:
-        non_on = [
-            atom
-            for atom in atoms
-            if expression_head(atom) != "on" or len(atom) != 3
-        ]
-        return ordered_on + non_on
-
-    result = list(atoms)
-    on_positions = [
-        index
-        for index, atom in enumerate(atoms)
-        if len(atom) == 3 and expression_head(atom) == "on"
-    ]
-    for index, atom in zip(on_positions, ordered_on):
-        result[index] = atom
-    return result
-
-
-def format_problem(problem):
-    objects = None
-    init = None
-    goal = None
-    domain_section = None
-    extra_sections = []
-    for section in problem[2:]:
-        name = expression_head(section)
-        if name == ":domain" and domain_section is None:
-            domain_section = section
-        elif name == ":objects" and objects is None:
-            objects = section
-        elif name == ":init":
-            init = section[1:]
-        elif name == ":goal":
-            if len(section) != 2:
-                raise ValueError(":goal 格式错误")
-            goal = section[1]
-        elif name not in {":domain", ":objects"}:
-            extra_sections.append(section)
-
-    if domain_section is None:
-        raise ValueError("problem 缺少 :domain")
-    lines = ["(define " + pddl_line(problem[1]), "  " + pddl_line(domain_section)]
-    if objects is not None:
-        lines.append("  " + pddl_line(objects))
-    if init is not None:
-        init = reorder_stacks(init)
-        lines.append("  (:init")
-        lines.extend("    " + pddl_line(atom) for atom in init)
-        lines.append("  )")
-    if goal is not None:
-        atoms = goal[1:] if expression_head(goal) == "and" else [goal]
-        atoms = reorder_stacks(atoms, goal=True)
-        lines.extend(["  (:goal", "    (and"])
-        lines.extend("      " + pddl_line(atom) for atom in atoms)
-        lines.extend(["    )", "  )"])
-    lines.extend("  " + pddl_line(section) for section in extra_sections)
-    lines.append(")")
-    return "\n".join(lines)
+    return render_domain([*domain[:2], *sections, *selected_actions])
 
 
 def atomic_write(path, text):
@@ -415,10 +268,7 @@ def prepare_round(item):
         source_problem = format_problem(problem).strip() + "\n"
         prepared = (source_domain, source_problem)
         if NORMALIZE_PDDL_NAMES:
-            domain[1][1] = problem[1][1] = ROBOT_CONFIGURATION
-            for section in problem[2:]:
-                if expression_head(section) == ":domain":
-                    section[1] = ROBOT_CONFIGURATION
+            normalize_names(domain, problem)
             prepared = (
                 format_domain(domain, problem, (name for name, _ in raw_plan)).strip() + "\n",
                 format_problem(problem).strip() + "\n",

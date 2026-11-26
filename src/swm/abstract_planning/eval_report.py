@@ -6,25 +6,32 @@ from urllib.parse import quote
 
 from swm.reporting import markdown_details, markdown_table
 
-SPLIT_LABELS = {'abs_a_id': 'A-ID', 'abs_a_scale': 'A-scale', 'abs_b_base': 'B-base', 'abs_b_rule': 'B-rule'}
+SPLIT_LABELS = {'seen': 'Seen', 'unseen_composition': 'Unseen composition'}
+EVALUATION_LABELS = {'seen_rule':'已见规则的新场景', 'scale':'规模外推',
+                     'composition_base':'规则组合对照', 'unseen_rule_combination':'未见规则组合',
+                     'unseen_game':'未见游戏', 'unseen_game_rule':'未见游戏的规则变体',
+                     'unseen_game_rule_change':'未见游戏的规则变体'}
 ERROR_TYPES = {'init_mismatch':'init写错','init_inconsistent':'init冲突','goal_error':'goal错误',
-               'operator_modeling':'oper建模错误','operator_missing':'oper整体缺失','else':'else'}
-GROUP_NAMES = {**ERROR_TYPES,'pending':'评测未完成'}
+               'operator_modeling':'oper建模错误','operator_missing':'oper整体缺失','output_error':'输出错误'}
+GROUP_NAMES = {**ERROR_TYPES,'plan_error':'计划错误','unattributed':'待归因','pending':'评测未完成'}
 
 
 def diagnostic_group(result, unresolved):
-    if result['status'] in unresolved:
+    status = result['status']
+    if status in unresolved:
         return 'pending'
     if result['task_success']:
         return None
+    if result.get('output_format') == 'nl':
+        return 'output_error' if status == 'invalid_output' else 'plan_error'
     proof = result.get('diagnosis') or {}
-    if proof.get('category') == 'goal_error':
+    category, subcategory = proof.get('category'), proof.get('subcategory')
+    if category == 'goal_error':
         return 'goal_error'
-    subcategories = {'init_error':{'init_mismatch','init_inconsistent'},
-                     'operator_error':{'operator_modeling','operator_missing'}}
-    if proof.get('subcategory') in subcategories.get(proof.get('category'),set()):
-        return proof['subcategory']
-    return 'else'
+    if ((category == 'init_error' and subcategory in {'init_mismatch', 'init_inconsistent'})
+            or (category == 'operator_error' and subcategory in {'operator_modeling', 'operator_missing'})):
+        return subcategory
+    return 'output_error' if status in {'invalid_output', 'invalid_pddl'} else 'unattributed'
 
 
 def _brief_error(result):
@@ -61,18 +68,21 @@ def _brief_error(result):
     if status in messages:
         return messages[status]
     if status == 'invalid_output':
+        if result.get('output_format') == 'nl':
+            return '输出结构无法解析：' + error
         for pattern,message in [("Missing ')'", 'PDDL 括号不配对：缺少右括号。'),
                                 ('Unparsed tokens remain', 'PDDL 主体后存在多余内容。'),
                                 ('Expecting value', '输出无法解析为 PDDL/JSON。')]:
             if pattern in error:
                 return message
-    if status == 'mapping_error' and 'Unknown mapping target' in error:
-        return '评测映射未完成：映射目标不在参考对象集合中。'
-    if status == 'mapping_error' and 'model did not return a JSON object' in error:
-        return '评测映射未完成：响应无法解析。'
-    if status == 'mapping_error' and 'Object mapping cancelled' in error:
-        return '评测映射已中断。'
+    if status == 'mapping_error':
+        for pattern, message in [('Unknown mapping target', '评测映射未完成：映射目标不在参考对象集合中。'),
+                                 ('model did not return a JSON object', '评测映射未完成：响应无法解析。'),
+                                 ('Object mapping cancelled', '评测映射已中断。')]:
+            if pattern in error:
+                return message
     labels = {'invalid_output': '输出结构无法解析', 'generation_error': '模型调用失败',
+              'invalid_plan_step': '动作无法映射',
               'mapping_error': '评测映射未完成', 'mapping_incomplete': '评测映射不完整',
               'action_mapping_ambiguous': '评测动作映射存在歧义', 'unsupported_pddl': '求解器不支持该 PDDL',
               'infrastructure_error': '评测未完成'}
@@ -81,57 +91,78 @@ def _brief_error(result):
 
 
 def render_abstract_report(results, summary, report_root, unresolved):
-    """Compare splits once, then show only nonpassing tasks with linked evidence."""
-    present = summary['by_split']
+    """Compare the splits and link each nonpassing task to its recorded evidence."""
+    nl = summary.get('output_format') == 'nl'
+    present, overall = summary['by_split'], summary['overall']
     splits = [name for name in SPLIT_LABELS.values() if name in present]
-    splits += sorted(set(present) - set(splits))
-    groups = [[result for result in results if result['split'] == split] for split in splits] + [results]
-    statistics = [present[split] for split in splits] + [summary['overall']]
-    headers = ['指标', *(f"{split}（{present[split]['total']}）" for split in splits), f"合计（{summary['overall']['total']}）"]
-    def rate(count,total):
+    splits += sorted(present.keys() - set(splits))
+    statistics = [present[split] for split in splits] + [overall]
+    headers = ['指标', *(f"{split}（{present[split]['total']}）" for split in splits), f"合计（{overall['total']}）"]
+    counts, overall_counts, failures = defaultdict(Counter), Counter(), defaultdict(list)
+    for result in results:
+        category = diagnostic_group(result, unresolved)
+        counts[result['split']][category] += 1
+        overall_counts[category] += 1
+        if category:
+            failures[result['split']].append((category, result))
+    diagnostics = [counts[split] for split in splits] + [overall_counts]
+
+    def rate(count, total):
         return f'{100 * count / total:.1f}'.removesuffix('.0') if total else '—'
-    cells = [rate(row['task_success'],row['evaluated']) for row in statistics]
-    table = [['任务成功率', *(f'**{cell}**' for cell in cells)]]
-    if summary.get('pairs'):
+
+    table = [['Acc（全部任务）', *(f"**{rate(row['task_success'], row['total'])}**" for row in statistics)]]
+    metrics = [('spl', 'SPL')]
+    if not nl:
+        metrics += [('solv', 'Solv'), ('init_acc', 'Init Acc（可比子集）')]
+    for key, label in metrics:
+        table.append([label, *(f'{100 * row[key]:.1f}' if row.get(key) is not None else '—' for row in statistics)])
+    if not nl:
+        table.append(['Init可比任务数', *(str(row.get('init_comparable', 0)) for row in statistics)])
+    if pairs := summary.get('pairs'):
         by_id = {result['id']: result for result in results}
         cells = []
         for split in [*splits, None]:
-            pairs = [pair for pair in summary['pairs'] if pair['evaluated'] and
-                     (split is None or by_id[pair['variant']]['split'] == split)]
-            passed = sum(pair['both_tasks_pass'] for pair in pairs)
-            cells.append(rate(passed,len(pairs)))
+            matching = [p for p in pairs if split is None or by_id[p['variant']]['split'] == split]
+            cells.append(rate(sum(pair['both_tasks_pass'] for pair in matching), len(matching)))
         table.append(['原规则与新规则均成功率', *cells])
-    diagnostics = [Counter(diagnostic_group(result, unresolved) for result in group) for group in groups]
-    for label,keys in [('init错误率 (写错/冲突)',['init_mismatch','init_inconsistent']),
-                       ('goal错误率',['goal_error']),
-                       ('oper错误率 (建模/缺失)',['operator_modeling','operator_missing']),
-                       ('else',['else'])]:
-        table.append([label, *('/'.join(rate(count[key],row['evaluated']) for key in keys)
-                              if row['evaluated'] else '—' for count,row in zip(diagnostics,statistics))])
-    table.append(['评测未完成率',*(rate(row['unresolved'],row['total']) for row in statistics)])
-    lines = [*markdown_table(headers, table), '']
-    for split, group in zip(splits, groups):
-        failures = [result for result in group if diagnostic_group(result, unresolved)]
-        if not failures:
-            continue
+    if not nl:
+        for label, keys in [('init错误率 (写错/冲突)', ['init_mismatch', 'init_inconsistent']),
+                            ('goal错误率', ['goal_error']),
+                            ('oper错误率 (建模/缺失)', ['operator_modeling', 'operator_missing'])]:
+            table.append([label, *('/'.join(rate(count[key], row['evaluated']) for key in keys)
+                                   if row['evaluated'] else '—' for count, row in zip(diagnostics, statistics))])
+    for key, label in [('plan_error', '计划错误率'), ('output_error', '输出错误率'), ('unattributed', '待归因率')]:
+        if overall_counts[key]:
+            table.append([label, *(rate(count[key], row['total']) for count, row in zip(diagnostics, statistics))])
+    table.append(['评测完成率', *(rate(row['evaluated'], row['total']) for row in statistics)])
+    if overall['unresolved']:
+        table.append(['评测未完成率', *(rate(row['unresolved'], row['total']) for row in statistics)])
+    lines = []
+    if summary.get('complete') is False:
+        lines += ['**评测未完成：本文件是中间诊断，不能作为最终结果。**', '']
+    lines += [*markdown_table(headers, table), '']
+    if 'prompt_template' in summary:
+        filename = 'summary_abs.json' if summary['complete'] else 'summary_abs.partial.json'
+        lines += [f'本次评测配置的 prompt 模板全文见 [汇总 JSON]({filename})。', '']
+    if kinds := summary.get('by_evaluation_kind'):
+        rows = [[EVALUATION_LABELS.get(kind, kind), row['total'], row['evaluated'], row['task_success'],
+                 rate(row['task_success'], row['evaluated']), row['unresolved']] for kind, row in kinds.items()]
+        lines += [*markdown_table(['评测条件', '任务数', '已完成数', '成功数', '成功率（%）', '未完成数'], rows), '']
+    report_root = Path(report_root)
+    for split in splits:
         evidence = defaultdict(lambda: defaultdict(list))
-        for result in sorted(failures, key=lambda result: [int(part) if part.isdigit() else part for part in re.split(r'(\d+)', result['id'])]):
-            evidence[diagnostic_group(result, unresolved)][_brief_error(result)].append(result)
-        body = []
-        for category, label in GROUP_NAMES.items():
-            if category not in evidence:
-                continue
-            reasons = evidence[category]
-            body += [f'**{label}**', '']
-            for reason, members in reasons.items():
-                links = []
-                for result in members:
-                    directory = Path(report_root) / result['dataset'] / result['task']
-                    target = quote(f"{result['dataset']}/{result['task']}/result.json", safe='/._-')
-                    number = re.search(r'\d+$', result['task'])
-                    identifier = number[0] if number else result['task']
-                    links.append(f'[{identifier}]({target})' if (directory / 'result.json').is_file() else identifier)
-                body.append('- ' + '、'.join(links) + '：' + reason)
-            body.append('')
-        lines += markdown_details(split, body)
+        for category, result in sorted(failures[split], key=lambda item: [int(part) if part.isdigit() else part
+                                                                        for part in re.split(r'(\d+)', item[1]['id'])]):
+            target = f"{result['dataset']}/{result['task']}/result.json"
+            number = re.search(r'\d+$', result['task'])
+            identifier = number[0] if number else result['task']
+            link = f"[{identifier}]({quote(target, safe='/._-')})" if (report_root / target).is_file() else identifier
+            evidence[category][_brief_error(result)].append(link)
+        if evidence:
+            body = []
+            for category, label in GROUP_NAMES.items():
+                if category in evidence:
+                    body += [f'**{label}**', '', *('- ' + '、'.join(links) + '：' + reason
+                                                  for reason, links in evidence[category].items()), '']
+            lines += markdown_details(split, body)
     return '\n'.join(lines).rstrip() + '\n'

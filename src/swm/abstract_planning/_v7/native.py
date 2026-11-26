@@ -5,16 +5,13 @@ from __future__ import annotations
 import random
 import os
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-from swm.pddl.canonical import canonicalize_pddl_text
-from .model import fields, parse_sexpr, section, sexpr, typed_symbols, untype
-from .vocabulary import VOCABULARY
+from .floortile_generator import generate as generate_floortile
+from .model import canonicalize_pddl_text, fields, parse_sexpr, section, sexpr, typed_symbols, untype
 
-ROOT = Path(__file__).resolve().parents[3]
-SOURCES = ROOT / "downloads/pddl-generators"
+SOURCES = Path(__file__).resolve().parent / "assets/pddl_generators"
 FOLDERS = {
     "blocks": "blocksworld",
     "hanoi": "hanoi",
@@ -27,6 +24,82 @@ FOLDERS = {
     "briefcase": "briefcaseworld",
 }
 
+
+VOCABULARY = {
+    "blocks": {
+        "clear": "{0} rests on the table or another block and has nothing on top",
+        "on_table": "{0} is on the table",
+        "arm_empty": "the arm is empty",
+        "holding": "the arm holds {0}",
+        "on": "{0} is directly on {1}",
+    },
+    "hanoi": {
+        "clear": "{0} has nothing on top",
+        "on": "{0} is directly on {1}",
+        "smaller": "{0} may support {1}: it is a larger disk or a peg",
+    },
+    "sliding_puzzle": {
+        "at": "tile {0} is at cell {1}",
+        "neighbor": "cell {0} is orthogonally adjacent to cell {1}",
+        "empty": "cell {0} is the blank",
+    },
+    "gripper": {
+        "at_robby": "the robot is in room {0}",
+        "at": "ball {0} rests in room {1} outside both grippers",
+        "free": "gripper {0} is empty",
+        "carry": "gripper {1} holds ball {0}",
+    },
+    "miconic": {
+        "origin": "passenger {0} starts at floor {1}",
+        "destin": "passenger {0} needs floor {1}",
+        "above": "floor {1} is above floor {0}",
+        "boarded": "passenger {0} is in the lift",
+        "not_boarded": "passenger {0} is outside the lift",
+        "served": "passenger {0} has been delivered",
+        "not_served": "passenger {0} has not been delivered",
+        "lift_at": "the lift is at floor {0}",
+    },
+    "floortile": {
+        "robot_at": "robot {0} is at tile {1}",
+        "up": "tile {0} is immediately above tile {1}",
+        "down": "tile {0} is immediately below tile {1}",
+        "right": "tile {0} is immediately right of tile {1}",
+        "left": "tile {0} is immediately left of tile {1}",
+        "clear": "tile {0} is unpainted and unoccupied",
+        "painted": "tile {0} is painted {1}",
+        "robot_has": "robot {0} uses paint colour {1}",
+        "available_color": "paint colour {0} is available",
+        "free_color": "robot {0} may change its paint colour",
+    },
+    "termes": {
+        "height": "cell {0} has height {1}",
+        "at": "the robot is at cell {0}",
+        "has_block": "the robot carries one block",
+        "succ": "height {0} is exactly one above height {1}",
+        "neighbor": "cell {0} is orthogonally adjacent to cell {1}",
+        "is_depot": "cell {0} is a block depot",
+    },
+    "freecell": {
+        "on": "card {0} lies directly on card {1} in a tableau column",
+        "incell": "card {0} occupies a freecell",
+        "clear": "card {0} is the exposed top of a tableau column",
+        "cellspace": "there are {0} empty freecells",
+        "colspace": "there are {0} empty columns",
+        "home": "card {0} is the top of its foundation",
+        "bottomcol": "card {0} is at the bottom of a tableau column",
+        "canstack": "card {0} may be placed on card {1} according to rank and alternating colour",
+        "hassuit": "card {0} has suit {1}",
+        "value": "card {0} has rank {1}",
+        "successor": "rank {0} is exactly one above rank {1}",
+        "colsuccessor": "empty-column count {0} is exactly one above {1}",
+        "cellsuccessor": "empty-freecell count {0} is exactly one above {1}",
+    },
+    "briefcase": {
+        "at": "item {0} is at location {1}",
+        "in": "item {0} is inside the briefcase",
+        "is_at": "the briefcase is at location {0}",
+    },
+}
 
 def command(folder, args):
     # Upstream tools may write fixed names such as STATES in their cwd.
@@ -64,11 +137,11 @@ def native_problem(domain, categories, initial, goal):
     )
 
 
-def generate(game, seed, size=None):
+def generate(game, seed, size=None, *, sources=SOURCES):
     size = size or {}
     rng = random.Random(seed)
     folder = FOLDERS[game]
-    domain = canonicalize_pddl_text((SOURCES / folder / "domain.pddl").read_text())
+    domain = canonicalize_pddl_text((sources / folder / "domain.pddl").read_text())
     vocabulary = dict(VOCABULARY[game])
     notes = [
         "The image shows the current scene. Static capabilities, resource requirements and directed relations are specified below. Layout positions without a location predicate are illustrative and impose no movement constraint.",
@@ -77,7 +150,7 @@ def generate(game, seed, size=None):
     variant, derived = "standard", []
     if game == "blocks":
         n = size.get("blocks", rng.randint(6, 15))
-        problem = command(folder, [SOURCES / folder / "blocksworld", 4, n, seed])
+        problem = command(folder, [sources / folder / "blocksworld", 4, n, seed])
         variant = "support_restrictions" if seed % 3 else "unrestricted_supports"
         if seed % 3:
             d, p = parse_sexpr(domain), parse_sexpr(problem.lower())
@@ -130,6 +203,24 @@ def generate(game, seed, size=None):
                 a, b = rng.choice(moves)
                 goal_piles[b].append(goal_piles[a].pop())
                 previous = (b, a)
+            if size.get('goal_selection')=='farthest_reachable':
+                from collections import deque
+                start=tuple(tuple(p) for p in start_piles)
+                queue=deque([(start,0)]);seen={start};candidates=[]
+                minimum=size['goal_minimum_distance']
+                while queue:
+                    stacks,depth=queue.popleft()
+                    if depth>=minimum:
+                        candidates.append(stacks)
+                        continue
+                    for a in range(3):
+                        for b in range(3):
+                            if a==b or not stacks[a] or (stacks[b] and int(stacks[a][-1][1:])>int(stacks[b][-1][1:])):continue
+                            nxt=[list(p) for p in stacks];nxt[b].append(nxt[a].pop())
+                            key=tuple(tuple(p) for p in nxt)
+                            if key not in seen:seen.add(key);queue.append((key,depth+1))
+                if not candidates:raise ValueError('native_goal_walk_not_far_enough')
+                goal_piles=rng.choice(candidates)
         for stacks, dest in [(start_piles, initial), (goal_piles, goal)]:
             for peg, stack in zip(pegs, stacks):
                 for below, above in zip([peg, *stack], stack):
@@ -242,7 +333,7 @@ def generate(game, seed, size=None):
         problem = command(
             folder,
             [
-                SOURCES / folder / "miconic",
+                sources / folder / "miconic",
                 "-f",
                 size.get("floors", rng.randint(4, 9)),
                 "-p",
@@ -326,20 +417,9 @@ def generate(game, seed, size=None):
     elif game == "floortile":
         rows, columns, robots = rng.randint(3, 5), rng.randint(3, 5), rng.randint(1, 2)
         rows, columns = size.get("rows", rows), size.get("columns", columns)
+        robots=size.get('robots',robots)
         generator_seed = rng.randrange(1, 2**31)
-        problem = command(
-            folder,
-            [
-                sys.executable,
-                SOURCES / folder / "floortile-generator.py",
-                f"p{seed}",
-                rows,
-                columns,
-                robots,
-                "seq",
-                generator_seed,
-            ],
-        )
+        problem = canonicalize_pddl_text(generate_floortile(f"p{seed}", rows, columns, robots, "seq", generator_seed))
         p = parse_sexpr(problem.lower())
         palette = ["white", "black"] + (["red"] if seed % 3 == 2 else [])
         if len(palette) == 3:
@@ -373,11 +453,20 @@ def generate(game, seed, size=None):
         h, w = size.get("board", (rng.randint(3, 5), rng.randint(3, 5)))
         cells = [f"r{r + 1:02d}c{c + 1:02d}" for r in range(h) for c in range(w)]
         depot = rng.choice(cells) if size.get("random_depot") else cells[0]
-        targets = rng.sample([c for c in cells if c != depot], rng.randint(2, 4))
+        targets = rng.sample([c for c in cells if c != depot], size.get('targets',rng.randint(2, 4)))
         heights = {c: (rng.randint(1, 2) if c in targets else 0) for c in cells}
         initial = [["at", depot], ["is_depot", depot]] + [
             ["height", c, "h0"] for c in cells
         ]
+        # A legal depot placement prefix can leave existing low blocks around
+        # the depot while returning the empty carrier there. The new scene
+        # therefore varies visible terrain as well as its desired structures.
+        if size.get('prebuilt'):
+            dr,dc=int(depot[1:3]),int(depot[4:6])
+            neighbours=[c for c in cells if abs(int(c[1:3])-dr)+abs(int(c[4:6])-dc)==1]
+            prebuilt=set(rng.sample(neighbours,min(size['prebuilt'],len(neighbours))))
+            for fact in initial:
+                if fact[0]=='height' and fact[1] in prebuilt:fact[2]='h1'
         initial += [["succ", "h1", "h0"], ["succ", "h2", "h1"]]
         for a in cells:
             ar, ac = int(a[1:3]), int(a[4:6])
@@ -398,11 +487,11 @@ def generate(game, seed, size=None):
         variant = "build_towers_and_remove_scaffolding"
     elif game == "freecell":
         rank = size.get("rank", rng.randint(3, 5))
-        columns = rng.randint(3, 5)
+        columns = size.get('columns',rng.randint(3, 5))
         args = [
-            SOURCES / folder / "freecell",
+            sources / folder / "freecell",
             "-f",
-            rng.randint(1, 3),
+            size.get('freecells',rng.randint(1, 3)),
             "-c",
             columns,
             "-s",

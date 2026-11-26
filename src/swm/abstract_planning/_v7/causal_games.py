@@ -82,7 +82,7 @@ def kitchen(seed, size=None):
     scene = board(rng, *(size or {}).get("board", (3, 4)))
     names = list(RECIPES)
     selected = [names[seed % len(names)]]
-    if seed % 3 == 2:
+    if (size or {}).get("dishes", 2 if seed % 3 == 2 else 1) == 2:
         # Related recipes share tools while still requiring separate dish plans.
         selected.append("pasta" if selected[0] == "stir_fry" else "salad")
     dishes = [f"dish{i}" for i in range(len(selected))]
@@ -377,7 +377,8 @@ def key_delivery(seed, size=None):
     rooms = [f"room{i}" for i in range(n)]
     doors = [f"door{i}" for i in range(n - 1)]
     keys = [f"key{i}" for i in range(n - 1)]
-    relics = [f"relic{i}" for i in range(rng.randint(2, 4))]
+    count = (size or {}).get("relics", rng.randint(2, 4))
+    relics = [f"relic{i}" for i in range(count)]
     initial = (
         [["room", x] for x in rooms]
         + [["door", x] for x in doors]
@@ -385,9 +386,8 @@ def key_delivery(seed, size=None):
         + [["relic", x] for x in relics]
         + [["at_player", rooms[0]], ["hand_empty"]]
     )
-    for i, door in enumerate(doors):
+    for i, (door, key) in enumerate(zip(doors, keys)):
         a, b = rooms[i : i + 2]
-        key = keys[i]
         initial += [
             ["road", a, b],
             ["road", b, a],
@@ -396,14 +396,12 @@ def key_delivery(seed, size=None):
             ["fits", key, door],
             ["key_at", key, rng.choice(rooms[: i + 1])],
         ]
-    goal = []
     for relic in relics:
         initial += [
             ["relic_at", relic, rng.choice(rooms[n // 2 :])],
             ["delivery_room", relic, rng.choice(rooms[: n // 2])],
         ]
-        goal.append(["delivered", relic])
-    goal.append(["at_player", rooms[0]])
+    goal = [["delivered", relic] for relic in relics] + [["at_player", rooms[0]]]
     actions = [
         action(
             "move",

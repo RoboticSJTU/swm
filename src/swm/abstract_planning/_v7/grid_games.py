@@ -8,7 +8,7 @@ from functools import lru_cache
 
 from .model import action, make_domain, make_problem
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parent
 DIRECTIONS = {"north": (-1, 0), "east": (0, 1), "south": (1, 0), "west": (0, -1)}
 GRID_NOTE = "r01c01 is the top-left cell; rows increase downward and columns rightward. North is up, east right, south down, west left. Left and right turns rotate the heading by 90 degrees counterclockwise and clockwise. Labels identify board cells. Walls and holes cannot be entered. Cell borders without an opening block movement."
 BASE_VOCAB = {
@@ -31,17 +31,27 @@ def rc(name):
     return int(name[1:3]) - 1, int(name[4:6]) - 1
 
 
+def step_cell(pos, direction):
+    r, c = rc(pos)
+    dr, dc = DIRECTIONS[direction]
+    return cell(r + dr, c + dc)
+
+
+def board_edges(cells):
+    walkable = set(cells)
+    edges = []
+    for origin in cells:
+        for direction in DIRECTIONS:
+            target = step_cell(origin, direction)
+            if target in walkable:
+                edges.append([origin, target, direction])
+    return edges
+
+
 def board(rng, h=None, w=None):
     h, w = h or rng.randint(5, 7), w or rng.randint(5, 7)
     cells = [cell(r, c) for r in range(h) for c in range(w)]
-    edges = []
-    for a in cells:
-        r, c = rc(a)
-        for d, (dr, dc) in DIRECTIONS.items():
-            b = cell(r + dr, c + dc)
-            if b in cells:
-                edges.append([a, b, d])
-    return {"height": h, "width": w, "cells": cells, "edges": edges, "holes": []}
+    return {"height": h, "width": w, "cells": cells, "edges": board_edges(cells), "holes": []}
 
 
 def finish(
@@ -73,17 +83,15 @@ def finish(
 
 def pose_initial(scene, rng, at):
     dirs = list(DIRECTIONS)
-    return (
-        [["location", c] for c in scene["cells"]]
-        + [["direction", d] for d in dirs]
-        + [
-            ["at", "player", at],
-            ["facing", rng.choice(dirs)],
-            *(["ahead", a, b, d] for a, b, d in scene["edges"]),
-            *(["left_turn", d, dirs[(i - 1) % 4]] for i, d in enumerate(dirs)),
-            *(["right_turn", d, dirs[(i + 1) % 4]] for i, d in enumerate(dirs)),
-        ]
-    )
+    return [
+        *(["location", c] for c in scene["cells"]),
+        *(["direction", d] for d in dirs),
+        ["at", "player", at],
+        ["facing", rng.choice(dirs)],
+        *(["ahead", a, b, d] for a, b, d in scene["edges"]),
+        *(["left_turn", d, dirs[(i - 1) % 4]] for i, d in enumerate(dirs)),
+        *(["right_turn", d, dirs[(i + 1) % 4]] for i, d in enumerate(dirs)),
+    ]
 
 
 def pose_actions(movement_extra="", move_effect=""):
@@ -115,7 +123,7 @@ def frozenlake(seed, size=None):
     start = rng.choice(scene["cells"])
     safe = {c for c in scene["cells"] if rng.random() > 0.22} | {start}
     scene["holes"] = sorted(set(scene["cells"]) - safe)
-    markers = [f"checkpoint{i}" for i in range(rng.randint(2, 4))]
+    markers = [f"checkpoint{i}" for i in range((size or {}).get('checkpoints',rng.randint(2, 4)))]
     sites = rng.sample(sorted(safe - {start}), len(markers) + 1)
     initial = (
         [["location", c] for c in scene["cells"]]
@@ -210,7 +218,7 @@ def maze(seed, size=None):
         "fits": "key {0} unlocks door {1}",
     }
     if seed % 3:
-        chosen = rng.sample(edges, len(edges) // 2)[: rng.randint(1, 3)]
+        chosen = rng.sample(edges, len(edges) // 2)[: (size or {}).get('doors',rng.randint(1, 3))]
         doors = []
         for i, (a, b, d) in enumerate(chosen):
             door, key = f"door{i}", f"key{i}"
@@ -226,6 +234,29 @@ def maze(seed, size=None):
             ]
             goal.append(["unlocked", door])
         scene["doors"] = doors
+        if (size or {}).get('key_placement') == 'progressive':
+            # Place each next key in territory accessible after earlier locks.
+            # This changes the depicted instance, never the lock operations.
+            opened = set()
+            previous_region = set()
+            for _ in doors:
+                reached = {root}
+                while True:
+                    grown = reached | {b for a,b,_ in edges if a in reached and
+                        all(d['id'] in opened or {a,b} != {d['from'],d['to']} for d in doors)}
+                    if grown == reached:
+                        break
+                    reached = grown
+                frontier = [d for d in doors if d['id'] not in opened and
+                            (d['from'] in reached or d['to'] in reached)]
+                door = rng.choice(frontier)
+                key = 'key' + door['id'][4:]
+                location = rng.choice(sorted(reached-previous_region or reached))
+                for fact in initial:
+                    if fact[:2] == ['key_at', key]:
+                        fact[2] = location
+                opened.add(door['id'])
+                previous_region = reached
         extra = "(forall (?door) (imply (edge_door ?from ?to ?door) (unlocked ?door)))"
         actions += [
             action(
@@ -260,9 +291,9 @@ def maze(seed, size=None):
 
 
 @lru_cache(maxsize=1)
-def boxoban_levels():
+def boxoban_levels(levels_dir):
     levels = []
-    for path in sorted((ROOT / "downloads/boxoban").glob("*.txt")):
+    for path in sorted(levels_dir.glob("*.txt")):
         current = []
         index = None
         for line in path.read_text().splitlines() + [";end"]:
@@ -281,11 +312,12 @@ def boxoban_levels():
     return levels
 
 
-def sokoban(seed, size=None):
-    level = boxoban_levels()[seed % len(boxoban_levels())]
+def sokoban(seed, size=None, *, levels_dir=ROOT / "downloads/boxoban"):
+    levels = boxoban_levels(levels_dir)
+    level = levels[seed % len(levels)]
+    lines = level["board"]
     if size:
         # Stretch only existing passages: padding alone is not scale extrapolation.
-        lines = level["board"]
         gap = size["stretch"]
         expanded = []
         for r, row in enumerate(lines):
@@ -295,8 +327,6 @@ def sokoban(seed, size=None):
                                         for c in range(10)) for _ in range(gap))
         lines = [row[:5] + (" " if row[4] != "#" and row[5] != "#" else "#") * gap + row[5:]
                  for row in expanded]
-    else:
-        lines = level["board"]
     scene = {"height": len(lines), "width": len(lines[0]), "cells": [], "edges": [], "holes": []}
     positions = {}
     goals = []
@@ -315,12 +345,7 @@ def sokoban(seed, size=None):
                 positions[stone] = loc
             if ch in ".*+":
                 goals.append(loc)
-    for a in scene["cells"]:
-        r, c = rc(a)
-        for d, (dr, dc) in DIRECTIONS.items():
-            b = cell(r + dr, c + dc)
-            if b in scene["cells"]:
-                scene["edges"].append([a, b, d])
+    scene["edges"] = board_edges(scene["cells"])
     initial = (
         [["location", c] for c in scene["cells"]]
         + [["direction", d] for d in DIRECTIONS]
@@ -388,7 +413,7 @@ def sokoban(seed, size=None):
 def package(seed, size=None):
     rng = random.Random(seed)
     scene = board(rng, *(size or {}).get("board", (rng.randint(4, 5), rng.randint(4, 5))))
-    count = rng.randint(3, 6)
+    count = (size or {}).get('packages',rng.randint(3, 6))
     packages = [f"package{i}" for i in range(count)]
     sites = rng.sample(scene["cells"], count + 2)
     start, toolsite = sites[:2]
@@ -436,7 +461,7 @@ def package(seed, size=None):
         action(
             "cut_tape",
             "?p ?from ?to ?d ?tool",
-            "(and (package ?p) (at player ?from) (facing ?d) (ahead ?from ?to ?d) (at ?p ?to) (taped ?p) (tool ?tool) (has_tool ?tool) (forall (?other) (imply (depends_on ?p ?other) (open ?other))))",
+            "(and (package ?p) (at player ?from) (facing ?d) (ahead ?from ?to ?d) (at ?p ?to) (taped ?p) (tool ?tool) (has_tool ?tool) (forall (?other) (imply (depends_on ?p ?other) (open ?other))) (cuts_tape ?tool))",
             "(and (not (taped ?p)) (tape_cut ?p))",
         ),
         action(
@@ -446,9 +471,6 @@ def package(seed, size=None):
             "(open ?p)",
         ),
     ]
-    # Tool roles matter: a pair of pliers cannot cut tape.
-    fields = actions[-2][actions[-2].index(":precondition") + 1]
-    fields.append(["cuts_tape", "?tool"])
     if clips:
         actions.append(
             action(
@@ -492,7 +514,7 @@ def package(seed, size=None):
 def printer(seed, size=None):
     rng = random.Random(seed)
     scene = board(rng, *(size or {}).get("board", (3, rng.randint(3, 4))))
-    count = 1 + seed % 2
+    count = (size or {}).get('printers',1 + seed % 2)
     printers = [f"printer{i}" for i in range(count)]
     tables = [f"table{i}" for i in range(count)]
     swap = seed % 3 != 0
@@ -524,12 +546,13 @@ def printer(seed, size=None):
         for c in scene["cells"]
         if c not in sites[1 : 1 + count * 2] and c != start
     ]
-    documents = [f"document{i}" for i in range(count * 2)]
+    jobs = (size or {}).get('documents_per_printer', 2)
+    documents = [f"document{i}" for i in range(count * jobs)]
     initial += [["document", d] for d in documents] + [
-        ["job_for", d, printers[i // 2]] for i, d in enumerate(documents)
+        ["job_for", d, printers[i // jobs]] for i, d in enumerate(documents)
     ]
     initial += [
-        ["document_cartridge", d, f"cartridge{i // 2}_{i % 2 if swap else 0}"]
+        ["document_cartridge", d, f"cartridge{i // jobs}_{i % jobs % 2 if swap else 0}"]
         for i, d in enumerate(documents)
     ]
     initial += [["count", f"n{i}"] for i in range(4)] + [

@@ -35,4 +35,4 @@ dependencies = [
 where = ["src/"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "scripts/clean_operator"]
+testpaths = ["tests"]

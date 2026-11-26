@@ -5,10 +5,14 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from swm.keyframe.actions_extraction import extract_keyframe_actions
 from swm.pddl.generation import RetryState, generate_pddl
+from swm.pddl.planner import solve_pddl
+from swm.pddl.psv import review_inputs
 from swm.pddl.validate import (
+    PSV_PROTOCOL,
     SymbolicTraceError,
     _validate_verdict,
     save_validation,
@@ -16,7 +20,7 @@ from swm.pddl.validate import (
     validate_plan_soundness,
     format_kf_actions,
 )
-from swm.pddl.reorder import ReorderModel
+from swm.pddl.reorder import ReorderModel, plan_actions
 from swm.pddl.strips import format_pddl
 from swm.prompts import construct_instruction_with_steps
 
@@ -122,22 +126,66 @@ def prepare_temporal_gradient_keyframes(task: dict) -> None:
         raise ValueError(f"No keyframes found in {task['keyframe_dir']}")
 
 
-def _round_has_verified_plan(round_dir: Path) -> bool:
-    judge_path = round_dir / "judge.json"
+def _latest_round(save_dir: Path) -> Path | None:
+    rounds = (p for p in save_dir.glob("round*") if p.is_dir() and p.name[5:].isdigit())
+    return max(rounds, key=lambda p: int(p.name[5:]), default=None)
+
+
+def _first_keyframe(keyframe_dir: Path) -> Path:
+    first = min(keyframe_dir.glob("seg_*/*.png"),
+                key=lambda p: (int(p.parent.name.split("_")[-1]), int(p.stem)), default=None)
+    if first is None:
+        raise ValueError(f"No keyframes found in {keyframe_dir}")
+    return first
+
+
+def _round_has_verified_plan(round_dir: Path, task: dict | None = None) -> bool:
     try:
-        judge = json.loads(judge_path.read_text(encoding="utf-8"))
-        return judge['pfv']['pass'] is True and judge['psv']['pass'] is True
-    except (OSError, ValueError, KeyError, TypeError):
+        judge = json.loads((round_dir / "judge.json").read_text(encoding="utf-8"))
+        if not (judge['pfv']['pass'] is True and judge['psv']['pass'] is True):
+            return False
+        meta_path = round_dir / "psv_meta.json"
+        if not meta_path.exists():
+            # Completed legacy rounds remain archived; they carry no current-protocol certificate.
+            return all((round_dir / n).is_file() for n in ("domain.pddl", "problem.pddl", "plan.txt"))
+        meta = json.loads(meta_path.read_text())
+        if meta["protocol"] != PSV_PROTOCOL or meta["status"] != "passed":
+            return False
+        saved = meta["inputs"]
+        if task is None:
+            images = [Path(r[0]) for r in saved["images"]]
+            inputs = review_inputs(round_dir, images, saved["instruction"], saved["kf_actions"],
+                                   saved["model"], saved["robot_configuration"])
+        else:
+            if "image_path" in task:
+                images = [task["image_path"]]
+            elif "keyframe_dir" in task:
+                images = [_first_keyframe(task["keyframe_dir"])]
+            else:
+                images = [Path(r[0]) for r in saved["images"]]
+            steps = ("\n".join(task["steps"]) if "steps" in task else
+                     (round_dir.parent / "kf_actions.txt").read_text())
+            inputs = review_inputs(round_dir, images, task["instruction"], format_kf_actions(steps),
+                                   JUDGE_MODEL, ROBOT_CONFIGURATION)
+        return saved == inputs
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
         return False
 
 
 def _latest_verified_round(task: dict) -> Path | None:
-    rounds = []
-    for round_dir in task['save_dir'].glob("round*"):
-        suffix = round_dir.name.removeprefix("round")
-        if suffix.isdigit() and _round_has_verified_plan(round_dir):
-            rounds.append((int(suffix), round_dir))
-    return max(rounds, default=(0, None), key=lambda item: item[0])[1]
+    latest = _latest_round(task["save_dir"])
+    return latest if latest and _round_has_verified_plan(latest, task) else None
+
+
+def _check_restored_reference(directory: Path) -> bool:
+    """Verify optimal length in a scratch directory without replacing the archived reference."""
+    with TemporaryDirectory() as tmp:
+        copy = Path(tmp)
+        for name in ("domain.pddl", "problem.pddl"):
+            (copy / name).write_bytes((directory / name).read_bytes())
+        if not solve_pddl(copy / "domain.pddl", copy / "problem.pddl", reorder_plan=False):
+            raise RuntimeError(f"Could not verify the saved reference's optimal length in {directory}")
+        return len(plan_actions(copy / "plan.txt")) == len(plan_actions(directory / "plan.txt"))
 
 
 def _extract_action_template(domain_path: Path) -> str:
@@ -224,13 +272,7 @@ def run_task(task: dict, action_template: str | None = None) -> tuple[bool, bool
                 for line in cached_actions.splitlines()
                 if line.strip()
             ]
-            images = sorted(
-                task["keyframe_dir"].glob("seg_*/*.png"),
-                key=lambda path: (path.parent.name, int(path.stem)),
-            )
-            if not images:
-                raise ValueError(f"No keyframes found in {task['keyframe_dir']}")
-            task_img = images[0]
+            task_img = _first_keyframe(task["keyframe_dir"])
         else:
             task_img, steps = extract_keyframe_actions(
                 model_name=ACTION_EXTRACTION_MODEL,
@@ -247,13 +289,14 @@ def run_task(task: dict, action_template: str | None = None) -> tuple[bool, bool
     numbered_steps = format_kf_actions("\n".join(steps))
     retry_state = RetryState()
     planning_success = False
-    rounds = [p for p in save_dir.glob('round*') if p.is_dir() and p.name[5:].isdigit()]
-    latest = max(rounds, key=lambda p: int(p.name[5:]), default=None)
+    latest = _latest_round(save_dir)
     next_round = int(latest.name[5:]) + 1 if latest else 1
     pending = latest if latest and all((latest / n).is_file() for n in (
         'domain.pddl', 'problem.pddl', 'plan.txt', 'judge.json')) else None
     attempts = 0
     while pending is not None or attempts < MAX_PLAN_ATTEMPTS:
+        pfv = None
+        inputs = None
         if pending is not None:
             round_result = {'ok': True, 'round_dir': pending,
                             'domain': (pending / 'domain.pddl').read_text(),
@@ -261,9 +304,34 @@ def run_task(task: dict, action_template: str | None = None) -> tuple[bool, bool
                             'plan': (pending / 'plan.txt').read_text()}
             pending = None
             try:
-                ReorderModel(*(round_result['round_dir'] / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
+                directory = round_result['round_dir']
+                ReorderModel(*(directory / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
             except (ValueError, NotImplementedError):
                 continue
+            inputs = review_inputs(directory, [task_img], task["instruction"], numbered_steps,
+                                   JUDGE_MODEL, ROBOT_CONFIGURATION)
+            same_inputs = False
+            try:
+                meta = json.loads((directory / "psv_meta.json").read_text())
+                same_inputs = meta["protocol"] == PSV_PROTOCOL and meta["inputs"] == inputs
+                if same_inputs:
+                    pfv = _validate_verdict(json.loads((directory / "judge.json").read_text())["pfv"])
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            if not same_inputs:
+                try:
+                    reference_is_optimal = _check_restored_reference(directory)
+                except (OSError, RuntimeError, ValueError) as error:
+                    save_validation(directory, None, None)
+                    (directory / "error.log").write_text(str(error), encoding="utf-8")
+                    return True, False
+                if not reference_is_optimal:
+                    save_validation(directory, None, None)
+                    retry_state.prev_domain = round_result["domain"]
+                    retry_state.prev_problem = round_result["problem"]
+                    retry_state.prev_plan = round_result["plan"]
+                    retry_state.solver_feedback = "The saved reference is not a shortest plan in the current PDDL."
+                    continue
         else:
             generate_kwargs = dict(
                 generate_pddl_model_name=PDDL_MODEL,
@@ -292,23 +360,12 @@ def run_task(task: dict, action_template: str | None = None) -> tuple[bool, bool
         planning_success = True
         retry_state.solver_feedback = ""
         directory = round_result['round_dir']
-        saved = {}
-        if (directory / 'judge.json').is_file():
-            try:
-                saved = json.loads((directory / 'judge.json').read_text())
-                if not isinstance(saved, dict):
-                    saved = {}
-            except json.JSONDecodeError:
-                pass
-        pfv = None
-        if saved:
-            try:
-                pfv = _validate_verdict(saved['pfv'])
-            except (ValueError, KeyError):
-                pass
+        if inputs is None:
+            inputs = review_inputs(directory, [task_img], task["instruction"], numbered_steps,
+                                   JUDGE_MODEL, ROBOT_CONFIGURATION)
         try:
             if pfv is None:
-                save_validation(directory, None, None)
+                save_validation(directory, None, None, inputs=inputs)
                 pfv = validate_plan_feasibility(
                     model=JUDGE_MODEL,
                     first_img=task_img,
@@ -326,14 +383,15 @@ def run_task(task: dict, action_template: str | None = None) -> tuple[bool, bool
             (round_result["round_dir"] / "error.log").write_text(str(error), encoding="utf-8")
             continue
         except (RuntimeError, ValueError) as error:
-            save_validation(directory, None, None)
+            save_validation(directory, None, None, inputs=inputs)
             (directory / 'error.log').write_text(str(error), encoding='utf-8')
             return planning_success, False
 
-        result = save_validation(directory, pfv, None)
+        result = save_validation(directory, pfv, None, inputs=inputs)
         psv = None
         if pfv['pass']:
-            psv = validate_plan_soundness(JUDGE_MODEL, task_img, task['instruction'], numbered_steps, directory)
+            psv = validate_plan_soundness(JUDGE_MODEL, task_img, task['instruction'], numbered_steps,
+                                          directory, robot_configuration=ROBOT_CONFIGURATION)
             result = save_validation(directory, pfv, psv)
 
         if result['pass'] is True:
@@ -398,7 +456,7 @@ def main() -> None:
 
     print(
         f"loaded samples: {total_loaded}, to run: {len(tasks)}, "
-        f"already passed: {already_passed}"
+        f"previously passed (including archived rounds): {already_passed}"
     )
 
     passed = 0

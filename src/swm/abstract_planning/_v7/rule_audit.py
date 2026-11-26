@@ -89,7 +89,7 @@ def successors(game, domain, state, instruction):
     facts = defaultdict(set)
     for a in state: facts[a[0]].add(a[1:])
     def values(p): return {a[0] for a in facts[p] if len(a) == 1}
-    def has(p, *a): return tuple(a) in facts[p]
+    def has(p, *a): return a in facts[p]
     def place(x):
         return next((b for a, b in facts['at'] if a == x), None)
     def one(p):
@@ -102,7 +102,7 @@ def successors(game, domain, state, instruction):
     def emit(name, args, adds=(), deletes=()):
         if name not in ops: return
         operation = (name, *(args[p[1:]] for p in ops[name]))
-        result[operation] = (state-set(deletes)) | set(adds)
+        result[operation] = state.difference(deletes).union(adds)
     def transfer(name, args, entity, old, new, adds=(), deletes=()):
         emit(name, args, [('at', entity, new), *adds], [('at', entity, old), *deletes])
     hand = next(iter(values('hand')), None)
@@ -155,7 +155,7 @@ def successors(game, domain, state, instruction):
                     emit('put_cartridge',base | dict(c=c,loc=location),[('hand_free',hand),('at',c,location)],[('holding',hand,c)])
             for table in values('table'):
                 target = place(table)
-                if not has('ahead',location,target,heading) or any(b==table for a,b in facts['on']): continue
+                if not has('ahead',location,target,heading) or any(b==table for _,b in facts['on']): continue
                 for p in values('printer'):
                     if has('holding',hand,p):
                         emit('put_on_table',base | {'p':p,'table':table,'from':location,'to':target,'d':heading},
@@ -169,9 +169,11 @@ def successors(game, domain, state, instruction):
                 if free and not mounted:
                     emit('pick_up_printer',args,[('holding',hand,p),('empty',target)],[('hand_free',hand),('at',p,target)])
                 count = next(n for obj,n in facts['paper_level'] if obj==p)
-                if mounted and free and number(count)<3:
-                    emit('load_paper',args | dict(previous=count,result='n'+str(number(count)+1)),
-                         [('paper_level',p,'n'+str(number(count)+1))],[('paper_level',p,count)])
+                level = number(count)
+                if mounted and free and level<3:
+                    after = f'n{level+1}'
+                    emit('load_paper',args | dict(previous=count,result=after),
+                         [('paper_level',p,after)],[('paper_level',p,count)])
                 for c in values('cartridge'):
                     if mounted and not powered and not cartridges and has('holding',hand,c) and has('compatible',c,p):
                         emit('install_cartridge',args | dict(c=c),[('hand_free',hand),('installed',p),('in',c,p)], [('holding',hand,c),('calibrated',p)])
@@ -180,14 +182,15 @@ def successors(game, domain, state, instruction):
                 if mounted and cartridges and not powered: emit('power_on',args,[('powered',p)])
                 if powered: emit('power_off',args,[],[('powered',p),('calibrated',p)])
                 if powered and not has('calibrated',p): emit('calibrate',args,[('calibrated',p)])
-                if powered and has('calibrated',p) and number(count)>0:
+                if powered and has('calibrated',p) and level>0:
+                    after = f'n{level-1}'
                     for doc in values('document'):
                         for c in cartridges:
                             if not has('printed',doc) and has('job_for',doc,p) and has('document_cartridge',doc,c):
                                 deletes = [('paper_level',p,count)]
                                 if 'Printing consumes calibration' in instruction: deletes.append(('calibrated',p))
-                                emit('print_document',args | dict(doc=doc,c=c,previous=count,result='n'+str(number(count)-1)),
-                                     [('printed',doc),('paper_level',p,'n'+str(number(count)-1))], deletes)
+                                emit('print_document',args | dict(doc=doc,c=c,previous=count,result=after),
+                                     [('printed',doc),('paper_level',p,after)], deletes)
     elif game == 'frozenlake':
         for target in values('safe'):
             if not adjacent(location,target): continue
@@ -224,6 +227,7 @@ def successors(game, domain, state, instruction):
                     emit(name,base | dict(i=item,plate=item,loc=location),[('holding',hand,item)],[('hand_free',hand),('at',item,location)])
         for h,item in facts['holding']:
             if h==hand: emit('put_down',base | dict(item=item,loc=location),[('hand_free',hand),('at',item,location)],[('holding',hand,item)])
+        recipes = re.search(r'^Recipes: (.*)$',instruction,re.M)
         for tool in values('tool'):
             if place(tool)!=location: continue
             if free and not has('clean',tool): emit('clean_tool',base | dict(tool=tool,loc=location),[('clean',tool)])
@@ -231,7 +235,6 @@ def successors(game, domain, state, instruction):
             for i in values('ingredient'):
                 if not has('holding',hand,i): continue
                 phase = next(p for obj,p in facts['stage'] if obj==i)
-                recipes = re.search(r'^Recipes: (.*)$',instruction,re.M)
                 recipe = next((part.split(': ',1)[1] for part in recipes[1].split('; ') if part.startswith(i+': ')),None) if recipes else None
                 assert recipe is not None, ('missing recipe',i)
                 methods = re.findall(r'--([a-z]+)-->',recipe)
@@ -325,25 +328,26 @@ def successors(game, domain, state, instruction):
                     emit('pick',args,[('holding',gripper,ball)],[('at',ball,room),('hand_free',gripper)])
                 if has('holding',gripper,ball): emit('drop',args,[('at',ball,room),('hand_free',gripper)],[('holding',gripper,ball)])
     elif game == 'miconic':
-        lift = one('lift'); floor = place(lift); counts = values('free_slots')
+        lift = one('lift'); floor = place(lift); count = next(iter(values('free_slots')), None)
         for target in values('floor'):
             if target!=floor: transfer('up' if number(target)>number(floor) else 'down',dict(f1=floor,f2=target,lift=lift),lift,floor,target)
         for p in values('passenger'):
             args = dict(f=floor,p=p,lift=lift)
-            if counts:
-                count = next(iter(counts)); args.update(previous=count)
-            if not has('served',p) and not has('in',p,lift) and has('origin',p,floor) and (not counts or number(count)>0):
+            if has('in',p,lift):
+                if not has('destin',p,floor): continue
+                name, change = 'depart', 1
+                adds, deletes = [('served',p),('not_boarded',p)],[('in',p,lift),('not_served',p)]
+            elif not has('served',p) and has('origin',p,floor) and (count is None or number(count)>0):
+                name, change = 'board', -1
                 adds, deletes = [('in',p,lift)],[('not_boarded',p)]
-                if counts:
-                    after='n'+str(number(count)-1); args['result']=after
-                    adds.append(('free_slots',after));deletes.append(('free_slots',count))
-                emit('board',args,adds,deletes)
-            if has('in',p,lift) and has('destin',p,floor):
-                adds,deletes=[('served',p),('not_boarded',p)],[('in',p,lift),('not_served',p)]
-                if counts:
-                    after='n'+str(number(count)+1);args['result']=after
-                    adds.append(('free_slots',after));deletes.append(('free_slots',count))
-                emit('depart',args,adds,deletes)
+            else:
+                continue
+            if count is not None:
+                after = f'n{number(count)+change}'
+                args.update(previous=count,result=after)
+                adds.append(('free_slots',after))
+                deletes.append(('free_slots',count))
+            emit(name,args,adds,deletes)
     elif game == 'floortile':
         robots = values('robot'); tiles = values('tile'); occupied={place(r) for r in robots}; painted={t for t,c in facts['painted']}
         for r in robots:
@@ -366,16 +370,17 @@ def successors(game, domain, state, instruction):
             difference=number(k)-number(h)
             if abs(difference)<=1:
                 transfer('move' if difference==0 else 'move_up' if difference==1 else 'move_down',{'from':origin,'to':target,'h':h,'hfrom':h,'hto':k,'robot':robot},robot,origin,target)
-            if carrying and difference==0 and not has('is_depot',target) and 'h'+str(number(k)+1) in values('numb'):
-                after='h'+str(number(k)+1)
+            after = f'h{number(k)+1}'
+            if carrying and difference==0 and not has('is_depot',target) and after in values('numb'):
                 emit('place_block',dict(rpos=origin,bpos=target,hbefore=k,hafter=after,robot=robot),[('height',target,after)],[('height',target,k),('has_block',)])
             if not carrying and difference==1:
                 emit('remove_block',dict(rpos=origin,bpos=target,hbefore=k,hafter=h,robot=robot),[('height',target,h),('has_block',)],[('height',target,k)])
     elif game == 'briefcase':
         case=one('briefcase'); room=place(case)
+        moving = {case} | {x for x,h in facts['in'] if h==case}
+        deletes = [('at',x,room) for x in moving]
         for target in values('location'):
-            moving={case}|{x for x,h in facts['in'] if h==case}
-            emit('move',dict(m=room,l=target,briefcase=case),[('at',x,target) for x in moving],[('at',x,room) for x in moving])
+            emit('move',dict(m=room,l=target,briefcase=case),[('at',x,target) for x in moving],deletes)
         for item in values('portable'):
             if has('in',item,case):emit('take_out',dict(x=item,briefcase=case),[],[('in',item,case)])
             elif place(item)==room:emit('put_in',dict(x=item,l=room,briefcase=case),[('in',item,case)])
@@ -396,11 +401,13 @@ def successors(game, domain, state, instruction):
                     emit('colfromfreecell' if is_free else 'move_b' if is_bottom else 'move',args | dict(newcard=new),
                          [*source_add,('on',card,new),('clear',card)],[*source_del,('clear',new)])
             if not is_free and number(cells)>0:
-                emit('sendtofree_b' if is_bottom else 'sendtofree',args | dict(ncells='celln'+str(number(cells)-1)),
-                     [*source_add,('incell',card),('cellspace','celln'+str(number(cells)-1))],[*source_del,('clear',card),('cellspace',cells)])
+                after = f'celln{number(cells)-1}'
+                emit('sendtofree_b' if is_bottom else 'sendtofree',args | dict(ncells=after),
+                     [*source_add,('incell',card),('cellspace',after)],[*source_del,('clear',card),('cellspace',cells)])
             if (is_free or not is_bottom) and number(cols)>0:
-                emit('newcolfromfreecell' if is_free else 'sendtonewcol',args | dict(ncols='coln'+str(number(cols)-1)),
-                     [*source_add,('bottomcol',card),('clear',card),('colspace','coln'+str(number(cols)-1))],[*source_del,('colspace',cols)])
+                after = f'coln{number(cols)-1}'
+                emit('newcolfromfreecell' if is_free else 'sendtonewcol',args | dict(ncols=after),
+                     [*source_add,('bottomcol',card),('clear',card),('colspace',after)],[*source_del,('colspace',cols)])
             for home in homes:
                 if suits[home]==suits[card] and ranks[card]==ranks[home]+1:
                     emit('homefromfreecell' if is_free else 'sendtohome_b' if is_bottom else 'sendtohome',args | dict(homecard=home,vhomecard='n'+str(ranks[home])),

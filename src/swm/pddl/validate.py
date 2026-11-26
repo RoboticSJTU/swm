@@ -4,14 +4,19 @@ from collections import Counter, defaultdict
 import json
 import re
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from swm.llm import call_gpt_json
+from swm.pddl.psv import MAX_CLASSES, encode_plan_tree, group_clusters, review_inputs
+from swm.pddl.psv_observer import AvailabilityObserver
 from swm.pddl.reorder import (
     SameLengthModel, evaluate, expression_bits,
     search_same_length_classes as search_plan_classes,
 )
 from swm.pddl.strips import parse_sexpr_file
 from swm.prompts import read_prompt
+
+PSV_PROTOCOL = 'availability_v4_lcs_tree_cap50_v1'
 
 
 def format_kf_actions(text: str) -> str:
@@ -39,7 +44,8 @@ def _validate_verdict(result):
 
 
 def _call_validated_judge(
-    model: str, prompt: str, first_img: Path | list[Path], capture: dict | None = None
+    model: str, prompt: str, first_img: Path | list[Path], capture: dict | None = None,
+    *, reasoning_effort: str | None = None,
 ) -> dict:
     if isinstance(first_img, (list, tuple)) and len(first_img) > 1:
         prompt = "All attached images are views of the same initial scene. Use the complete set of views and preserve object identity across views.\n\n" + prompt
@@ -49,6 +55,8 @@ def _call_validated_judge(
         attempt_capture = {"attempt": attempt}
         try:
             call_kwargs = {"attempts": 1}
+            if reasoning_effort is not None:
+                call_kwargs["reasoning_effort"] = reasoning_effort
             if capture is not None:
                 call_kwargs["capture"] = attempt_capture
             images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
@@ -188,6 +196,8 @@ def build_group_judge_prompt(
     multiview: bool = False,
     exact_length: int | None = None,
     comparison_order: list[int] | None = None,
+    tree: bool = False,
+    robot_configuration: str | None = None,
 ) -> str:
     """用原审核模板呈现完整计划；支持重复绑定及固定比较锚点。"""
     actions = {item["action_id"]: item["description"] for item in action_library}
@@ -218,15 +228,20 @@ def build_group_judge_prompt(
     if comparison_order is not None:
         trace.append("Comparison anchor (context only; no candidate verdict requested): " +
                      ' -> '.join(f'A{i:02d}' for i in comparison_order))
-    trace.append("Plan orders:")
-    trace.extend(candidate['id'] + ': ' + ' -> '.join(f'A{i:02d}' for i in candidate['order'])
-                 for candidate in candidates)
+    if tree:
+        trace.append(encode_plan_tree(candidates))
+    else:
+        trace.append("Plan orders:")
+        trace.extend(candidate['id'] + ': ' + ' -> '.join(f'A{i:02d}' for i in candidate['order'])
+                     for candidate in candidates)
     prompt = read_prompt("verify_soundness.txt").format(
         instruction=instruction, kf_actions=format_kf_actions(kf_actions),
         evaluated_symbolic_trace="\n".join(trace), comparison_question=comparison_question,
     )
     if multiview:
         prompt = "All attached images show the same initial scene; preserve object identity across views.\n\n" + prompt
+    if robot_configuration:
+        prompt = "Robot configuration: " + robot_configuration + "\n\n" + prompt
     return prompt
 
 
@@ -240,6 +255,8 @@ def validate_plan_feasibility(
     pddl_plan: str | Path | None = None,
     capture: dict | None = None,
     scene_context: str = "",
+    *,
+    reasoning_effort: str | None = None,
 ):
     kf_actions = format_kf_actions(kf_actions)
     candidate_plan = candidate_plan.strip()
@@ -254,7 +271,7 @@ def validate_plan_feasibility(
         prompt = "Official benchmark context:\n" + scene_context + "\n\n" + prompt
     if capture is not None:
         capture.update({"decision_source": "vlm", "model": model})
-    return _call_validated_judge(model, prompt, first_img, capture)
+    return _call_validated_judge(model, prompt, first_img, capture, reasoning_effort=reasoning_effort)
 
 
 PROCESS_SCHEMA = {'version': 3,
@@ -787,7 +804,7 @@ def _action_library(model):
 
 
 def group_plan_classes(model, representatives, observer, instruction, kf_actions, *, multiview=False):
-    """按完整代表集形成固定焦点组，参考类沿用PFV，每组独立分包。"""
+    """Reproduce the historical fixed-focus protocol for its research callers."""
     plans = []
     for candidate in representatives:
         state, events = model.initial, []
@@ -834,8 +851,19 @@ def group_plan_classes(model, representatives, observer, instruction, kf_actions
     return library, batches
 
 
-def save_validation(round_dir, pfv, psv):
-    """Persist only the PFV and PSV output verdicts; unfinished output is null."""
+def _write_validation_json(path, value):
+    stream = NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False)
+    temp = Path(stream.name)
+    try:
+        with stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def save_validation(round_dir, pfv, psv, *, inputs=None):
+    """Keep flat verdicts in judge.json and the current protocol's counts alongside them."""
     verdict = None
     if psv is not None and psv['status'] == 'rejected':
         verdict = {k: psv['counterexample'][k] for k in ('reasoning', 'pass', 'feedback')}
@@ -843,10 +871,24 @@ def save_validation(round_dir, pfv, psv):
         verdict = {'reasoning': 'Complete operation-logic class coverage; no rejected representative.',
                    'pass': True, 'feedback': ''}
     result = {'pfv': pfv, 'psv': verdict}
-    path = Path(round_dir) / 'judge.json'
-    temporary = path.with_suffix('.json.tmp')
-    temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    directory = Path(round_dir)
+    meta_path = directory / 'psv_meta.json'
+    # Invalidate the verdict first on a reset; a transient sidecar cannot certify it.
+    _write_validation_json(directory / 'judge.json', result)
+    if psv is not None and psv.get('protocol') == PSV_PROTOCOL:
+        _write_validation_json(meta_path, {
+            'protocol': PSV_PROTOCOL, 'capacity': MAX_CLASSES, 'status': psv['status'],
+            'inputs': psv.get('inputs'),
+            'raw_plans': psv.get('legal_orders'), 'classes': psv.get('classes'),
+            'pending_classes': psv.get('pending_classes'), 'natural_clusters': psv.get('natural_clusters'),
+            'first_packets': psv.get('groups'), 'request_attempts': len(psv['requests']),
+        })
+    elif inputs is not None:
+        _write_validation_json(meta_path, {
+            'protocol': PSV_PROTOCOL, 'status': 'pfv_only', 'inputs': inputs,
+        })
+    else:
+        meta_path.unlink(missing_ok=True)
     passed, feedback = None, ''
     if pfv is not None and not pfv['pass']:
         passed, feedback = False, pfv['feedback']
@@ -856,7 +898,8 @@ def save_validation(round_dir, pfv, psv):
     return {**result, 'pass': passed, 'feedback': feedback}
 
 
-def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir):
+def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir, *,
+                            robot_configuration=None):
     """Review every other operation-logic class after this round's PFV passed.
 
     Search and transport failures remain incomplete. Only completed, validated
@@ -868,28 +911,41 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
     pfv = _validate_verdict(record['pfv'])
     if not pfv['pass']:
         raise ValueError('PSV requires a passed PFV')
-    psv = {'status': 'incomplete', 'search_complete': False, 'reviews': [], 'requests': [],
+    psv = {'status': 'incomplete', 'protocol': PSV_PROTOCOL, 'search_complete': False,
+           'reviews': [], 'requests': [],
            'instruction_verdict_inherited': False, 'scope': 'exact_reference_length_original_bindings'}
     def save():
         save_validation(directory, pfv, psv)
 
+    save()
     try:
+        images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
+        psv['inputs'] = review_inputs(directory, images, instruction, kf_actions, model, robot_configuration)
         symbolic = SameLengthModel(*(directory / n for n in ('domain.pddl', 'problem.pddl', 'plan.txt')))
-        observer = LogicObserver(symbolic)
+        observer = AvailabilityObserver(LogicObserver(symbolic))
         representatives, proof = search_plan_classes(symbolic, observer)
         psv.update(search_complete=proof['coverage_complete'], search_status=proof['status'],
                    legal_orders=proof['raw_orders_including_reference'],
                    legal_order_count_exact=proof['raw_order_count_exact'], classes=len(representatives),
                    covered_orders=proof['accounted_orders'], class_counts=proof['classes'],
                    factorization=proof['factorization'])
-        # The reference operation-logic class already has this round's PFV.
+        if not proof['coverage_complete']:
+            raise ValueError('Cannot group an incomplete class inventory')
+        references = [c for c in representatives if c['id'] == 'reference']
+        if len(references) != 1 or list(references[0]['order']) != list(symbolic.reference_order):
+            raise ValueError('The PFV-covered class must represent this exact reference plan')
         pending = [c for c in representatives if c['id'] != 'reference']
+        by_rank = {c['class_rank']: c for c in pending}
+        if len(by_rank) != len(pending) or len({c['id'] for c in pending}) != len(pending):
+            raise ValueError('Repeated pending rank or candidate ID')
+        clusters, packets = group_clusters(symbolic, pending, capacity=MAX_CLASSES)
+        if (sorted(rank for packet in packets for rank in packet) != sorted(by_rank)
+                or any(not 1 <= len(packet) <= MAX_CLASSES for packet in packets)):
+            raise ValueError('PSV packets must cover every pending class exactly once within capacity')
+        psv.update(pending_classes=len(pending), natural_clusters=len(clusters), groups=len(packets),
+                   reference_review_source='pfv')
         found = {}
-        images = list(first_img) if isinstance(first_img, (list, tuple)) else [first_img]
-        library, batches = group_plan_classes(symbolic, representatives, observer, instruction, kf_actions,
-                                             multiview=len(images) > 1)
-        psv['groups'] = len(batches)
-        psv['reference_review_source'] = 'pfv'
+        library = _action_library(symbolic) if packets else []
 
         def checkpoint():
             psv['reviews'] = [found[c['id']] for c in pending if c['id'] in found]
@@ -907,7 +963,12 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
 
         checkpoint()
 
-        def review(candidates, prompt):
+        def review(candidates):
+            prompt = build_group_judge_prompt(
+                library, candidates, instruction=instruction, kf_actions=kf_actions, tree=True,
+                exact_length=symbolic.length, multiview=len(images) > 1,
+                robot_configuration=robot_configuration,
+            )
             capture = {}
             request = {'candidates': candidates, 'status': 'in_progress'}
             psv['requests'].append(request)
@@ -917,56 +978,45 @@ def validate_plan_soundness(model, first_img, instruction, kf_actions, round_dir
                                          attempts=1, reasoning_effort='xhigh',
                                          temperature=0, capture=capture)
                 request['response'] = response
-                if set(response) != {'results'} or not isinstance(response['results'], list):
+                if not isinstance(response, dict) or set(response) != {'results'} or not isinstance(response['results'], list):
                     raise ValueError('Group judge must return a results list')
                 allowed = {c['id']: c for c in candidates}
-                counts = defaultdict(int)
-                for row in response['results']:
-                    if isinstance(row, dict) and isinstance(row.get('candidate_id'), str):
-                        counts[row['candidate_id']] += 1
+                counts = Counter(row['candidate_id'] for row in response['results']
+                                 if isinstance(row, dict) and isinstance(row.get('candidate_id'), str))
+                accepted = 0
                 for row in response['results']:
                     if not isinstance(row, dict) or set(row) != {'candidate_id', 'reasoning', 'pass', 'feedback'}:
                         continue
                     identifier = row['candidate_id']
-                    if not isinstance(identifier, str) or not identifier or not identifier.strip():
-                        continue
-                    original_id = identifier
-                    if len(candidates) == len(response['results']) == 1:
-                        identifier = candidates[0]['id']
-                    if identifier not in allowed or counts[original_id] != 1:
+                    if not isinstance(identifier, str) or identifier not in allowed or counts[identifier] != 1:
                         continue
                     try:
                         verdict = _validate_verdict({k: row[k] for k in ('reasoning', 'pass', 'feedback')})
                     except ValueError:
                         continue
                     found[identifier] = {'candidate_id': identifier, 'order': allowed[identifier]['order'],
-                                         **verdict, 'response_candidate_id': original_id,
+                                         **verdict, 'response_candidate_id': identifier,
                                          'request_index': len(psv['requests']) - 1}
-                request['status'] = 'complete'
+                    accepted += 1
+                if accepted == len(allowed) == len(response['results']):
+                    request['status'] = 'complete'
+                else:
+                    request['status'] = 'partial' if accepted else 'invalid_response'
             except Exception as error:
                 request.update(status='request_error', error_type=type(error).__name__, error=str(error))
             request['capture'] = {k: v for k, v in capture.items() if k not in {'raw_output', 'json_text'}}
             checkpoint()
 
-        for batch in batches:
-            candidates = [c for c in batch['candidates'] if c['id'] not in found]
-            if not candidates:
-                continue
-            review(candidates, batch['prompt'] if len(candidates) == len(batch['candidates']) else
-                   build_group_judge_prompt(library, candidates, instruction=instruction,
-                                            kf_actions=kf_actions, multiview=len(images) > 1,
-                                            exact_length=symbolic.length, comparison_question=batch['comparison_question'],
-                                            comparison_order=batch['comparison_order']))
+        for ranks in packets:
+            candidates = [by_rank[rank] for rank in sorted(ranks)]
+            review(candidates)
             # Invalid/missing rows get one independent retry. Valid rejections
             # and valid passes are never retried to seek a different answer.
             for candidate in candidates:
                 if candidate['id'] not in found:
-                    review([candidate], build_group_judge_prompt(library, [candidate], instruction=instruction,
-                                                                kf_actions=kf_actions, multiview=len(images) > 1,
-                                                                exact_length=symbolic.length, comparison_question=batch['comparison_question'],
-                                                                comparison_order=batch['comparison_order']))
-        checkpoint()
-    except (OSError, ValueError, KeyError, NotImplementedError, OverflowError) as error:
-        psv.update(status='incomplete', error_type=type(error).__name__, error=str(error))
+                    review([candidate])
+    except (OSError, ValueError, KeyError, NotImplementedError, OverflowError, MemoryError) as error:
+        psv['status'] = 'rejected' if 'counterexample' in psv else 'incomplete'
+        psv.update(error_type=type(error).__name__, error=str(error))
         save()
     return psv

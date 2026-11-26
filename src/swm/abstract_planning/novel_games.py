@@ -3,17 +3,11 @@
 from collections import deque
 import random
 
-from .grid_games import DIRECTIONS, cell, rc
+from ._v7.grid_games import DIRECTIONS, board_edges, cell, rc, step_cell
 from .model import action, make_domain, make_problem, parse_sexpr, section, fields, condition, apply_effect
 from .render import Scene, INK
 
 GAMES = ["phase_gates", "energy_route", "coupled_tokens", "conveyor_route"]
-
-
-def step_cell(pos, direction):
-    r, c = rc(pos)
-    dr, dc = DIRECTIONS[direction]
-    return cell(r + dr, c + dc)
 
 
 def landing(spec, entry):
@@ -85,27 +79,30 @@ def path_to(parents, target):
     while parents[target] is not None:
         target, act = parents[target]
         plan.append(act)
-    return list(reversed(plan))
+    plan.reverse()
+    return plan
 
 
 def simulate(scenario, plan):
-    state = tuple(scenario["novel"]["start"])
+    game, spec = scenario["game"], scenario["novel"]
+    state = tuple(spec["start"])
     trace = [state]
     for act in plan:
-        possible = dict(successors(scenario["game"], scenario["novel"], state))
-        if tuple(act) not in possible:
+        possible = dict(successors(game, spec, state))
+        operation = tuple(act)
+        if operation not in possible:
             raise ValueError(f"Illegal game action: {act}, state={state}")
-        state = possible[tuple(act)]
+        state = possible[operation]
         trace.append(state)
-    goal = scenario["novel"]["goal"]
-    if tuple(state[:len(goal)]) != tuple(goal):
+    goal = tuple(spec["goal"])
+    if state[:len(goal)] != goal:
         raise ValueError("Independent game goal not reached")
     return trace
 
 
 def formalize(game, seed, spec):
     cells = spec["cells"]
-    edges = [[a, step_cell(a, d), d] for a in cells for d in DIRECTIONS if step_cell(a, d) in cells]
+    edges = board_edges(cells)
     initial = [["cell", c] for c in cells]
     objects = list(cells)
     vocab = {"at_player": "the player is at cell {0}", "cell": "{0} is a walkable cell"}
@@ -162,7 +159,7 @@ def formalize(game, seed, spec):
     prompt += "r01c01 is top-left; rows increase down, columns right. Walls and boundaries block movement.\n"
     legend = {"phase_gates": "Arches are gates; the header shows phase.", "energy_route": "The header shows current energy.", "coupled_tokens": "North is up; A/B label the tokens.", "conveyor_route": ""}[game]
     if legend: prompt += legend + "\n"
-    from .instructions import operation_list
+    from .contract import operation_list
     prompt += operation_list(domain)
     return {"game": game, "seed": seed, "variant": "base" if spec.get("red_phase", 0) == 0 and spec.get("rough_cost", 2) == 2 else "rule_changed", "domain": domain, "problem": make_problem(game, [x for x in objects if x not in constants], initial, goal), "vocabulary": vocab, "notes": [rules], "novel": spec, "instruction": prompt, "source": {"repository": "local held-out geometric game rules"}}
 
@@ -211,7 +208,7 @@ def generate(game, seed):
     return formalize(game, seed, spec)
 
 
-def render(scenario):
+def render(scenario, *, pixel_digest=True):
     s = Scene(scenario)
     spec, game = scenario["novel"], scenario["game"]
     unit, ox, oy = 132, 210, 170
@@ -251,7 +248,10 @@ def render(scenario):
                     s.draw.polygon([(x+70,y+20),(x+41,y+70),(x+65,y+67),(x+56,y+112),(x+96,y+53),(x+72,y+58)],fill="#f4d12f",outline=INK)
             elif game == "conveyor_route" and name in spec["belts"]:
                 dr,dc = DIRECTIONS[spec["belts"][name]]
-                s.arrow((x+66-dc*30,y+66-dr*30),(x+66+dc*32,y+66+dr*32),fill="#24738a",width=9)
+                cx,cy=x+66,y+66
+                s.draw.line((cx-dc*30,cy-dr*30,cx+dc*8,cy+dr*8),fill="#24738a",width=9)
+                s.draw.polygon([(cx+dc*32,cy+dr*32),(cx+dc*4-dr*18,cy+dr*4+dc*18),
+                                (cx+dc*4+dr*18,cy+dr*4-dc*18)],fill="#24738a")
             if game == "coupled_tokens":
                 for i,label in enumerate(["A","B"]):
                     if name == spec["start"][i]:
@@ -262,7 +262,7 @@ def render(scenario):
                 s.object("player","player",(x+66,y+55),52,location=name, label=False)
                 s.label((x+66,y+102),"player",18,True,anchor="center")
                 s.fact("at_player",name)
-    return s.finish()
+    return s.finish(pixel_digest=pixel_digest)
 
 
 def verify_transitions(scenario):

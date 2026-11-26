@@ -8,6 +8,7 @@ from collections import defaultdict
 from functools import lru_cache
 from types import SimpleNamespace
 from PIL import Image, ImageDraw, ImageFont, ImageChops
+from swm.pddl.reorder import effect_predicates
 from .model import parse_sexpr, section
 
 WIDTH, HEIGHT = 1440, 1080
@@ -122,7 +123,8 @@ class Scene:
         size = max(MIN_LABEL_SIZE, size)
         value = str(value)
         x, y = xy
-        box = self.draw.textbbox((0, 0), value, font=font(size, bold))
+        face = font(size, bold)
+        box = self.draw.textbbox((0, 0), value, font=face)
         w, h = box[2] - box[0], box[3] - box[1]
         if anchor == "center":
             x -= w / 2
@@ -131,7 +133,7 @@ class Scene:
         bbox = [round(x), round(y), round(x + w), round(y + h)]
         if min(bbox[:2]) < 0 or bbox[2] > self.image.width or bbox[3] > self.image.height:
             raise ValueError((self.game, "Clipped label", value, bbox))
-        self.draw.text((x, y - box[1]), value, font=font(size, bold), fill=fill)
+        self.draw.text((x, y - box[1]), value, font=face, fill=fill)
         self.labels.append({"text": value, "bbox": bbox, "font_size": size})
         return bbox
 
@@ -257,9 +259,8 @@ class Scene:
             )
 
     def finish(self, *, pixel_digest=True):
-        missing = {
-            a for a in self.facts if a[0] in dynamic_predicates(self.domain)
-        } - self.represented
+        dynamic = dynamic_predicates(self.domain)
+        missing = {a for a in self.facts - self.represented if a[0] in dynamic}
         if missing:
             raise ValueError((self.game, "Undrawn dynamic state", sorted(missing)))
         background = Image.new("RGB", self.image.size, self.palette["ground"])
@@ -297,25 +298,11 @@ class Scene:
 
 
 def dynamic_predicates(domain):
-    result = set()
-
-    def visit(node):
-        if not isinstance(node, list) or not node:
-            return
-        if node[0] in {"and", "not"}:
-            for child in node[1:]:
-                visit(child)
-        elif node[0] == "when":
-            visit(node[2])
-        elif node[0] == "forall":
-            visit(node[2])
-        else:
-            result.add(node[0])
-
-    for action in parse_sexpr(domain):
-        if isinstance(action, list) and action[:1] == [":action"]:
-            visit(action[action.index(":effect") + 1])
-    return result
+    return set().union(*(
+        effect_predicates(action[action.index(":effect") + 1])
+        for action in parse_sexpr(domain)
+        if isinstance(action, list) and action[:1] == [":action"]
+    ))
 
 
 def sprite(s, kind, center, size, accent):
@@ -829,8 +816,7 @@ def block_scene(s, scenario):
     game = s.game
     if game == "blocks":
         roots = [a[0] for a in state["on_table"]]
-        piles = stacks(state, roots)
-        piles = [[base, *p] for base, p in zip(roots, piles)]
+        piles = [[base, *p] for base, p in zip(roots, stacks(state, roots))]
         n = max(len(p) for p in piles)
         unit = min(108, 590 / n)
         width = min(145, 1130 / max(len(piles), 1))
@@ -1277,6 +1263,7 @@ def grid_scene(s, scenario):
             occupancy[cell].append((obj, pred))
             s.fact(pred, obj, cell)
     heading = state["facing"][0][0] if state["facing"] else None
+    dynamic = dynamic_predicates(s.domain)
     for cell, items in sorted(occupancy.items()):
         cx, cy = positions[cell]
         r, c = (int(v) - 1 for v in re.findall(r"\d+", cell))
@@ -1403,7 +1390,7 @@ def grid_scene(s, scenario):
             attributes = {
                 k: s.present(k, name)
                 for k in ("clean", "powered", "calibrated", "mounted", "table_free")
-                if k in dynamic_predicates(s.domain)
+                if k in dynamic
             }
             s.object(name, kind, (px, py), size, cell, attributes, label=False)
             if name != "player":
@@ -1525,21 +1512,25 @@ def room_scene(s, scenario):
     cols = min(3, len(rooms))
     rows = math.ceil(len(rooms) / cols)
     pw = 1300 / cols
-    counts = [sum(r == room and not s.present("in", n) for n, r in state["at"])
-              for room in rooms]
     case_rows = max(1, math.ceil(len(state["in"]) / 3))
     case_reserve = 160 + 100 * case_rows
-    requirements = [math.ceil(n / 4) * 100 +
-                    (case_reserve if game == "briefcase" and s.present("is_at", room)
-                     else 230 if game == "gripper" else 110)
-                    for room, n in zip(rooms, counts)]
-    ph = max(330 if game == "briefcase" else 350, *requirements)
+    room_layout = []
+    for room in rooms:
+        objects = [name for name, location in state["at"]
+                   if location == room and not s.present("in", name)]
+        has_case = game == "briefcase" and s.present("is_at", room)
+        reserve = case_reserve if has_case else 230 if game == "gripper" else 110
+        room_layout.append((room, objects, has_case, reserve))
+    ph = max(330 if game == "briefcase" else 350, *(
+        math.ceil(len(objects) / 4) * 100 + reserve
+        for _, objects, _, reserve in room_layout
+    ))
     canvas_height = max(HEIGHT, math.ceil(90 + rows * ph + 24))
     if canvas_height != s.image.height:
         s.image.close()
         s.image = Image.new("RGB", (WIDTH, canvas_height), s.palette["ground"])
         s.draw = ImageDraw.Draw(s.image)
-    for i, room in enumerate(rooms):
+    for i, (room, objects, has_case, reserve) in enumerate(room_layout):
         x = 60 + (i % cols) * pw
         y = 90 + (i // cols) * ph
         s.texture((x, y, x + pw - 18, y + ph - 18), "wood")
@@ -1548,9 +1539,7 @@ def room_scene(s, scenario):
         )
         s.label((x + 15, y + 13), room, 27, True)
         s.regions[room] = list(map(round, (x, y, x + pw - 18, y + ph - 18)))
-        objects = [n for n, r in state["at"] if r == room and not s.present("in", n)]
-        has_case = game == "briefcase" and s.present("is_at", room)
-        object_height = ph - (case_reserve if has_case else 230 if game == "gripper" else 110)
+        object_height = ph - reserve
         for j, name in enumerate(objects):
             ncols = min(4, len(objects))
             nrows = math.ceil(len(objects) / ncols)
@@ -1905,8 +1894,7 @@ def delivery_scene(s, scenario):
         row, col = divmod(i, cols)
         col = col if row % 2 == 0 else cols - 1 - col
         positions[room] = (50 + col * pw, 50 + row * ph)
-    for i in range(len(rooms) - 1):
-        a, b = rooms[i : i + 2]
+    for a, b in zip(rooms, rooms[1:]):
         ax, ay = positions[a]
         bx, by = positions[b]
         s.draw.line(
@@ -1938,8 +1926,7 @@ def delivery_scene(s, scenario):
                 label=False,
             )
             s.fact("at_player", room)
-    for i in range(len(rooms) - 1):
-        a, b = rooms[i : i + 2]
+    for i, (a, b) in enumerate(zip(rooms, rooms[1:])):
         ax, ay = positions[a]
         bx, by = positions[b]
         mx = (ax + bx) / 2 + room_width / 2
